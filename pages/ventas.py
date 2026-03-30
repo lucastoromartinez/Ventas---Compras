@@ -95,7 +95,7 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 # Botón volver
 st.markdown('<div class="back-btn">', unsafe_allow_html=True)
 if st.button("← Volver al inicio"):
-    st.switch_page(st.Page("app_principal.py", title="Inicio", icon="⚡"))
+    st.switch_page("app_home.py")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("""
