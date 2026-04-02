@@ -1,5 +1,5 @@
 """
-Lógica de conciliación bancaria - Banco Galicia
+Lógica de conciliación bancaria - Banco Galicia (v2)
 """
 import re
 from io import BytesIO
@@ -24,8 +24,7 @@ def load_excel_file(file) -> pd.DataFrame:
 def normalize_mayor(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
-        df.columns
-        .str.strip()
+        df.columns.str.strip()
         .str.replace(r"\s+", " ", regex=True)
         .str.replace(r"[^\x20-\x7EáéíóúÁÉÍÓÚñÑüÜ]", "", regex=True)
         .str.title()
@@ -89,7 +88,7 @@ def normalize_extracto_galicia(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# CATEGORIZACIÓN
+# HELPERS
 # ─────────────────────────────────────────────
 
 def _limpiar(texto: str) -> str:
@@ -102,30 +101,44 @@ def _limpiar(texto: str) -> str:
 def _contiene(texto_limpio: str, *palabras: str) -> bool:
     return any(_limpiar(p) in texto_limpio for p in palabras)
 
+def _get_col(df, *candidates):
+    for c in candidates:
+        if c in df.columns: return c
+    raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
+
+def _find_col(df, keyword):
+    for c in df.columns:
+        if keyword.lower() in c.lower(): return c
+    raise KeyError(f"Columna con '{keyword}' no encontrada en {list(df.columns)}")
+
+
+# ─────────────────────────────────────────────
+# CATEGORIZACIÓN
+# ─────────────────────────────────────────────
 
 def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     df   = df.copy()
     desc = df["descripcion"].apply(_limpiar)
 
     condiciones = [
-        desc.apply(lambda d: _contiene(d, "debitocontracargoventa", "debitodevolucionventa",
-                   "devolucionpagocontransferencia", "naveventacontarjeta", "navepagocontransferencia")),
-        desc.apply(lambda d: _contiene(d, "serviciopagoaProveedores", "serviciopagoproveedores")),
-        desc.apply(lambda d: _contiene(d, "ajusteaportespromocionGalicia") or
+        desc.apply(lambda d: _contiene(d, "debitocontracargoventa","debitodevolucionventa",
+                   "devolucionpagocontransferencia","naveventacontarjeta","navepagocontransferencia")),
+        desc.apply(lambda d: _contiene(d, "serviciopagoaProveedores","serviciopagoproveedores")),
+        desc.apply(lambda d: _contiene(d,"ajusteaportespromocionGalicia") or
                    ("ajuste" in d and ("aporte" in d or "aportes" in d) and "promocion" in d)),
         desc.apply(lambda d: "echeq" in d),
-        desc.apply(lambda d: _contiene(d, "rescatefima", "suscripcionfima")),
-        desc.apply(lambda d: _contiene(d, "iva","comgestiontransffdosentrebcos","comisionserviciodecuenta",
+        desc.apply(lambda d: _contiene(d, "rescatefima","suscripcionfima")),
+        desc.apply(lambda d: _contiene(d,"iva","comgestiontransffdosentrebcos","comisionserviciodecuenta",
                    "impcreley25413","impdebley25413","impingbrutos","impuestodesellos",
                    "interesessobresaldosdeudores","perceiva") or
                    ("imp" in d and ("iva" in d or "impuesto" in d or "impuestos" in d or "percep" in d))),
         desc.apply(lambda d: _contiene(d,"cobroiibb","cuotadeprestamo","debitoiibb") or
                    ("prestamo" in d or "iibb" in d)),
-        desc.apply(lambda d: _contiene(d, "pagodeservicios", "trfinmedproveed")),
-        desc.apply(lambda d: _contiene(d, "transfinmedcp", "transfctaspropias", "transfercashmismatitularidad")),
-        desc.apply(lambda d: _contiene(d, "pagovisaempresa")),
-        desc.apply(lambda d: _contiene(d, "transfafip")),
-        desc.apply(lambda d: _contiene(d, "propina")),
+        desc.apply(lambda d: _contiene(d,"pagodeservicios","trfinmedproveed")),
+        desc.apply(lambda d: _contiene(d,"transfinmedcp","transfctaspropias","transfercashmismatitularidad")),
+        desc.apply(lambda d: _contiene(d,"pagovisaempresa")),
+        desc.apply(lambda d: _contiene(d,"transfafip")),
+        desc.apply(lambda d: _contiene(d,"propina")),
     ]
     categorias = ["Acreditaciones","Cobranzas","Descuento Galicia","Echeq","FCI",
                   "Gastos Bancarios","Prestamo","Proveedores","Transf. entre cuentas",
@@ -159,30 +172,26 @@ def categorizar_extracto_v2(df: pd.DataFrame) -> pd.DataFrame:
         if any(a in tl for a in ABREV_SUB):            return True
         return False
 
-    desc          = df["descripcion"].apply(_limpiar)
-    ley_ad1       = df["leyenda adicional1"]
-    ley_ad1_limp  = df["leyenda adicional1"].apply(_limpiar)
-    ley_ad2_limp  = df["leyenda adicional2"].apply(_limpiar)
+    desc         = df["descripcion"].apply(_limpiar)
+    ley_ad1      = df["leyenda adicional1"]
+    ley_ad1_limp = df["leyenda adicional1"].apply(_limpiar)
+    ley_ad2_limp = df["leyenda adicional2"].apply(_limpiar)
     concepto_limp = df["concepto"].apply(_limpiar)
-    sin_cat       = df["conciliacion"] == "0"
+    sin_cat      = df["conciliacion"] == "0"
 
-    es_deb_autom  = desc == _limpiar("DEB. AUTOM. DE SERV.")
-    es_seguro     = ley_ad2_limp.apply(lambda d: any(p in d for p in ["pagoseguro","seguros","segurosp","pagopoliza","seguro","poliza"]))
-    es_afip       = ley_ad1_limp.apply(lambda d: "afip" in d)
+    es_deb_autom = desc == _limpiar("DEB. AUTOM. DE SERV.")
+    es_seguro    = ley_ad2_limp.apply(lambda d: any(p in d for p in ["pagoseguro","seguros","segurosp","pagopoliza","seguro","poliza"]))
+    es_afip      = ley_ad1_limp.apply(lambda d: "afip" in d)
 
     df.loc[sin_cat & es_deb_autom & es_seguro,             "conciliacion"] = "Seguros"
     df.loc[sin_cat & es_deb_autom & ~es_seguro & es_afip,  "conciliacion"] = "Imp. AFIP"
     df.loc[sin_cat & es_deb_autom & ~es_seguro & ~es_afip, "conciliacion"] = "Proveedores"
     sin_cat = df["conciliacion"] == "0"
 
-    es_acred      = desc == _limpiar("SERVICIO ACREDITAMIENTO DE HABERES")
-    es_sueldos    = ley_ad1_limp.apply(lambda d: "acredhaberes" in d)
-    es_rend       = ley_ad1_limp.apply(lambda d: "reintegroviaticos" in d)
-    es_indem      = ley_ad1_limp.apply(lambda d: "indemnizaciones" in d)
-
-    df.loc[sin_cat & es_acred & es_sueldos, "conciliacion"] = "Sueldos"
-    df.loc[sin_cat & es_acred & es_rend,    "conciliacion"] = "Rendiciones"
-    df.loc[sin_cat & es_acred & es_indem,   "conciliacion"] = "Indemnizaciones"
+    es_acred = desc == _limpiar("SERVICIO ACREDITAMIENTO DE HABERES")
+    df.loc[sin_cat & es_acred & ley_ad1_limp.apply(lambda d: "acredhaberes" in d),       "conciliacion"] = "Sueldos"
+    df.loc[sin_cat & es_acred & ley_ad1_limp.apply(lambda d: "reintegroviaticos" in d),  "conciliacion"] = "Rendiciones"
+    df.loc[sin_cat & es_acred & ley_ad1_limp.apply(lambda d: "indemnizaciones" in d),    "conciliacion"] = "Indemnizaciones"
     sin_cat = df["conciliacion"] == "0"
 
     es_transf = desc.apply(lambda d: d in [_limpiar("TRANSFERENCIA A TERCEROS"), _limpiar("TRANSF. A TERCEROS")])
@@ -215,12 +224,12 @@ def categorizar_mayor_v1(df: pd.DataFrame) -> pd.DataFrame:
     comentario_raw = df["Comentario"].astype(str).str.strip()
 
     condiciones = [
-        comentario.apply(lambda d: _contiene(d, "acreditacion", "acreditaciones")),
-        comentario.apply(lambda d: _contiene(d, "cobronf")),
-        comentario.apply(lambda d: _contiene(d, "descuento", "descuentos")),
-        comentario.apply(lambda d: _contiene(d, "pagogb", "gb")),
-        comentario.apply(lambda d: _contiene(d, "difcambio", "periodo")),
-        comentario.apply(lambda d: _contiene(d, "pagocuota")),
+        comentario.apply(lambda d: _contiene(d,"acreditacion","acreditaciones")),
+        comentario.apply(lambda d: _contiene(d,"cobronf")),
+        comentario.apply(lambda d: _contiene(d,"descuento","descuentos")),
+        comentario.apply(lambda d: _contiene(d,"pagogb","gb")),
+        comentario.apply(lambda d: _contiene(d,"difcambio","periodo")),
+        comentario.apply(lambda d: _contiene(d,"pagocuota")),
         comentario_raw.str.contains("ART", regex=False),
     ]
     categorias = ["Acreditaciones","Cobranzas","Descuento Galicia","Gastos Bancarios","Seguros","Prestamo","ART"]
@@ -248,12 +257,6 @@ def categorizar_mayor_v2(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 # CRUCES
 # ─────────────────────────────────────────────
-
-def _get_col(df, *candidates):
-    for c in candidates:
-        if c in df.columns: return c
-    raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
-
 
 def cruzar_mayor_extracto(df_mayor_dep, df_extracto_dep):
     mayor    = df_mayor_dep.copy().reset_index(drop=True)
@@ -356,6 +359,7 @@ def cruzar_por_categoria(falta_extracto1, falta_mayor1, tolerancia=0.5):
 def cruzar_proveedores(falta_extracto2, falta_mayor2, tolerancia=0.5):
     col_fe = _get_col(falta_extracto2, "Fecha","fecha")
     col_ie = _get_col(falta_extracto2, "Importe","importe")
+    col_ce = _get_col(falta_extracto2, "conciliacion")
     col_fm = _get_col(falta_mayor2,    "fecha","Fecha")
     col_im = _get_col(falta_mayor2,    "importe","Importe")
     col_cm = _get_col(falta_mayor2,    "conciliacion")
@@ -367,7 +371,7 @@ def cruzar_proveedores(falta_extracto2, falta_mayor2, tolerancia=0.5):
     for fecha in fm[fm[col_cm]=="Proveedores"][col_fm].unique():
         gm = fm[(fm[col_fm]==fecha) & (fm[col_cm]=="Proveedores") & (~fm.index.isin(usado_m))]
         if gm.empty: continue
-        ge = fe[(fe[col_fe]==fecha) &
+        ge = fe[(fe[col_fe]==fecha) & (fe[col_ce]=="0") &
                 (~fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)) &
                 (~fe.index.isin(usado_e))]
         if ge.empty: continue
@@ -393,7 +397,7 @@ def cruzar_a1tp(falta_extracto3, falta_mayor3, tolerancia=0.5):
     fe, fm = falta_extracto3.copy().reset_index(drop=True), falta_mayor3.copy().reset_index(drop=True)
     usado_e, usado_m, idx_e, idx_m = set(), set(), [], []
 
-    tp_e   = fe[fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
+    tp_e = fe[fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
     for fecha in tp_e[col_fe].unique():
         ge = fe[(fe[col_fe]==fecha) &
                 (fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)) &
@@ -423,16 +427,15 @@ def cruzar_por_proveedor(falta_extracto4, falta_mayor4, tolerancia_importe=0.5, 
 
     fe, fm = falta_extracto4.copy().reset_index(drop=True), falta_mayor4.copy().reset_index(drop=True)
     usado_e, usado_m, idx_e, idx_m = set(), set(), [], []
-    nombres_usados_m  = set()
-    nombres_sin_match = {}
+    nombres_usados_m = set()
 
     suma_e_by = fe.groupby(col_te)[col_ie].sum()
     suma_m_by = fm.groupby(col_lm)[col_im].sum()
     nombres_m  = suma_m_by.index.tolist()
 
     for nombre_e, suma_e in suma_e_by.items():
-        candidatos  = process.extract(nombre_e, nombres_m, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
-        encontrado  = False
+        candidatos = process.extract(nombre_e, nombres_m, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
+        encontrado = False
         for nombre_m, score, _ in candidatos:
             if nombre_m in nombres_usados_m: continue
             if abs(suma_e - suma_m_by[nombre_m]) <= tolerancia_importe:
@@ -450,16 +453,11 @@ def cruzar_por_proveedor(falta_extracto4, falta_mayor4, tolerancia_importe=0.5, 
                     idx_e.extend(ie); idx_m.extend(im)
                     usado_e.update(ie); usado_m.update(im)
                     nombres_usados_m.add(nombre_m); encontrado = True; break
-        if not encontrado and candidatos:
-            mejor_nombre, mejor_score = candidatos[0][0], candidatos[0][1]
-            if mejor_score > 90 and mejor_nombre not in nombres_usados_m:
-                nombres_sin_match[mejor_nombre] = mejor_score
 
     return (fe.loc[list(set(idx_e))].reset_index(drop=True),
             fm.loc[list(set(idx_m))].reset_index(drop=True),
             fe[~fe.index.isin(usado_e)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_m)].reset_index(drop=True),
-            nombres_sin_match)
+            fm[~fm.index.isin(usado_m)].reset_index(drop=True))
 
 
 def cruzar_echeq(falta_extracto5, falta_mayor5, tolerancia=0.5):
@@ -493,73 +491,124 @@ def cruzar_echeq(falta_extracto5, falta_mayor5, tolerancia=0.5):
             fm[~fm.index.isin(usado_m)].reset_index(drop=True))
 
 
-def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6, df_proveedores,
+def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
+                         match_extracto3, match_extracto5, tolerancia_importe=0.5):
+    col_monto        = _find_col(df_proveedores, "monto")
+    col_estado       = _find_col(df_proveedores, "estado")
+    col_fecha_emis_p = next((c for c in df_proveedores.columns if "emis" in c.lower()), None)
+    if col_fecha_emis_p is None:
+        raise KeyError(f"Columna de fecha de emisión no encontrada en {list(df_proveedores.columns)}")
+
+    fp = df_proveedores[
+        ~df_proveedores[col_estado].astype(str).str.upper().str.contains("ERROR", na=False)
+    ].copy().reset_index(drop=True)
+
+    fp[col_monto] = (
+        fp[col_monto].astype(str).str.replace(",",".",regex=False).str.strip()
+        .pipe(pd.to_numeric, errors="coerce").fillna(0.0)
+    )
+    fp[col_fecha_emis_p] = pd.to_datetime(fp[col_fecha_emis_p], errors="coerce")
+
+    def cruzar_y_sacar(fp, match, tolerancia):
+        col_fm = _get_col(match, "Fecha","fecha")
+        col_im = _get_col(match, "Importe","importe")
+        mm = match.copy()
+        mm[col_fm] = pd.to_datetime(mm[col_fm], errors="coerce")
+        mm[col_im] = pd.to_numeric(mm[col_im], errors="coerce").fillna(0.0)
+        idx_usados = set()
+        for idx_p, row_p in fp.iterrows():
+            fecha_p = row_p[col_fecha_emis_p]
+            monto_p = row_p[col_monto] * -1
+            coincide = mm[(mm[col_fm]==fecha_p) &
+                          (mm[col_im].apply(lambda x: abs(x - monto_p) <= tolerancia))]
+            if not coincide.empty:
+                idx_usados.add(idx_p)
+        return fp[~fp.index.isin(idx_usados)].reset_index(drop=True), len(idx_usados)
+
+    fp, _ = cruzar_y_sacar(fp, match_mayor,    tolerancia=0.0)
+    fp, _ = cruzar_y_sacar(fp, match_mayor1,   tolerancia=tolerancia_importe)
+    fp, _ = cruzar_y_sacar(fp, match_extracto3, tolerancia=tolerancia_importe)
+    fp, _ = cruzar_y_sacar(fp, match_extracto5, tolerancia=tolerancia_importe)
+    return fp
+
+
+def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6, df_proveedores_def,
                                  tolerancia_importe=0.5, top_candidatos=3):
     try:
         from rapidfuzz import process, fuzz
     except ImportError:
         raise ImportError("Instalá rapidfuzz: pip install rapidfuzz")
 
-    col_te = _get_col(falta_extracto6, "Tercero","tercero")
-    col_ie = _get_col(falta_extracto6, "Importe","importe")
-    col_fm = _get_col(falta_mayor6,    "fecha","Fecha")
-    col_im = _get_col(falta_mayor6,    "importe","Importe")
-    col_cm = _get_col(falta_mayor6,    "conciliacion")
-
-    def find_col(df, keyword):
-        for c in df.columns:
-            if keyword.lower() in c.lower(): return c
-        raise KeyError(f"Columna con '{keyword}' no encontrada")
-
-    col_razon  = find_col(df_proveedores, "raz")
-    col_monto  = find_col(df_proveedores, "monto")
-    col_estado = find_col(df_proveedores, "estado")
-    col_fecha_p = find_col(df_proveedores, "fecha")
+    col_te    = _get_col(falta_extracto6, "Tercero","tercero")
+    col_ie    = _get_col(falta_extracto6, "Importe","importe")
+    col_fe    = _get_col(falta_extracto6, "Fecha","fecha")
+    col_fm    = _get_col(falta_mayor6,    "fecha","Fecha")
+    col_im    = _get_col(falta_mayor6,    "importe","Importe")
+    col_cm    = _get_col(falta_mayor6,    "conciliacion")
+    col_razon = next((c for c in df_proveedores_def.columns if "raz" in c.lower()), None)
+    if col_razon is None:
+        raise KeyError(f"Columna razón social no encontrada en {list(df_proveedores_def.columns)}")
+    col_monto   = _find_col(df_proveedores_def, "monto")
+    col_fecha_p = _find_col(df_proveedores_def, "fecha")
 
     fe = falta_extracto6.copy().reset_index(drop=True)
     fm = falta_mayor6.copy().reset_index(drop=True)
-    fp = df_proveedores[~df_proveedores[col_estado].astype(str).str.upper().str.contains("ERROR", na=False)].copy().reset_index(drop=True)
-    fp[col_monto]   = (fp[col_monto].astype(str).str.replace(",",".",regex=False).str.strip()
-                       .pipe(pd.to_numeric, errors="coerce").fillna(0.0))
+    fp = df_proveedores_def.copy().reset_index(drop=True)
+    fp[col_monto]   = pd.to_numeric(fp[col_monto].astype(str).str.replace(",",".",regex=False).str.strip(), errors="coerce").fillna(0.0)
     fp[col_fecha_p] = pd.to_datetime(fp[col_fecha_p], errors="coerce")
 
     fp_neg = fp.copy(); fp_neg[col_monto] = fp_neg[col_monto] * -1
-    suma_e_by = fe.groupby(col_te)[col_ie].sum()
-    suma_p_by = fp_neg.groupby(col_razon)[col_monto].sum()
+    suma_e_by  = fe.groupby(col_te)[col_ie].sum()
+    suma_p_by  = fp_neg.groupby(col_razon)[col_monto].sum()
     nombres_p  = suma_p_by.index.tolist()
 
-    usado_e, idx_e = set(), []
-    nombres_usados_p, nombres_sin_match = set(), {}
+    usado_e, idx_e           = set(), []
+    nombres_matcheados       = set()
+    fechas_matcheadas        = set()
+    nombres_no_matcheados    = set()
 
     for nombre_e, suma_e in suma_e_by.items():
         candidatos = process.extract(nombre_e, nombres_p, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
         encontrado = False
         for nombre_p, score, _ in candidatos:
-            if nombre_p in nombres_usados_p: continue
+            if nombre_p in nombres_matcheados: continue
             if abs(suma_e - suma_p_by[nombre_p]) <= tolerancia_importe:
                 ie = fe[(fe[col_te]==nombre_e) & (~fe.index.isin(usado_e))].index.tolist()
-                idx_e.extend(ie); usado_e.update(ie); nombres_usados_p.add(nombre_p)
-                encontrado = True; break
-        if not encontrado and candidatos:
-            mejor_nombre, mejor_score = candidatos[0][0], candidatos[0][1]
-            if mejor_score > 90 and mejor_nombre not in nombres_usados_p:
-                nombres_sin_match[mejor_nombre] = mejor_score
+                fechas_matcheadas.update(fe.loc[ie, col_fe].unique().tolist())
+                idx_e.extend(ie); usado_e.update(ie)
+                nombres_matcheados.add(nombre_p); encontrado = True; break
+        if not encontrado:
+            if candidatos: nombres_no_matcheados.add(candidatos[0][0])
 
-    suma_p_fecha = (fp.groupby(col_fecha_p)[col_monto].sum() * -1)
-    usado_m, idx_m = set(), []
-    for fecha, suma_p in suma_p_fecha.items():
-        gm = fm[(fm[col_fm]==fecha) & (fm[col_cm]=="Proveedores") & (~fm.index.isin(usado_m))]
-        if gm.empty: continue
-        if abs(gm[col_im].sum() - suma_p) <= tolerancia_importe:
-            idx_m.extend(gm.index.tolist()); usado_m.update(gm.index)
+    nombres_no_matcheados = set(nombres_p) - nombres_matcheados
 
-    dif_proveedores = fp[fp[col_razon].isin(nombres_sin_match.keys())].copy().reset_index(drop=True)
+    # Sacar de falta_mayor6 filas de fechas matcheadas
+    mask_match_mayor = (fm[col_fm].isin(fechas_matcheadas) & (fm[col_cm]=="Proveedores"))
+    match_mayor7 = fm[mask_match_mayor].reset_index(drop=True)
+    usado_mayor  = set(fm[mask_match_mayor].index.tolist())
 
-    return (fe.loc[list(set(idx_e))].reset_index(drop=True),
-            fm.loc[list(set(idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_e)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_m)].reset_index(drop=True),
-            dif_proveedores)
+    # Agregar proveedores no matcheados a falta_mayor7
+    filas_nuevas = []
+    for nombre_p in nombres_no_matcheados:
+        for _, row in fp[fp[col_razon]==nombre_p].iterrows():
+            monto = row[col_monto]; fecha = row[col_fecha_p]
+            fila  = {col: "" for col in fm.columns}
+            if col_fm          in fila: fila[col_fm]          = fecha
+            if "descripcion"   in fila: fila["descripcion"]   = "TRF INMED PROVEED"
+            if "origen"        in fila: fila["origen"]        = "AUTO"
+            if "debitos"       in fila: fila["debitos"]       = monto
+            if "leyenda adicional1" in fila: fila["leyenda adicional1"] = nombre_p
+            if col_im          in fila: fila[col_im]          = -abs(monto)
+            if col_cm          in fila: fila[col_cm]          = "Proveedores"
+            filas_nuevas.append(fila)
+
+    falta_mayor7_base = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
+    falta_mayor7 = pd.concat([falta_mayor7_base, pd.DataFrame(filas_nuevas)], ignore_index=True) if filas_nuevas else falta_mayor7_base
+
+    match_extracto7 = fe.loc[list(set(idx_e))].reset_index(drop=True)
+    falta_extracto7 = fe[~fe.index.isin(usado_e)].reset_index(drop=True)
+
+    return match_extracto7, match_mayor7, falta_extracto7, falta_mayor7
 
 
 def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, tolerancia=0.5):
@@ -607,8 +656,7 @@ def _asignar_id(df_m, df_e, match_tipo, id_inicio, agrupar_por=None):
         col_m, col_e = agrupar_por
         current = id_inicio; mapa = {}
         for v in list(dm[col_m].unique()) + list(de[col_e].unique()):
-            if v not in mapa:
-                mapa[v] = current; current += 1
+            if v not in mapa: mapa[v] = current; current += 1
         dm["match_id"] = dm[col_m].map(mapa)
         de["match_id"] = de[col_e].map(mapa)
         id_fin = current
@@ -617,18 +665,17 @@ def _asignar_id(df_m, df_e, match_tipo, id_inicio, agrupar_por=None):
 
 
 # ─────────────────────────────────────────────
-# EXPORTAR EN MEMORIA
+# EXPORTAR EN MEMORIA (4 hojas — sin Dif Proveedores)
 # ─────────────────────────────────────────────
 
 def generar_excel_en_memoria_galicia(falta_mayor8, falta_extracto8,
-                                      match_mayor_def, match_extracto_def, dif_proveedores):
+                                      match_mayor_def, match_extracto_def):
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        falta_mayor8.to_excel(writer,      sheet_name="Faltante Mayor",    index=False)
-        falta_extracto8.to_excel(writer,   sheet_name="Faltante Extracto", index=False)
-        match_mayor_def.to_excel(writer,   sheet_name="Match Mayor",       index=False)
-        match_extracto_def.to_excel(writer,sheet_name="Match Extracto",    index=False)
-        dif_proveedores.to_excel(writer,   sheet_name="Dif Proveedores",   index=False)
+        falta_mayor8.to_excel(writer,       sheet_name="Faltante Mayor",    index=False)
+        falta_extracto8.to_excel(writer,    sheet_name="Faltante Extracto", index=False)
+        match_mayor_def.to_excel(writer,    sheet_name="Match Mayor",       index=False)
+        match_extracto_def.to_excel(writer, sheet_name="Match Extracto",    index=False)
     return buf.getvalue()
 
 
@@ -638,17 +685,17 @@ def generar_excel_en_memoria_galicia(falta_mayor8, falta_extracto8,
 
 def correr_conciliacion_galicia(archivo_mayor, archivo_extracto, archivo_proveedores):
     # 1. Cargar
-    df_mayor     = load_excel_file(archivo_mayor)
-    df_extracto  = load_excel_file(archivo_extracto)
-    df_prov      = load_excel_file(archivo_proveedores)
+    df_mayor    = load_excel_file(archivo_mayor)
+    df_extracto = load_excel_file(archivo_extracto)
+    df_prov     = load_excel_file(archivo_proveedores)
 
     # 2. Normalizar
     df_mayor_dep    = normalize_mayor(df_mayor)
     df_extracto_dep = normalize_extracto_galicia(df_extracto)
 
     # 3. Categorizar extracto
-    df_ext_cat1 = categorizar_extracto_v1(df_extracto_dep)
-    df_ext_cat2 = categorizar_extracto_v2(df_ext_cat1)
+    df_ext_cat1      = categorizar_extracto_v1(df_extracto_dep)
+    df_ext_cat2      = categorizar_extracto_v2(df_ext_cat1)
     df_ext_sin_acred = df_ext_cat2[df_ext_cat2["conciliacion"] != "Acreditaciones"].reset_index(drop=True)
 
     # 4. Categorizar mayor
@@ -671,48 +718,49 @@ def correr_conciliacion_galicia(archivo_mayor, archivo_extracto, archivo_proveed
     me4, mm4, fe4, fm4 = cruzar_a1tp(fe3, fm3)
 
     # 10. Cruce 5 — proveedores fuzzy
-    me5, mm5, fe5, fm5, nombres_sin_match = cruzar_por_proveedor(fe4, fm4)
+    me5, mm5, fe5, fm5 = cruzar_por_proveedor(fe4, fm4)
 
     # 11. Cruce 6 — Echeq
     me6, mm6, fe6, fm6 = cruzar_echeq(fe5, fm5)
 
-    # 12. Cruce 7 — proveedores descarga
-    me7, mm7, fe7, fm7, dif_proveedores = cruzar_proveedores_descarga(fe6, fm6, df_prov)
+    # 12. Limpiar proveedores y cruce 7
+    df_prov_def = limpiar_proveedores(df_prov, mm0, mm1, me3, me5)
+    me7, mm7, fe7, falta_may7 = cruzar_proveedores_descarga(fe6, fm6, df_prov_def)
 
     # 13. Cruce 8 — acreditaciones
-    match_acred_cat, match_acred, falta_ext8, falta_may8 = cruzar_acreditaciones(df_ext_cat2, fe7, fm7)
+    match_acred_cat, match_acred, falta_ext8, falta_may8 = cruzar_acreditaciones(df_ext_cat2, fe7, falta_may7)
 
     # 14. Asignar IDs
-    dm0, de0, id1  = _asignar_id(mm0, me0, "0", 1)
-    dm1, de1, id2  = _asignar_id(mm1, me1, "1", id1)
-    col_ce2 = _get_col(me2, "conciliacion"); col_cm2 = _get_col(mm2, "conciliacion")
-    dm2, de2, id3  = _asignar_id(mm2, me2, "2", id2, agrupar_por=(col_cm2, col_ce2))
-    col_fe3 = _get_col(me3, "Fecha","fecha"); col_fm3 = _get_col(mm3, "fecha","Fecha")
-    dm3, de3, id4  = _asignar_id(mm3, me3, "3", id3, agrupar_por=(col_fm3, col_fe3))
-    col_fe4 = _get_col(me4, "Fecha","fecha"); col_fm4 = _get_col(mm4, "fecha","Fecha")
-    dm4, de4, id5  = _asignar_id(mm4, me4, "4", id4, agrupar_por=(col_fm4, col_fe4))
-    col_te5 = _get_col(me5, "Tercero","tercero"); col_lm5 = _get_col(mm5, "leyenda adicional1")
-    dm5, de5, id6  = _asignar_id(mm5, me5, "5", id5, agrupar_por=(col_lm5, col_te5))
-    col_fe6 = _get_col(me6, "Fecha","fecha"); col_fm6 = _get_col(mm6, "fecha","Fecha")
-    dm6, de6, id7  = _asignar_id(mm6, me6, "6", id6, agrupar_por=(col_fm6, col_fe6))
-    col_fe7 = _get_col(me7, "Fecha","fecha"); col_fm7 = _get_col(mm7, "fecha","Fecha")
-    dm7, de7, id8  = _asignar_id(mm7, me7, "7", id7, agrupar_por=(col_fm7, col_fe7))
+    dm0, de0, id1 = _asignar_id(mm0, me0, "0", 1)
+    dm1, de1, id2 = _asignar_id(mm1, me1, "1", id1)
+    col_ce2 = _get_col(me2,"conciliacion"); col_cm2 = _get_col(mm2,"conciliacion")
+    dm2, de2, id3 = _asignar_id(mm2, me2, "2", id2, agrupar_por=(col_cm2, col_ce2))
+    col_fe3 = _get_col(me3,"Fecha","fecha"); col_fm3 = _get_col(mm3,"fecha","Fecha")
+    dm3, de3, id4 = _asignar_id(mm3, me3, "3", id3, agrupar_por=(col_fm3, col_fe3))
+    col_fe4 = _get_col(me4,"Fecha","fecha"); col_fm4 = _get_col(mm4,"fecha","Fecha")
+    dm4, de4, id5 = _asignar_id(mm4, me4, "4", id4, agrupar_por=(col_fm4, col_fe4))
+    col_te5 = _get_col(me5,"Tercero","tercero"); col_lm5 = _get_col(mm5,"leyenda adicional1")
+    dm5, de5, id6 = _asignar_id(mm5, me5, "5", id5, agrupar_por=(col_lm5, col_te5))
+    col_fe6 = _get_col(me6,"Fecha","fecha"); col_fm6 = _get_col(mm6,"fecha","Fecha")
+    dm6, de6, id7 = _asignar_id(mm6, me6, "6", id6, agrupar_por=(col_fm6, col_fe6))
+    col_fe7 = _get_col(me7,"Fecha","fecha"); col_fm7 = _get_col(mm7,"fecha","Fecha")
+    dm7, de7, id8 = _asignar_id(mm7, me7, "7", id7, agrupar_por=(col_fm7, col_fe7))
 
     da8 = match_acred.copy().reset_index(drop=True)
     dc8 = match_acred_cat.copy().reset_index(drop=True)
     if len(da8) > 0: da8["match_id"] = id8; da8["match_tipo"] = "8"
     if len(dc8) > 0: dc8["match_id"] = id8; dc8["match_tipo"] = "8"
 
-    # 15. Consolidar match definitivo
+    # 15. Consolidar
     match_mayor_def = pd.concat([dm0, dm1, de2, de3, de4, de5, de6, de7, da8], ignore_index=True)
     match_ext_def   = pd.concat([de0, de1, dm2, dm3, dm4, dm5, dm6, dm7, dc8], ignore_index=True)
 
     stats = {
-        "match_exacto":   len(mm0),
+        "match_exacto":     len(mm0),
         "match_tolerancia": len(mm1),
-        "falta_mayor":    len(falta_may8),
-        "falta_extracto": len(falta_ext8),
+        "falta_mayor":      len(falta_may8),
+        "falta_extracto":   len(falta_ext8),
     }
 
-    buf = generar_excel_en_memoria_galicia(falta_may8, falta_ext8, match_mayor_def, match_ext_def, dif_proveedores)
+    buf = generar_excel_en_memoria_galicia(falta_may8, falta_ext8, match_mayor_def, match_ext_def)
     return buf, stats
