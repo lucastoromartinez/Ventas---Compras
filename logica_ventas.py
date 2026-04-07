@@ -52,11 +52,18 @@ def depurar_sistema_ventas(df_sistema: pd.DataFrame) -> pd.DataFrame:
 # DEPURACIÓN ARCA
 # ─────────────────────────────────────────────
 
-def depurar_arca_ventas(df_arca: pd.DataFrame) -> pd.DataFrame:
+def depurar_arca_ventas(df_arca: pd.DataFrame, pv_excluir: list = None) -> pd.DataFrame:
     """
     Prepara el dataframe de ARCA para el cruce de ventas.
+    pv_excluir: lista de puntos de venta a excluir (ej: [2, 16, 60] para Ronda)
     """
     df = df_arca.copy()
+
+    # --- 0. Excluir puntos de venta si se especifica ---
+    if pv_excluir:
+        df = df[
+            ~pd.to_numeric(df["Punto de Venta"], errors="coerce").isin(pv_excluir)
+        ].copy()
 
     columnas_importes = [
         "Imp. Neto Gravado Total",
@@ -237,6 +244,7 @@ def correr_cruce_ventas(
     archivo_sistema,
     archivo_sistema_prev,
     archivo_arca_post,
+    pv_excluir: list = None,
 ):
     # 1. Cargar
     df_arca         = load_excel_file(archivo_arca)
@@ -246,9 +254,9 @@ def correr_cruce_ventas(
 
     # 2. Depurar
     sistema_dep     = depurar_sistema_ventas(df_sistema)
-    arca_dep        = depurar_arca_ventas(df_arca)
+    arca_dep        = depurar_arca_ventas(df_arca, pv_excluir=pv_excluir)
     sistema_prev_dep = depurar_sistema_ventas(df_sistema_prev)
-    arca_post_dep   = depurar_arca_ventas(df_arca_post)
+    arca_post_dep   = depurar_arca_ventas(df_arca_post, pv_excluir=pv_excluir)
 
     # 3. Cruce 1: Sistema vs ARCA
     matcheado, faltante_en_sistema, faltante_en_arca = cruzar_ventas_por_nro_norm(
