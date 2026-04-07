@@ -16,7 +16,7 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .header-block {
     border-left: 3px solid #00aaff;
     padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2.5rem;
+    margin-bottom: 2rem;
 }
 .header-block h1 {
     font-family: 'IBM Plex Mono', monospace;
@@ -89,6 +89,14 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     margin-top: 0 !important; margin-bottom: 1rem !important;
 }
 .back-btn > button:hover { color: #00aaff !important; border-color: #00aaff !important; }
+div[data-testid="stTabs"] button {
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.8rem !important; color: #555 !important;
+}
+div[data-testid="stTabs"] button[aria-selected="true"] {
+    color: #00aaff !important;
+    border-bottom-color: #00aaff !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -105,85 +113,117 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="section-title">Archivos del mes</div>', unsafe_allow_html=True)
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown('<div class="upload-label">Excel ARCA</div>', unsafe_allow_html=True)
-    archivo_arca = st.file_uploader("arca", type=["xlsx", "xls"],
-                                     label_visibility="collapsed", key="arca")
-with col2:
-    st.markdown('<div class="upload-label">Excel Sistema</div>', unsafe_allow_html=True)
-    archivo_sistema = st.file_uploader("sistema", type=["xlsx", "xls"],
-                                        label_visibility="collapsed", key="sistema")
 
-st.markdown('<div class="section-title">Archivos auxiliares</div>', unsafe_allow_html=True)
-col3, col4 = st.columns(2)
-with col3:
-    st.markdown('<div class="upload-label secondary">Sistema mes anterior</div>', unsafe_allow_html=True)
-    archivo_sistema_prev = st.file_uploader("sistema_prev", type=["xlsx", "xls"],
-                                             label_visibility="collapsed", key="sistema_prev")
-with col4:
-    st.markdown('<div class="upload-label secondary">ARCA mes siguiente</div>', unsafe_allow_html=True)
-    archivo_arca_post = st.file_uploader("arca_post", type=["xlsx", "xls"],
-                                          label_visibility="collapsed", key="arca_post")
+def render_tab_ventas(nombre_sociedad, pv_excluir=None, key_suffix=""):
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Archivos del mes</div>', unsafe_allow_html=True)
 
-st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown('<div class="upload-label">Excel ARCA</div>', unsafe_allow_html=True)
+        archivo_arca = st.file_uploader("arca", type=["xlsx","xls"],
+                                         label_visibility="collapsed",
+                                         key=f"arca_{key_suffix}")
+    with col2:
+        st.markdown('<div class="upload-label">Excel Sistema</div>', unsafe_allow_html=True)
+        archivo_sistema = st.file_uploader("sistema", type=["xlsx","xls"],
+                                            label_visibility="collapsed",
+                                            key=f"sistema_{key_suffix}")
 
-todos_cargados = all([archivo_arca, archivo_sistema, archivo_sistema_prev, archivo_arca_post])
-if not todos_cargados:
-    st.info("Cargá los cuatro archivos Excel para habilitar el cruce.")
-
-boton = st.button("CRUZAR VENTAS", disabled=not todos_cargados, use_container_width=True)
-
-if boton and todos_cargados:
-    with st.spinner("Procesando..."):
-        try:
-            buf, stats = correr_cruce_ventas(
-                archivo_arca=archivo_arca,
-                archivo_sistema=archivo_sistema,
-                archivo_sistema_prev=archivo_sistema_prev,
-                archivo_arca_post=archivo_arca_post,
-            )
-            st.session_state["resultado_ventas"] = {"buf": buf, "stats": stats}
-        except Exception as e:
-            st.error(f"Error al procesar: {e}")
-            st.stop()
-
-if "resultado_ventas" in st.session_state:
-    r     = st.session_state["resultado_ventas"]
-    stats = r["stats"]
+    st.markdown('<div class="section-title">Archivos auxiliares</div>', unsafe_allow_html=True)
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown('<div class="upload-label secondary">Sistema mes anterior</div>', unsafe_allow_html=True)
+        archivo_sistema_prev = st.file_uploader("sistema_prev", type=["xlsx","xls"],
+                                                 label_visibility="collapsed",
+                                                 key=f"sistema_prev_{key_suffix}")
+    with col4:
+        st.markdown('<div class="upload-label secondary">ARCA mes siguiente</div>', unsafe_allow_html=True)
+        archivo_arca_post = st.file_uploader("arca_post", type=["xlsx","xls"],
+                                              label_visibility="collapsed",
+                                              key=f"arca_post_{key_suffix}")
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    clase_falt_sis  = "error" if stats["faltante_en_sistema"] > 0 else "metric-card"
-    clase_falt_arca = "error" if stats["faltante_en_arca"]    > 0 else "metric-card"
+    todos_cargados = all([archivo_arca, archivo_sistema, archivo_sistema_prev, archivo_arca_post])
+    if not todos_cargados:
+        st.info("Cargá los cuatro archivos Excel para habilitar el cruce.")
 
-    st.markdown(f"""
-    <div class="metric-row">
-        <div class="metric-card">
-            <div class="metric-value">{stats['matcheado']}</div>
-            <div class="metric-label">Match inicial</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{stats['match_definitivo']}</div>
-            <div class="metric-label">Match definitivo</div>
-        </div>
-        <div class="metric-card {clase_falt_sis}">
-            <div class="metric-value">{stats['faltante_en_sistema']}</div>
-            <div class="metric-label">Faltante sistema</div>
-        </div>
-        <div class="metric-card {clase_falt_arca}">
-            <div class="metric-value">{stats['faltante_en_arca']}</div>
-            <div class="metric-label">Faltante ARCA</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.download_button(
-        label="📥 Descargar faltantes definitivos",
-        data=r["buf"],
-        file_name="faltante_definitivo.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    boton = st.button(
+        f"CRUZAR {nombre_sociedad.upper()}",
+        disabled=not todos_cargados,
         use_container_width=True,
+        key=f"btn_{key_suffix}"
     )
+
+    result_key = f"resultado_ventas_{key_suffix}"
+
+    if boton and todos_cargados:
+        with st.spinner("Procesando..."):
+            try:
+                buf, stats = correr_cruce_ventas(
+                    archivo_arca=archivo_arca,
+                    archivo_sistema=archivo_sistema,
+                    archivo_sistema_prev=archivo_sistema_prev,
+                    archivo_arca_post=archivo_arca_post,
+                    pv_excluir=pv_excluir,
+                )
+                st.session_state[result_key] = {"buf": buf, "stats": stats}
+            except Exception as e:
+                st.error(f"Error al procesar: {e}")
+
+    if result_key in st.session_state:
+        r     = st.session_state[result_key]
+        stats = r["stats"]
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        clase_falt_sis  = "error" if stats["faltante_en_sistema"] > 0 else "metric-card"
+        clase_falt_arca = "error" if stats["faltante_en_arca"]    > 0 else "metric-card"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric-card">
+                <div class="metric-value">{stats['matcheado']}</div>
+                <div class="metric-label">Match inicial</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{stats['match_definitivo']}</div>
+                <div class="metric-label">Match definitivo</div>
+            </div>
+            <div class="metric-card {clase_falt_sis}">
+                <div class="metric-value">{stats['faltante_en_sistema']}</div>
+                <div class="metric-label">Faltante sistema</div>
+            </div>
+            <div class="metric-card {clase_falt_arca}">
+                <div class="metric-value">{stats['faltante_en_arca']}</div>
+                <div class="metric-label">Faltante ARCA</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label=f"📥 Descargar faltantes {nombre_sociedad}",
+            data=r["buf"],
+            file_name=f"faltante_definitivo_{key_suffix}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"dl_{key_suffix}"
+        )
+
+
+# ─────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────
+
+tab1, tab2, tab3 = st.tabs(["📊  9dD y ERSA", "📊  Ronda", "📊  EASA"])
+
+with tab1:
+    render_tab_ventas("9dD y ERSA", pv_excluir=None, key_suffix="9dd")
+
+with tab2:
+    render_tab_ventas("Ronda", pv_excluir=[2, 16, 60], key_suffix="ronda")
+
+with tab3:
+    render_tab_ventas("EASA", pv_excluir=[47, 55], key_suffix="easa")
