@@ -36,6 +36,13 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     letter-spacing: 1.5px; text-transform: uppercase;
     margin-bottom: 0.4rem;
 }
+.upload-label.optional { color: #888; }
+.section-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.68rem; color: #444;
+    letter-spacing: 2px; text-transform: uppercase;
+    margin: 1.2rem 0 0.8rem 0;
+}
 [data-testid="stFileUploader"] {
     background: #1a1a1a; border: 1px solid #2a2a2a;
     border-radius: 6px; padding: 0.5rem; transition: border-color 0.2s;
@@ -85,12 +92,15 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .back-btn > button:hover { color: #ff6b35 !important; border-color: #ff6b35 !important; }
 div[data-testid="stTabs"] button {
     font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important;
-    color: #555 !important;
+    font-size: 0.8rem !important; color: #555 !important;
 }
 div[data-testid="stTabs"] button[aria-selected="true"] {
-    color: #ff6b35 !important;
-    border-bottom-color: #ff6b35 !important;
+    color: #ff6b35 !important; border-bottom-color: #ff6b35 !important;
+}
+.toggle-box {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 6px; padding: 1rem 1.2rem;
+    margin: 1rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -108,9 +118,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────
 tab_galicia, tab_hipotecario = st.tabs(["🏦  Banco Galicia", "🏦  Banco Hipotecario"])
 
 
@@ -120,7 +127,7 @@ tab_galicia, tab_hipotecario = st.tabs(["🏦  Banco Galicia", "🏦  Banco Hipo
 with tab_galicia:
     st.markdown("<br>", unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
         archivo_mayor_g = st.file_uploader("mayor_g", type=["xlsx","xls"],
@@ -129,27 +136,41 @@ with tab_galicia:
         st.markdown('<div class="upload-label">Extracto Galicia</div>', unsafe_allow_html=True)
         archivo_extracto_g = st.file_uploader("extracto_g", type=["xlsx","xls"],
                                                label_visibility="collapsed", key="extracto_g")
-    with col3:
-        st.markdown('<div class="upload-label">Proveedores Días Masivos</div>', unsafe_allow_html=True)
+
+    # Toggle pagos masivos
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
+    con_masivos = st.toggle("Incluir Pagos Masivos", value=False, key="toggle_masivos")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    archivo_prov_g = None
+    if con_masivos:
+        st.markdown('<div class="upload-label optional">Proveedores Días Masivos</div>', unsafe_allow_html=True)
         archivo_prov_g = st.file_uploader("prov_g", type=["xlsx","xls"],
                                            label_visibility="collapsed", key="prov_g")
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    todos_g = all([archivo_mayor_g, archivo_extracto_g, archivo_prov_g])
-    if not todos_g:
-        st.info("Cargá los tres archivos para habilitar la conciliación.")
+    # Validación: mayor + extracto siempre requeridos; proveedores solo si toggle activo
+    base_ok    = all([archivo_mayor_g, archivo_extracto_g])
+    masivos_ok = (not con_masivos) or (con_masivos and archivo_prov_g)
+    todo_ok_g  = base_ok and masivos_ok
 
-    boton_g = st.button("CONCILIAR GALICIA", disabled=not todos_g,
+    if not base_ok:
+        st.info("Cargá el Mayor y el Extracto para habilitar la conciliación.")
+    elif con_masivos and not archivo_prov_g:
+        st.info("Cargá el archivo de Proveedores Días Masivos para continuar.")
+
+    boton_g = st.button("CONCILIAR GALICIA", disabled=not todo_ok_g,
                          use_container_width=True, key="btn_galicia")
 
-    if boton_g and todos_g:
+    if boton_g and todo_ok_g:
         with st.spinner("Procesando Galicia..."):
             try:
                 buf_g, stats_g = correr_conciliacion_galicia(
                     archivo_mayor=archivo_mayor_g,
                     archivo_extracto=archivo_extracto_g,
-                    archivo_proveedores=archivo_prov_g,
+                    archivo_proveedores=archivo_prov_g,  # None si no hay masivos
                 )
                 st.session_state["resultado_galicia"] = {"buf": buf_g, "stats": stats_g}
             except Exception as e:
@@ -160,6 +181,11 @@ with tab_galicia:
         s = r["stats"]
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        if s.get("con_masivos"):
+            st.success("✅ Conciliación con Pagos Masivos incluidos")
+        else:
+            st.info("ℹ️ Conciliación sin Pagos Masivos")
 
         clase_fm = "error" if s["falta_mayor"]    > 0 else "metric-card"
         clase_fe = "error" if s["falta_extracto"] > 0 else "metric-card"
