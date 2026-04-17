@@ -1,5 +1,5 @@
 """
-Lógica de conciliación bancaria - Banco Hipotecario
+Lógica de conciliación bancaria - Banco Hipotecario (v2)
 """
 import re
 from io import BytesIO
@@ -53,7 +53,6 @@ def normalize_mayor(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_extracto_hipotecario(df: pd.DataFrame) -> pd.DataFrame:
-    import re
     df = df.copy()
     df.columns = (
         df.columns.str.strip()
@@ -100,7 +99,7 @@ def normalize_extracto_hipotecario(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# CATEGORIZACIÓN
+# HELPERS
 # ─────────────────────────────────────────────
 
 def _limpiar(texto: str) -> str:
@@ -114,6 +113,15 @@ def _limpiar(texto: str) -> str:
 def _contiene(texto_limpio: str, *palabras: str) -> bool:
     return any(_limpiar(p) in texto_limpio for p in palabras)
 
+def _get_col(df, *candidates):
+    for c in candidates:
+        if c in df.columns: return c
+    raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
+
+
+# ─────────────────────────────────────────────
+# CATEGORIZACIÓN
+# ─────────────────────────────────────────────
 
 def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -195,24 +203,16 @@ def categorizar_mayor_v2(df: pd.DataFrame) -> pd.DataFrame:
     tercero = df["Tercero"].apply(_limpiar)
     sin_cat = df["conciliacion"] == "0"
 
-    es_tp     = serie.apply(lambda d: "tp" in d)
-    es_seguro = tercero.apply(lambda d: any(p in d for p in ["swiss","sancor","berkley","laholando"]))
-
-    df.loc[sin_cat & es_tp,     "conciliacion"] = "Transf. entre cuentas"
+    df.loc[sin_cat & serie.apply(lambda d: "tp" in d),   "conciliacion"] = "Transf. entre cuentas"
     sin_cat = df["conciliacion"] == "0"
-    df.loc[sin_cat & es_seguro, "conciliacion"] = "Seguros"
+    df.loc[sin_cat & tercero.apply(lambda d: any(p in d for p in ["swiss","sancor","berkley","laholando"])),
+           "conciliacion"] = "Seguros"
     return df
 
 
 # ─────────────────────────────────────────────
 # CRUCES
 # ─────────────────────────────────────────────
-
-def _get_col(df, *candidates):
-    for c in candidates:
-        if c in df.columns: return c
-    raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
-
 
 def cruzar_mayor_extracto(df_mayor_dep, df_extracto_dep):
     mayor    = df_mayor_dep.copy().reset_index(drop=True)
@@ -350,7 +350,7 @@ def cruzar_tp(falta_extracto3, falta_mayor3, tolerancia=0.5):
     fe, fm = falta_extracto3.copy().reset_index(drop=True), falta_mayor3.copy().reset_index(drop=True)
     usado_e, usado_m, idx_e, idx_m = set(), set(), [], []
 
-    tp_e   = fe[fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
+    tp_e = fe[fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
     for fecha in tp_e[col_fe].unique():
         ge = fe[(fe[col_fe]==fecha) &
                 (fe[col_se].astype(str).str.strip().str.upper().str.contains("TP", na=False)) &
@@ -367,7 +367,22 @@ def cruzar_tp(falta_extracto3, falta_mayor3, tolerancia=0.5):
             fm[~fm.index.isin(usado_m)].reset_index(drop=True))
 
 
-def cruzar_debin(df_extracto_cat2, falta_extracto4, tolerancia=0.5):
+def cruzar_debin(df_extracto_cat2, falta_extracto4, falta_mayor4, tolerancia=0.5):
+    """
+    Cruza Acred. Debin de df_extracto_cat2 (extracto) contra falta_extracto4 (mayor).
+    Devuelve 4 valores:
+    - match_debin_mayor:    filas de falta_extracto4 que matchearon (lado mayor)
+    - match_debin_extracto: filas de df_extracto_cat2 que matchearon (lado extracto)
+    - falta_extracto5:      filas de falta_extracto4 que siguen sin match
+    - falta_mayor5:         faltante mayor actualizado
+    """
+    def alinear_columnas(df_origen, columnas_destino):
+        df_out = df_origen.copy()
+        for c in columnas_destino:
+            if c not in df_out.columns:
+                df_out[c] = pd.NA
+        return df_out[columnas_destino]
+
     col_ic = _get_col(df_extracto_cat2, "importe","Importe")
     col_cc = _get_col(df_extracto_cat2, "conciliacion")
     col_if = _get_col(falta_extracto4,  "Importe","importe")
@@ -379,13 +394,24 @@ def cruzar_debin(df_extracto_cat2, falta_extracto4, tolerancia=0.5):
     suma_falt  = debin_falt[col_if].sum()
 
     if abs(suma_cat - suma_falt) <= tolerancia:
-        match_debin     = debin_falt.reset_index(drop=True)
-        falta_extracto5 = falta_extracto4[~falta_extracto4.index.isin(debin_falt.index)].reset_index(drop=True)
+        match_debin_mayor    = debin_falt.reset_index(drop=True)
+        match_debin_extracto = debin_cat.reset_index(drop=True)
+        falta_extracto5      = falta_extracto4[~falta_extracto4.index.isin(debin_falt.index)].reset_index(drop=True)
+        # Si hubo match, sacar Debin del faltante mayor
+        falta_mayor5 = falta_mayor4.copy()
+        if "conciliacion" in falta_mayor5.columns:
+            falta_mayor5 = falta_mayor5[falta_mayor5["conciliacion"] != "Acred. Debin"].reset_index(drop=True)
+        else:
+            falta_mayor5 = falta_mayor5.reset_index(drop=True)
     else:
-        match_debin     = pd.DataFrame(columns=falta_extracto4.columns)
-        falta_extracto5 = falta_extracto4.copy().reset_index(drop=True)
+        match_debin_mayor    = pd.DataFrame(columns=falta_extracto4.columns)
+        match_debin_extracto = pd.DataFrame(columns=df_extracto_cat2.columns)
+        falta_extracto5      = falta_extracto4.copy().reset_index(drop=True)
+        # Si no hubo match, agregar Debin del extracto al faltante mayor
+        debin_cat_para_mayor = alinear_columnas(debin_cat.reset_index(drop=True), list(falta_mayor4.columns))
+        falta_mayor5 = pd.concat([falta_mayor4.reset_index(drop=True), debin_cat_para_mayor], ignore_index=True)
 
-    return match_debin, falta_extracto5
+    return match_debin_mayor, match_debin_extracto, falta_extracto5, falta_mayor5
 
 
 # ─────────────────────────────────────────────
@@ -413,15 +439,19 @@ def _asignar_id(df_m, df_e, match_tipo, id_inicio, agrupar_por=None):
     return dm, de, id_fin
 
 
+def _limpiar_dfs(lista):
+    return [df for df in lista if df is not None and not df.empty and not df.isna().all().all()]
+
+
 # ─────────────────────────────────────────────
 # EXPORTAR EN MEMORIA
 # ─────────────────────────────────────────────
 
-def generar_excel_en_memoria_hipotecario(falta_mayor4, falta_extracto5,
+def generar_excel_en_memoria_hipotecario(falta_mayor5, falta_extracto5,
                                           match_mayor_def, match_extracto_def):
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        falta_mayor4.to_excel(writer,       sheet_name="Faltante Mayor",    index=False)
+        falta_mayor5.to_excel(writer,       sheet_name="Faltante Mayor",    index=False)
         falta_extracto5.to_excel(writer,    sheet_name="Faltante Extracto", index=False)
         match_mayor_def.to_excel(writer,    sheet_name="Match Mayor",       index=False)
         match_extracto_def.to_excel(writer, sheet_name="Match Extracto",    index=False)
@@ -442,8 +472,8 @@ def correr_conciliacion_hipotecario(archivo_mayor, archivo_extracto):
     df_extracto_dep = normalize_extracto_hipotecario(df_extracto)
 
     # 3. Categorizar extracto
-    df_ext_cat1 = categorizar_extracto_v1(df_extracto_dep)
-    df_ext_cat2 = categorizar_extracto_v2(df_ext_cat1)
+    df_ext_cat1      = categorizar_extracto_v1(df_extracto_dep)
+    df_ext_cat2      = categorizar_extracto_v2(df_ext_cat1)
     df_ext_sin_debin = df_ext_cat2[df_ext_cat2["conciliacion"] != "Acred. Debin"].reset_index(drop=True)
 
     # 4. Categorizar mayor
@@ -465,41 +495,34 @@ def correr_conciliacion_hipotecario(archivo_mayor, archivo_extracto):
     # 9. Cruce 4 — TP
     me4, mm4, fe4, fm4 = cruzar_tp(fe3, fm3)
 
-    # 10. Cruce 5 — Debin
-    match_debin, falta_ext5 = cruzar_debin(df_ext_cat2, fe4)
+    # 10. Cruce 5 — Debin (devuelve 4 valores)
+    match_debin_mayor, match_debin_extracto, falta_ext5, falta_may5 = cruzar_debin(df_ext_cat2, fe4, fm4)
 
     # 11. Asignar IDs
     dm0, de0, id1 = _asignar_id(mm0, me0, "0", 1)
     dm1, de1, id2 = _asignar_id(mm1, me1, "1", id1)
-
-    col_ce2 = _get_col(me2, "conciliacion"); col_cm2 = _get_col(mm2, "conciliacion")
+    col_ce2 = _get_col(me2,"conciliacion"); col_cm2 = _get_col(mm2,"conciliacion")
     dm2, de2, id3 = _asignar_id(mm2, me2, "2", id2, agrupar_por=(col_cm2, col_ce2))
-
-    col_fe3 = _get_col(me3, "Fecha","fecha"); col_fm3 = _get_col(mm3, "fecha","Fecha")
+    col_fe3 = _get_col(me3,"Fecha","fecha"); col_fm3 = _get_col(mm3,"fecha","Fecha")
     dm3, de3, id4 = _asignar_id(mm3, me3, "3", id3, agrupar_por=(col_fm3, col_fe3))
-
-    col_fe4 = _get_col(me4, "Fecha","fecha"); col_fm4 = _get_col(mm4, "fecha","Fecha")
+    col_fe4 = _get_col(me4,"Fecha","fecha"); col_fm4 = _get_col(mm4,"fecha","Fecha")
     dm4, de4, id5 = _asignar_id(mm4, me4, "4", id4, agrupar_por=(col_fm4, col_fe4))
 
-    dd5 = match_debin.copy().reset_index(drop=True)
+    dd5 = match_debin_mayor.copy().reset_index(drop=True)
+    dc5 = match_debin_extracto.copy().reset_index(drop=True)
     if len(dd5) > 0: dd5["match_id"] = id5; dd5["match_tipo"] = "5"
-
-    # Debin del mayor (todas las acred. debin del extracto original)
-    debin_mayor = df_ext_cat2[df_ext_cat2["conciliacion"]=="Acred. Debin"].copy()
-    if len(debin_mayor) > 0:
-        debin_mayor["match_id"]   = id5 if len(dd5) > 0 else -1
-        debin_mayor["match_tipo"] = "5"
+    if len(dc5) > 0: dc5["match_id"] = id5; dc5["match_tipo"] = "5"
 
     # 12. Consolidar match definitivo
-    match_mayor_def = pd.concat([dm0, dm1, de2, de3, de4], ignore_index=True)
-    match_ext_def   = pd.concat([de0, de1, dm2, dm3, dm4, debin_mayor], ignore_index=True)
+    match_mayor_def = pd.concat(_limpiar_dfs([dm0, dm1, de2, de3, de4, dd5]), ignore_index=True)
+    match_ext_def   = pd.concat(_limpiar_dfs([de0, de1, dm2, dm3, dm4, dc5]), ignore_index=True)
 
     stats = {
         "match_exacto":     len(mm0),
         "match_tolerancia": len(mm1),
-        "falta_mayor":      len(fm4),
+        "falta_mayor":      len(falta_may5),
         "falta_extracto":   len(falta_ext5),
     }
 
-    buf = generar_excel_en_memoria_hipotecario(fm4, falta_ext5, match_mayor_def, match_ext_def)
+    buf = generar_excel_en_memoria_hipotecario(falta_may5, falta_ext5, match_mayor_def, match_ext_def)
     return buf, stats
