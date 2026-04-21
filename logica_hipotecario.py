@@ -142,7 +142,7 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         desc.apply(lambda d: _contiene(d, "debin")),
         desc.apply(lambda d: _contiene(d, "comerciosfirstdata")),
         desc.apply(lambda d: _contiene(d, "cabal")),
-        desc.apply(lambda d: _contiene(d, "impuesto","iva","comision","paquete","n/dinteradelccs/acuerd")),
+        desc.apply(lambda d: _contiene(d, "impuesto","iva","comision","paquete","n/dinteradelccs/acuerd","sircreb")),
         desc.apply(lambda d: "cuota" in d and "prestamo" in d),
         desc.apply(lambda d: _contiene(d, "sancor","swiss","berkley","laholando")),
         desc.apply(lambda d: _contiene(d, "tefdatanetmt","ctaprop","transfenv")),
