@@ -1,5 +1,6 @@
 """
-Lógica de lectura de liquidaciones Payway desde PDFs
+Lógica de lectura de liquidaciones Payway desde PDFs (v2)
+Usa pdfplumber en lugar de PyMuPDF.
 """
 import re
 import io
@@ -10,104 +11,108 @@ import pandas as pd
 
 
 # ─────────────────────────────────────────────
+# CONSTANTES
+# ─────────────────────────────────────────────
+
+# Mapeo AG.RET.ING.BRUTOS → tarjeta
+# No se usa texto libre porque todos los PDFs Galicia incluyen
+# "SOLICITUD DE ADHESION AL SISTEMA VISA" en el pie legal → falsos positivos
+AGRET_TARJETA = {
+    "100": "master",
+    "900": "visa",
+    "391": "cabal",
+    "810": "american",
+}
+
+NUM_FINAL_RE = re.compile(r'\$\s*([\d.,]+)\s*$')
+NUM_RE       = re.compile(r'(\d{1,3}(?:\.\d{3})*,\d{2})')
+
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
+def _leer_pdf(pdf_bytes: bytes) -> str:
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        return "\n".join(p.extract_text() or "" for p in pdf.pages)
+
+
+def _a_float(s: str) -> float:
+    return float(s.replace(".", "").replace(",", ".").strip())
+
+
+# ─────────────────────────────────────────────
 # EXTRACCIÓN BASE
 # ─────────────────────────────────────────────
 
 def extraer_datos_base_pdf(pdf_bytes: bytes, nombre_archivo: str) -> dict:
-    import fitz
-
-    datos = {
-        "ID": "",
-        "Total Neto": 0.0,
-        "Total Presentado": 0.0,
-        "Total Descuentos": 0.0
-    }
-
-    def a_float(valor: str) -> float:
-        return float(valor.replace(".", "").replace(",", ".").strip())
-
-    def es_importe(linea: str) -> bool:
-        return bool(re.fullmatch(r"\d{1,3}(?:\.\d{3})*,\d{2}", linea.strip()))
-
-    doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
-    texto = ""
-    for pagina in doc:
-        texto += pagina.get_text("text") + "\n"
-
-    lineas      = [l.strip() for l in texto.splitlines() if l.strip()]
-    texto_lower = texto.lower()
+    """
+    Extrae: ID (tarjeta + nro resumen), Total Presentado, Total Descuentos, Total Neto.
+    """
+    texto  = _leer_pdf(pdf_bytes)
+    lineas = texto.splitlines()
     nombre_lower = nombre_archivo.lower()
 
-    # Tarjeta
-    if "amex" in nombre_lower or "american" in texto_lower:
-        tarjeta = "american"
-    elif "master" in nombre_lower or "master" in texto_lower:
-        tarjeta = "master"
-    elif "visa" in nombre_lower or "visa" in texto_lower:
-        tarjeta = "visa"
-    elif "cabal" in nombre_lower or "cabal" in texto_lower:
-        tarjeta = "cabal"
-    else:
-        tarjeta = ""
+    # Tarjeta: AG.RET.ING.BRUTOS como fuente primaria
+    tarjeta = ""
+    m = re.search(r"AG\.RET\.ING\.BRUTOS[:\s]+([\d]+)", texto, re.IGNORECASE)
+    if m:
+        tarjeta = AGRET_TARJETA.get(m.group(1), "")
+
+    # Fallback por nombre de archivo
+    if not tarjeta:
+        for kw in ["amex", "american", "master", "cabal", "visa"]:
+            if kw in nombre_lower:
+                tarjeta = "american" if kw in ("amex", "american") else kw
+                break
 
     # Número de resumen
     nro_resumen = ""
-    patrones_resumen = [
-        r"n[°ºo]?\s*de\s*resumen\s*:?\s*(\d+)",
-        r"resumen\s*:?\s*(\d+)"
-    ]
-    for patron in patrones_resumen:
+    for patron in [
+        r"n[°ºo]?\s*de\s*resumen[:\s]+([\d]+)",
+        r"resumen[:\s]+([\d]+)",
+    ]:
         m = re.search(patron, texto, re.IGNORECASE)
         if m:
-            nro_resumen = m.group(1)
+            nro_resumen = str(int(m.group(1)))
             break
 
     if not nro_resumen:
-        for i, linea in enumerate(lineas):
-            linea_norm = linea.lower().replace("º", "°")
-            if "resumen" in linea_norm:
-                m_linea = re.search(r"(\d+)", linea)
-                if m_linea:
-                    nro_resumen = m_linea.group(1)
-                    break
-                for j in range(i + 1, min(i + 6, len(lineas))):
-                    m_sig = re.search(r"(\d+)", lineas[j])
-                    if m_sig:
-                        nro_resumen = m_sig.group(1)
-                        break
-                if nro_resumen:
-                    break
-
-    if not nro_resumen:
-        m_arch = re.search(r"(?:amex|american|masterd?|visa|cabal)\s+(\d+)", nombre_lower)
-        if m_arch:
-            nro_resumen = m_arch.group(1)
-
-    if nro_resumen:
-        nro_resumen = str(int(nro_resumen))
-
-    datos["ID"] = f"{tarjeta}{nro_resumen}"
+        m = re.search(r"(?:amex|american|masterd?|visa|cabal)\s+(\d+)", nombre_lower)
+        if m:
+            nro_resumen = m.group(1)
 
     # Totales
-    idx_est = None
-    for i, linea in enumerate(lineas):
-        if linea.lower() == "establecimiento":
-            idx_est = i
-            break
+    def primer_numero_ventana(desde, ventana=6):
+        for l in lineas[desde: desde + ventana]:
+            m2 = NUM_RE.search(l)
+            if m2:
+                return _a_float(m2.group(1))
+        return 0.0
 
-    if idx_est is not None:
-        importes = []
-        for linea in lineas[idx_est + 1:]:
-            if es_importe(linea):
-                importes.append(linea)
-                if len(importes) == 6:
-                    break
-        if len(importes) >= 3:
-            datos["Total Presentado"] = a_float(importes[0])
-            datos["Total Descuentos"] = a_float(importes[1])
-            datos["Total Neto"]       = a_float(importes[2])
+    idx_pres  = next((i for i, l in enumerate(lineas) if "TOTAL PRESENTADO $" in l), None)
+    idx_desc  = next((i for i, l in enumerate(lineas) if "TOTAL DESCUENTO $"  in l), None)
+    idx_saldo = next((i for i, l in enumerate(lineas) if re.match(r"SALDO \$", l.strip())), None)
 
-    return datos
+    total_presentado = primer_numero_ventana(idx_pres + 1) if idx_pres is not None else 0.0
+
+    total_descuentos = 0.0
+    if idx_desc is not None:
+        for l in lineas[idx_desc: idx_desc + 6]:
+            nums = NUM_RE.findall(l)
+            if nums and l.strip() != lineas[idx_desc].strip():
+                total_descuentos = _a_float(nums[0])
+                break
+
+    total_neto = primer_numero_ventana(idx_saldo + 1) if idx_saldo is not None else 0.0
+
+    return {
+        "ID": f"{tarjeta}{nro_resumen}",
+        "Total Presentado": total_presentado,
+        "Total Descuentos": total_descuentos,
+        "Total Neto": total_neto,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -115,142 +120,75 @@ def extraer_datos_base_pdf(pdf_bytes: bytes, nombre_archivo: str) -> dict:
 # ─────────────────────────────────────────────
 
 def extraer_detalle_descuentos_pdf(pdf_bytes: bytes) -> dict:
-    import fitz
+    """
+    Extrae impuestos, retenciones y percepciones del bloque 'Deducciones Impositivas'.
+    Columnas fijas: IVA 21%, IVA 10,5%, Retenciones Totales, Percepciones Totales,
+                    Monto Gravado IVA 21%, Monto Gravado IVA 10,5%, Base Exenta
+    Columnas dinámicas: prefijo R. (retenciones IIBB) o P. (percepciones/IVA)
+    """
+    texto = _leer_pdf(pdf_bytes)
 
     datos = {
-        "IVA 10,5%": 0.0,
         "IVA 21%": 0.0,
+        "IVA 10,5%": 0.0,
         "Retenciones Totales": 0.0,
-        "Percepciones Totales": 0.0
+        "Percepciones Totales": 0.0,
+        "Monto Gravado IVA 21%": 0.0,
+        "Monto Gravado IVA 10,5%": 0.0,
+        "Base Exenta": 0.0,
     }
 
-    def convertir_numero(valor: str) -> float:
-        return float(valor.replace(".", "").replace(",", ".").strip())
+    # IVA fijo
+    m = re.search(r"IVA\s*21,00\s*%\s*\$\s*([\d.,]+)", texto, re.IGNORECASE)
+    if m:
+        datos["IVA 21%"] = _a_float(m.group(1))
 
-    def extraer_ultimo_importe_monetario(linea: str):
-        matches = re.findall(r"(?<!\d)(\d{1,3}(?:\.\d{3})*,\d{2})(?!\s*%)", linea)
-        return matches[-1] if matches else None
+    m = re.search(r"IVA\s*10,50?\s*%\s*Ley\s*25\.?063\s*\$\s*([\d.,]+)", texto, re.IGNORECASE)
+    if m:
+        datos["IVA 10,5%"] = _a_float(m.group(1))
 
-    def limpiar_nombre_concepto(linea: str, prefijo: str) -> str:
-        linea = re.sub(r"\s+", " ", linea).strip()
-        linea_sin_importe = re.sub(r"\s*\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}\s*$", "", linea).strip()
-        return f"{prefijo}{linea_sin_importe}" if linea_sin_importe else ""
+    # Bases imponibles
+    m = re.search(r"Tasa\s*21,00\s*%\s*\$\s*([\d.,]+)", texto, re.IGNORECASE)
+    if m:
+        datos["Monto Gravado IVA 21%"] = _a_float(m.group(1))
 
-    def es_linea_percepcion_valida(linea: str) -> bool:
-        linea_norm = re.sub(r"\s+", " ", linea).strip().lower()
-        if not extraer_ultimo_importe_monetario(linea):
-            return False
-        patrones_invalidos = [
-            r"\bventa[s]?\b", r"\bcuota[s]?\b", r"\blote\b", r"\bfecha\b",
-            r"\btotal del día\b", r"\btotal del dia\b", r"\barancel\b",
-            r"\bplan\b", r"\bserv\.", r"\bcostos financieros\b"
-        ]
-        for patron in patrones_invalidos:
-            if re.search(patron, linea_norm):
-                return False
-        patrones_validos = [
-            r"\biva\b", r"\brg\b", r"\bperc", r"\biibb\b",
-            r"\bingresos brutos\b", r"\bsircreb\b"
-        ]
-        return any(re.search(patron, linea_norm) for patron in patrones_validos)
+    m = re.search(r"Tasa\s*10,50\s*%\s*\$\s*([\d.,]+)", texto, re.IGNORECASE)
+    if m:
+        datos["Monto Gravado IVA 10,5%"] = _a_float(m.group(1))
 
-    def procesar_subbloque_detallado(subbloque, prefijo_columna, columna_total, filtrar_percepciones=False):
-        resultados = {}
-        total      = 0.0
-        lineas     = [l.strip() for l in subbloque.splitlines() if l.strip()]
-        lineas_unidas = []
-        i = 0
-        while i < len(lineas):
-            linea_actual = re.sub(r"\s+", " ", lineas[i]).strip()
-            if extraer_ultimo_importe_monetario(linea_actual):
-                lineas_unidas.append(linea_actual); i += 1
-            else:
-                if i + 1 < len(lineas):
-                    siguiente = re.sub(r"\s+", " ", lineas[i + 1]).strip()
-                    lineas_unidas.append(f"{linea_actual} {siguiente}".strip()); i += 2
-                else:
-                    i += 1
-        for linea in lineas_unidas:
-            if filtrar_percepciones and not es_linea_percepcion_valida(linea):
+    m = re.search(r"Base\s*Exenta\s*\$\s*([\d.,]+)", texto, re.IGNORECASE)
+    if m:
+        datos["Base Exenta"] = _a_float(m.group(1))
+
+    # Columnas dinámicas: bloque Deducciones Impositivas
+    bloque_m = re.search(
+        r'Deducciones Impositivas\n(.*?)'
+        r'(?:_{5,}|Continúa en|Fin de la|SE RECUERDA|ADEMAS|DE ACUERDO|SR\.\s*COMERCIANTE|\Z)',
+        texto, re.DOTALL | re.IGNORECASE
+    )
+    if bloque_m:
+        IGNORAR = re.compile(r'^\(ver|^en hoja aparte', re.IGNORECASE)
+        for linea in bloque_m.group(1).splitlines():
+            linea = linea.strip()
+            if not linea or IGNORAR.match(linea):
                 continue
-            importe = extraer_ultimo_importe_monetario(linea)
-            if importe:
-                valor = convertir_numero(importe)
-                nombre_columna = limpiar_nombre_concepto(linea, prefijo_columna)
-                if nombre_columna:
-                    resultados[nombre_columna] = resultados.get(nombre_columna, 0) + valor
-                total += valor
-        resultados[columna_total] = total
-        return resultados
-
-    doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
-    texto = ""
-    for pagina in doc:
-        texto += pagina.get_text()
-
-    match_bloque = re.search(
-        r"-Impuestos(.*?)(?:Total del día|Base Imponible IVA|SE ACREDITO EN:|Fin de la información|$)",
-        texto, re.IGNORECASE | re.DOTALL
-    )
-    bloque = match_bloque.group(1) if match_bloque else texto
-
-    # IVA 21%
-    for valor in re.findall(r"IVA\s*21,00%\s*\$?\s*([\d\.,]+)", bloque, re.IGNORECASE):
-        datos["IVA 21%"] += convertir_numero(valor)
-
-    # IVA 10,5%
-    for patron in [r"IVA\s*10,50\s*%\s*Ley\s*25\.?063\s*\$?\s*([\d\.,]+)",
-                   r"IVA\s*10,5\s*%\s*Ley\s*25\.?063\s*\$?\s*([\d\.,]+)"]:
-        for valor in re.findall(patron, bloque, re.IGNORECASE):
-            datos["IVA 10,5%"] += convertir_numero(valor)
-
-    # Percepciones
-    match_per = re.search(
-        r"-Percepciones(.*?)(?:-Retenciones|Total del día|Base Imponible IVA|SE ACREDITO EN:|$)",
-        bloque, re.IGNORECASE | re.DOTALL
-    )
-    if match_per:
-        datos.update(procesar_subbloque_detallado(
-            match_per.group(1), "P. ", "Percepciones Totales", filtrar_percepciones=True))
-
-    # Retenciones
-    match_ret = re.search(
-        r"-Retenciones(.*?)(?:-Percepciones|Total del día|Base Imponible IVA|SE ACREDITO EN:|$)",
-        bloque, re.IGNORECASE | re.DOTALL
-    )
-    if match_ret:
-        datos.update(procesar_subbloque_detallado(
-            match_ret.group(1), "R. ", "Retenciones Totales", filtrar_percepciones=False))
+            m2 = NUM_FINAL_RE.search(linea)
+            if not m2:
+                continue
+            valor = _a_float(m2.group(1))
+            desc  = re.sub(r'\s*\$\s*[\d.,]+\s*$', '', linea).strip()
+            if not desc:
+                continue
+            if re.search(r'ret\.ib|retenc.*ib|iibb|ing\.?\s*brutos', desc, re.IGNORECASE):
+                col = f"R. {desc}"
+                datos[col] = datos.get(col, 0.0) + valor
+                datos["Retenciones Totales"] += valor
+            else:
+                col = f"P. {desc}"
+                datos[col] = datos.get(col, 0.0) + valor
+                datos["Percepciones Totales"] += valor
 
     return datos
-
-
-# ─────────────────────────────────────────────
-# ENRIQUECER CON BASES IMPONIBLES
-# ─────────────────────────────────────────────
-
-def calcular_bases_imponibles_pdf(pdf_bytes: bytes, detalle: dict) -> dict:
-    import fitz
-
-    detalle = detalle.copy()
-
-    detalle["Monto Gravado IVA 21%"]   = round(detalle.get("IVA 21%", 0.0) / 0.21, 2)   if detalle.get("IVA 21%", 0.0)   else 0.0
-    detalle["Monto Gravado IVA 10,5%"] = round(detalle.get("IVA 10,5%", 0.0) / 0.105, 2) if detalle.get("IVA 10,5%", 0.0) else 0.0
-    detalle["Base Exenta"] = 0.0
-
-    def convertir_numero(valor: str) -> float:
-        return float(valor.replace(".", "").replace(",", ".").strip())
-
-    doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
-    texto = ""
-    for pagina in doc:
-        texto += pagina.get_text()
-
-    match_base = re.search(r"Base\s+Exenta\s*\$?\s*([\d\.,]+)", texto, re.IGNORECASE)
-    if match_base:
-        detalle["Base Exenta"] = convertir_numero(match_base.group(1))
-
-    return detalle
 
 
 # ─────────────────────────────────────────────
@@ -259,34 +197,32 @@ def calcular_bases_imponibles_pdf(pdf_bytes: bytes, detalle: dict) -> dict:
 
 def procesar_pdfs_payway(archivos_subidos) -> bytes:
     """
-    Recibe una lista de objetos subidos por Streamlit (file_uploader),
-    procesa cada PDF y devuelve un Excel en memoria.
+    Recibe lista de archivos subidos por Streamlit, procesa cada PDF
+    y devuelve un Excel con formato en memoria.
     """
-    columnas_fijas = [
+    COLUMNAS_FIJAS = [
         "ID", "Total Neto", "Total Presentado", "Total Descuentos",
         "IVA 10,5%", "IVA 21%", "Retenciones Totales", "Percepciones Totales",
-        "Monto Gravado IVA 21%", "Monto Gravado IVA 10,5%", "Base Exenta"
+        "Monto Gravado IVA 21%", "Monto Gravado IVA 10,5%", "Base Exenta",
     ]
 
     filas             = []
     columnas_dinamicas = set()
 
     for archivo in archivos_subidos:
-        pdf_bytes     = archivo.read()
-        nombre        = archivo.name
+        pdf_bytes = archivo.read()
+        nombre    = archivo.name
 
-        datos   = extraer_datos_base_pdf(pdf_bytes, nombre)
+        base    = extraer_datos_base_pdf(pdf_bytes, nombre)
         detalle = extraer_detalle_descuentos_pdf(pdf_bytes)
-        detalle.update(datos)
-        fila    = calcular_bases_imponibles_pdf(pdf_bytes, detalle)
-
+        fila    = {**detalle, **base}
         filas.append(fila)
 
-        for clave in fila.keys():
-            if clave not in columnas_fijas:
-                columnas_dinamicas.add(clave)
+        for k in fila:
+            if k not in COLUMNAS_FIJAS:
+                columnas_dinamicas.add(k)
 
-    columnas_finales = columnas_fijas + sorted(columnas_dinamicas)
+    columnas_finales = COLUMNAS_FIJAS + sorted(columnas_dinamicas)
 
     df = pd.DataFrame(filas)
     for col in columnas_finales:
@@ -294,18 +230,67 @@ def procesar_pdfs_payway(archivos_subidos) -> bytes:
             df[col] = "" if col == "ID" else 0.0
 
     df = df[columnas_finales]
-
-    columnas_num = [c for c in df.columns if c != "ID"]
-    df[columnas_num] = df[columnas_num].fillna(0.0)
+    cols_num = [c for c in df.columns if c != "ID"]
+    df[cols_num] = df[cols_num].fillna(0.0)
 
     fila_total = {"ID": "TOTAL"}
-    for col in columnas_num:
+    for col in cols_num:
         fila_total[col] = round(df[col].sum(), 2)
 
     df = pd.concat([df, pd.DataFrame([fila_total])], ignore_index=True)
 
+    # Generar Excel con formato
     buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Liquidaciones", index=False)
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
 
-    return buf.getvalue()
+    # Aplicar estilos
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = load_workbook(buf)
+    ws = wb.active
+
+    THIN  = Side(border_style="thin", color="AAAAAA")
+    BORDE = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    n_rows = ws.max_row
+    n_cols = ws.max_column
+
+    # Encabezado azul
+    for col in range(1, n_cols + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill      = PatternFill("solid", fgColor="1F4E79")
+        c.font      = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border    = BORDE
+    ws.row_dimensions[1].height = 40
+
+    # Filas de datos
+    for row in range(2, n_rows + 1):
+        is_total = ws.cell(row=row, column=1).value == "TOTAL"
+        for col in range(1, n_cols + 1):
+            c = ws.cell(row=row, column=col)
+            c.border = BORDE
+            if is_total:
+                c.fill = PatternFill("solid", fgColor="D6E4F0")
+                c.font = Font(name="Arial", bold=True, size=10)
+            else:
+                c.font = Font(name="Arial", size=10)
+            c.alignment = Alignment(
+                horizontal="center" if col == 1 else "right",
+                vertical="center"
+            )
+            if col > 1 and c.value is not None:
+                c.number_format = "#,##0.00"
+
+    # Anchos de columna
+    ws.column_dimensions["A"].width = 22
+    for col in range(2, n_cols + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 18
+
+    ws.freeze_panes = "A2"
+
+    buf_out = BytesIO()
+    wb.save(buf_out)
+    return buf_out.getvalue()
