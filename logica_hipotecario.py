@@ -136,6 +136,17 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         try:    return float(importe) % 1000 == 0
         except: return False
 
+    # CUITs propios — si aparecen en descripcion es Transf. entre cuentas, no Seña
+    CUITS_PROPIOS = [
+        "30716161591",
+        "30718257510",
+        "30716981076",
+        "30719170699",
+        "30717516288",
+    ]
+    es_cuit_propio  = desc.apply(lambda d: any(c in d for c in CUITS_PROPIOS))
+    es_keyword_sena = desc.apply(lambda d: _contiene(d, "cashout", "recibisteuna transferencia", "transfenv"))
+
     condiciones = [
         desc.apply(lambda d: _contiene(d, "prisma")),
         desc.apply(lambda d: _contiene(d, "debin")) & df[col_importe].apply(es_redondo_1000),
@@ -145,10 +156,14 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         desc.apply(lambda d: _contiene(d, "impuesto","iva","comision","paquete","n/dinteradelccs/acuerd","sircreb")),
         desc.apply(lambda d: "cuota" in d and "prestamo" in d),
         desc.apply(lambda d: _contiene(d, "sancor","swiss","berkley","laholando")),
-        desc.apply(lambda d: _contiene(d, "tefdatanetmt","ctaprop","transfenv")),
+        # Señas: keyword match SIN cuit propio (va antes que Transf. entre cuentas)
+        es_keyword_sena & ~es_cuit_propio,
+        # Transf. entre cuentas: keyword match CON cuit propio, o palabras exclusivas
+        (es_keyword_sena & es_cuit_propio) |
+        desc.apply(lambda d: _contiene(d, "tefdatanetmt", "ctaprop")),
     ]
     categorias = ["Prisma","Transf. entre cuentas","Acred. Debin","Acred. TC","Cabal",
-                  "Gastos Bancarios","Prestamo","Seguros","Transf. entre cuentas"]
+                  "Gastos Bancarios","Prestamo","Seguros","Señas","Transf. entre cuentas"]
 
     df["conciliacion"] = "0"
     for cond, cat in zip(condiciones, categorias):
