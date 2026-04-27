@@ -1,5 +1,5 @@
 """
-Lógica de conciliación bancaria - Banco Galicia (v3)
+Lógica de conciliación bancaria - Banco Galicia (v4)
 """
 import re
 from io import BytesIO
@@ -567,29 +567,66 @@ def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
     return fp
 
 
-def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
-                                 ejecutar=True, df_proveedores_def=None,
-                                 tolerancia_importe=0.5, top_candidatos=3):
+def cruzar_proveedores_descarga(
+    falta_extracto6: pd.DataFrame,
+    falta_mayor6: pd.DataFrame,
+    ejecutar: bool = True,
+    df_proveedores_def: pd.DataFrame | None = None,
+    tolerancia_importe: float = 0.5,
+    top_candidatos: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Si ejecutar=False o df_proveedores_def es None/vacío,
-    devuelve los faltantes sin cambios (días sin pagos masivos).
+    Séptimo cruce: matchea proveedores de falta_extracto6 contra df_proveedores_def.
+    df_proveedores_def ya viene depurado de entradas matcheadas en cruces anteriores.
+    Si ejecutar=False o df_proveedores_def es None, devuelve los faltantes sin cambios.
+
+    Paso 1 — falta_extracto6 vs df_proveedores_def por nombre fuzzy + fecha + importe:
+    - Agrupa por Tercero + Fecha en falta_extracto6 (lado mayor)
+    - Agrupa por RazónSocial + FechaEmisión en df_proveedores (monto * -1)
+    - Lo que matchea se saca de falta_extracto6 → falta_extracto7
+    - match_extracto7: las filas originales de falta_extracto6 que matchearon
+    - match_mayor7: una fila resumen por fecha matcheada con:
+        * fecha, descripcion y leyendas = "TRF INMED PROVEED"
+        * importe = suma de importes matcheados de falta_extracto6
+        * conciliacion = "Proveedores"
+
+    Paso 2 — Actualizar falta_mayor6:
+    - Sacar de falta_mayor6 las filas cuyo concepto contenga "TRF INMED PROVEED"
+      en las fechas matcheadas
+    - Agregar las filas de df_proveedores_def que NO matchearon con:
+        * fecha              = "Fecha de emisión"
+        * descripcion        = "TRF INMED PROVEED"
+        * debitos            = Monto
+        * concepto           = "TRF INMED PROVEED"
+        * leyenda adicional1 = "Razón Social Beneficiario"
+        * importe            = -Monto
+        * conciliacion       = "Proveedores"
+
+    Devuelve:
+    - match_extracto7:  filas de falta_extracto6 que matchearon (lado mayor)
+    - match_mayor7:     fila resumen por fecha matcheada (lado extracto)
+    - falta_extracto7:  falta_extracto6 sin matcheados
+    - falta_mayor7:     falta_mayor6 sin TRF matcheados + filas de proveedores no matcheados
     """
     try:
         from rapidfuzz import process, fuzz
     except ImportError:
         raise ImportError("Instalá rapidfuzz: pip install rapidfuzz")
 
-    if not ejecutar or df_proveedores_def is None or (hasattr(df_proveedores_def, 'empty') and df_proveedores_def.empty):
-        return (pd.DataFrame(columns=falta_extracto6.columns),
-                pd.DataFrame(columns=falta_mayor6.columns),
-                falta_extracto6.copy(),
-                falta_mayor6.copy())
+    if not ejecutar or df_proveedores_def is None or (hasattr(df_proveedores_def, "empty") and df_proveedores_def.empty):
+        print("⚠️  Cruce de proveedores descarga omitido — se pasan los faltantes sin cambios.")
+        return (
+            pd.DataFrame(columns=falta_extracto6.columns),
+            pd.DataFrame(columns=falta_mayor6.columns),
+            falta_extracto6.copy(),
+            falta_mayor6.copy(),
+        )
 
-    col_te    = _get_col(falta_extracto6, "Tercero","tercero")
-    col_ie    = _get_col(falta_extracto6, "Importe","importe")
-    col_fe    = _get_col(falta_extracto6, "Fecha","fecha")
-    col_fm    = _get_col(falta_mayor6,    "fecha","Fecha")
-    col_im    = _get_col(falta_mayor6,    "importe","Importe")
+    col_te    = _get_col(falta_extracto6, "Tercero", "tercero")
+    col_ie    = _get_col(falta_extracto6, "Importe", "importe")
+    col_fe    = _get_col(falta_extracto6, "Fecha", "fecha")
+    col_fm    = _get_col(falta_mayor6,    "fecha", "Fecha")
+    col_im    = _get_col(falta_mayor6,    "importe", "Importe")
     col_cm    = _get_col(falta_mayor6,    "conciliacion")
     col_razon = next((c for c in df_proveedores_def.columns if "raz" in c.lower()), None)
     if col_razon is None:
@@ -602,97 +639,143 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
     fe = falta_extracto6.copy().reset_index(drop=True)
     fm = falta_mayor6.copy().reset_index(drop=True)
     fp = df_proveedores_def.copy().reset_index(drop=True)
-    fp[col_monto]   = pd.to_numeric(fp[col_monto].astype(str).str.replace(",",".",regex=False).str.strip(), errors="coerce").fillna(0.0)
+
+    fp[col_monto]   = pd.to_numeric(
+        fp[col_monto].astype(str).str.replace(",", ".", regex=False).str.strip(),
+        errors="coerce"
+    ).fillna(0.0)
     fp[col_fecha_p] = pd.to_datetime(fp[col_fecha_p], errors="coerce")
 
-    fp_neg = fp.copy(); fp_neg[col_monto] = fp_neg[col_monto] * -1
+    # ------------------------------------------------------------------ #
+    # PASO 1: cruce por nombre fuzzy + fecha + importe                    #
+    # ------------------------------------------------------------------ #
+    fp_monto_neg = fp.copy()
+    fp_monto_neg[col_monto] = fp_monto_neg[col_monto] * -1
 
     suma_por_tercero_fecha = fe.groupby([col_te, col_fe])[col_ie].sum()
-    suma_por_razon_fecha   = fp_neg.groupby([col_razon, col_fecha_p])[col_monto].sum()
-    nombres_p = fp_neg[col_razon].unique().tolist()
+    suma_por_razon_fecha   = fp_monto_neg.groupby([col_razon, col_fecha_p])[col_monto].sum()
+    nombres_p = fp_monto_neg[col_razon].unique().tolist()
 
-    usado_e, idx_e           = set(), []
-    nombres_matcheados        = set()
-    fechas_matcheadas         = set()
+    usado_extracto     = set()
+    nombres_matcheados = set()
+    fechas_matcheadas  = set()
+    match_idx_e        = []
 
     for (nombre_e, fecha_e), suma_e in suma_por_tercero_fecha.items():
-        candidatos = process.extract(nombre_e, nombres_p, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
+        candidatos = process.extract(
+            nombre_e,
+            nombres_p,
+            scorer=fuzz.token_sort_ratio,
+            limit=top_candidatos,
+        )
+
+        if not candidatos:
+            print(f"⚠️  '{nombre_e}' [{fecha_e}]: sin candidatos en proveedores.")
+            continue
+
         encontrado = False
+
         for nombre_p, score, _ in candidatos:
-            if (nombre_p, fecha_e) not in suma_por_razon_fecha.index: continue
+            if (nombre_p, fecha_e) not in suma_por_razon_fecha.index:
+                continue
             suma_p = suma_por_razon_fecha[(nombre_p, fecha_e)]
             if abs(suma_e - suma_p) <= tolerancia_importe:
-                ie = fe[(fe[col_te]==nombre_e) & (fe[col_fe]==fecha_e) & (~fe.index.isin(usado_e))].index.tolist()
+                idx_e = fe[
+                    (fe[col_te] == nombre_e) &
+                    (fe[col_fe] == fecha_e) &
+                    (~fe.index.isin(usado_extracto))
+                ].index.tolist()
                 fechas_matcheadas.add(fecha_e)
-                idx_e.extend(ie); usado_e.update(ie)
-                nombres_matcheados.add(nombre_p); encontrado = True; break
+                print(f"✅ '{nombre_e}' [{fecha_e}] ↔ '{nombre_p}' (score={score:.1f}) | suma={suma_e:.2f}")
+                match_idx_e.extend(idx_e)
+                usado_extracto.update(idx_e)
+                nombres_matcheados.add(nombre_p)
+                encontrado = True
+                break
+
+        if not encontrado:
+            mejor = candidatos[0]
+            suma_mejor = suma_por_razon_fecha.get((mejor[0], fecha_e), 0)
+            print(f"⚠️  '{nombre_e}' [{fecha_e}]: sin match | mejor='{mejor[0]}' (score={mejor[1]:.1f}) | extracto={suma_e:.2f} vs proveedores={suma_mejor:.2f}")
 
     nombres_no_matcheados = set(nombres_p) - nombres_matcheados
-    match_extracto7 = fe.loc[list(set(idx_e))].reset_index(drop=True)
 
+    # match_extracto7: filas originales que matchearon
+    match_extracto7 = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+
+    # Suma matcheada por fecha
     suma_matcheada_por_fecha = {}
     for fecha in fechas_matcheadas:
-        ii = [i for i in idx_e if fe.loc[i, col_fe] == fecha]
-        suma_matcheada_por_fecha[fecha] = fe.loc[ii, col_ie].sum() if ii else 0
+        idx_fecha = [i for i in match_idx_e if fe.loc[i, col_fe] == fecha]
+        suma_matcheada_por_fecha[fecha] = fe.loc[idx_fecha, col_ie].sum() if idx_fecha else 0
 
-    # match_mayor7: fila resumen por fecha matcheada
+    # ------------------------------------------------------------------ #
+    # Construir match_mayor7: una fila resumen por fecha matcheada        #
+    # ------------------------------------------------------------------ #
     filas_match_mayor = []
     for fecha in fechas_matcheadas:
         fila = {col: "" for col in fm.columns}
-        if col_fm in fila: fila[col_fm] = fecha
+        if col_fm               in fila: fila[col_fm]               = fecha
         if "descripcion"        in fila: fila["descripcion"]        = "TRF INMED PROVEED"
         if "leyenda adicional1" in fila: fila["leyenda adicional1"] = "TRF INMED PROVEED"
         if "leyenda adicional2" in fila: fila["leyenda adicional2"] = "TRF INMED PROVEED"
         if "leyenda adicional3" in fila: fila["leyenda adicional3"] = "TRF INMED PROVEED"
-        if col_im in fila: fila[col_im] = suma_matcheada_por_fecha[fecha]
-        if col_cm in fila: fila[col_cm] = "Proveedores"
+        if col_im               in fila: fila[col_im]               = suma_matcheada_por_fecha[fecha]
+        if col_cm               in fila: fila[col_cm]               = "Proveedores"
         filas_match_mayor.append(fila)
-    match_mayor7 = pd.DataFrame(filas_match_mayor) if filas_match_mayor else pd.DataFrame(columns=fm.columns)
 
-    # Sacar TRF INMED PROVEED de falta_mayor y agregar diferencia si != 0
-    concepto_limpio = fm.get("concepto", pd.Series([""]*len(fm))).astype(str).str.replace(r"[.\-\s]","",regex=True).str.upper()
-    mask_trf = (fm[col_fm].isin(fechas_matcheadas) & concepto_limpio.str.contains("TRFINMEDPROVEED", na=False))
+    match_mayor7 = (
+        pd.DataFrame(filas_match_mayor) if filas_match_mayor
+        else pd.DataFrame(columns=fm.columns)
+    )
 
-    suma_trf_original_por_fecha = {}
-    for fecha in fechas_matcheadas:
-        grupo = fm[mask_trf & (fm[col_fm]==fecha)]
-        suma_trf_original_por_fecha[fecha] = grupo[col_im].sum()
+    # ------------------------------------------------------------------ #
+    # PASO 2: actualizar falta_mayor6                                     #
+    # Sacar TRF INMED PROVEED de fechas matcheadas y agregar no matcheados#
+    # ------------------------------------------------------------------ #
+    concepto_limpio = fm.get(
+        "concepto", pd.Series([""] * len(fm))
+    ).astype(str).str.replace(r"[.\-\s]", "", regex=True).str.upper()
 
-    usado_mayor = set(fm[mask_trf].index.tolist())
-    filas_diff_mayor = []
-    for fecha in fechas_matcheadas:
-        diferencia = round(suma_trf_original_por_fecha.get(fecha,0) - suma_matcheada_por_fecha.get(fecha,0), 2)
-        if diferencia == 0: continue
-        fila = {col: "" for col in fm.columns}
-        if col_fm in fila: fila[col_fm] = fecha
-        if "descripcion"        in fila: fila["descripcion"]        = "TRF INMED PROVEED"
-        if "leyenda adicional1" in fila: fila["leyenda adicional1"] = "TRF INMED PROVEED"
-        if col_im in fila: fila[col_im] = diferencia
-        if col_cm in fila: fila[col_cm] = "Proveedores"
-        filas_diff_mayor.append(fila)
+    mask_trf = (
+        fm[col_fm].isin(fechas_matcheadas) &
+        concepto_limpio.str.contains("TRFINMEDPROVEED", na=False)
+    )
 
+    usado_mayor       = set(fm[mask_trf].index.tolist())
     falta_mayor7_base = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
 
-    # Agregar proveedores no matcheados
+    # Agregar proveedores no matcheados como filas nuevas en falta_mayor7
     filas_nuevas = []
     for nombre_p in nombres_no_matcheados:
-        for _, row in fp[fp[col_razon]==nombre_p].iterrows():
-            monto = row[col_monto]; fecha = row[col_fecha_p]
+        for _, row in fp[fp[col_razon] == nombre_p].iterrows():
+            monto = row[col_monto]
+            fecha = row[col_fecha_p]
             fila  = {col: "" for col in fm.columns}
-            if col_fm        in fila: fila[col_fm]        = fecha
-            if "Comentario"  in fila: fila["Comentario"]  = "Pago S/F"
-            if "Debe"        in fila: fila["Debe"]        = monto * -1
-            if col_im        in fila: fila[col_im]        = monto
-            if "Tercero"     in fila: fila["Tercero"]     = nombre_p
-            if col_cm        in fila: fila[col_cm]        = "Proveedores Masivos"
+            if col_fm               in fila: fila[col_fm]               = fecha
+            if "Comentario"         in fila: fila["Comentario"]         = "Pago S/F"
+            if "Debe"               in fila: fila["Debe"]               = monto * -1
+            if col_im               in fila: fila[col_im]               = monto
+            if "Tercero"            in fila: fila["Tercero"]            = nombre_p
+            if col_cm               in fila: fila[col_cm]               = "Proveedores Masivos"
             filas_nuevas.append(fila)
 
-    dfs_a_concat = [falta_mayor7_base]
-    if filas_diff_mayor: dfs_a_concat.append(pd.DataFrame(filas_diff_mayor))
-    if filas_nuevas:     dfs_a_concat.append(pd.DataFrame(filas_nuevas))
-    falta_mayor7 = pd.concat(dfs_a_concat, ignore_index=True) if len(dfs_a_concat) > 1 else falta_mayor7_base
+    if filas_nuevas:
+        falta_mayor7 = pd.concat(
+            [falta_mayor7_base, pd.DataFrame(filas_nuevas)],
+            ignore_index=True
+        )
+    else:
+        falta_mayor7 = falta_mayor7_base
 
-    falta_extracto7 = fe[~fe.index.isin(usado_e)].reset_index(drop=True)
+    falta_extracto7 = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+
+    print(f"\n✅ Match extracto:                       {len(match_extracto7):>5} filas")
+    print(f"✅ Match mayor:                          {len(match_mayor7):>5} filas")
+    print(f"❌ Sigue faltando extracto:              {len(falta_extracto7):>5} filas")
+    print(f"❌ Sigue faltando mayor:                 {len(falta_mayor7):>5} filas")
+    print(f"⚠️  Proveedores no matcheados agregados: {len(filas_nuevas):>5} filas")
+
     return match_extracto7, match_mayor7, falta_extracto7, falta_mayor7
 
 
