@@ -1091,7 +1091,10 @@ def cruzar_proveedores_descarga(
 
     mask_trf = (
         fm[col_fecha_m].isin(fechas_matcheadas) &
-        concepto_limpio.str.contains("TRFINMEDPROVEED", na=False)
+        (
+            concepto_limpio.str.contains("TRFINMEDPROVEED", na=False) |
+            concepto_limpio.str.contains("SNPPAGOAPROVEEDORES", na=False)
+        )
     )
 
     usado_mayor = set(fm[mask_trf].index.tolist())
