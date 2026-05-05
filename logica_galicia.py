@@ -162,6 +162,8 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         desc.apply(lambda d: contiene(d,
             "serviciopagoaProveedores",
             "serviciopagoproveedores",
+            "g.deecheq",
+            "factura",
         )),
         desc.apply(lambda d: contiene(d,
             "ajusteaportespromocionGalicia",
@@ -1085,16 +1087,13 @@ def cruzar_proveedores_descarga(
 
     match_mayor7 = pd.DataFrame(filas_match_mayor) if filas_match_mayor else pd.DataFrame(columns=fm.columns)
 
-    concepto_limpio = fm.get(
-        "concepto", pd.Series([""] * len(fm))
+    leyenda_limpia = fm.get(
+        "leyenda adicional1", pd.Series([""] * len(fm))
     ).astype(str).str.replace(r"[.\-\s]", "", regex=True).str.upper()
 
     mask_trf = (
         fm[col_fecha_m].isin(fechas_matcheadas) &
-        (
-            concepto_limpio.str.contains("TRFINMEDPROVEED", na=False) |
-            concepto_limpio.str.contains("SNPPAGOAPROVEEDORES", na=False)
-        )
+        leyenda_limpia.str.contains("PROVEEDORES", na=False)
     )
 
     usado_mayor = set(fm[mask_trf].index.tolist())
