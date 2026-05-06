@@ -446,7 +446,8 @@ def cruzar_mayor_extracto(df_mayor_dep, df_extracto_dep):
 
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_m   = get_col(mayor,    "Fecha", "fecha")
@@ -473,10 +474,12 @@ def cruzar_mayor_extracto(df_mayor_dep, df_extracto_dep):
     mayor    = mayor.drop(columns=["_key", "_count", "_idx_m"])
     extracto = extracto.drop(columns=["_key", "_count", "_idx_e"])
 
-    return (mayor.loc[idx_match_m].reset_index(drop=True),
-            extracto.loc[idx_match_e].reset_index(drop=True),
-            mayor.loc[idx_falta_extracto].reset_index(drop=True),
-            extracto.loc[idx_falta_mayor].reset_index(drop=True))
+    match_mayor    = mayor.loc[idx_match_m].reset_index(drop=True)
+    match_extracto = extracto.loc[idx_match_e].reset_index(drop=True)
+    falta_extracto = mayor.loc[idx_falta_extracto].reset_index(drop=True)
+    falta_mayor    = extracto.loc[idx_falta_mayor].reset_index(drop=True)
+
+    return match_mayor, match_extracto, falta_extracto, falta_mayor
 
 
 def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
@@ -486,7 +489,8 @@ def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
 
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_m   = get_col(mayor,    "Fecha", "fecha")
@@ -496,29 +500,39 @@ def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
 
     mayor["_idx_m"]    = mayor.index
     extracto["_idx_e"] = extracto.index
+
     usado_mayor    = set()
     usado_extracto = set()
     match_idx_m        = []
     match_idx_e        = []
     match_idx_m_exacto = []
     match_idx_e_exacto = []
+
     delta = timedelta(days=tolerancia_dias)
 
     for idx_m, row_m in mayor.iterrows():
-        if idx_m in usado_mayor: continue
+        if idx_m in usado_mayor:
+            continue
+
         fecha_m   = row_m[col_fecha_m]
         importe_m = row_m[col_importe_m]
+
         candidatos = extracto[
             (extracto[col_fecha_e] >= fecha_m - delta) &
             (extracto[col_fecha_e] <= fecha_m + delta) &
             (~extracto.index.isin(usado_extracto))
         ].copy()
+
         candidatos["_dist_fecha"] = (candidatos[col_fecha_e] - fecha_m).abs()
         candidatos = candidatos.sort_values("_dist_fecha")
+
         for idx_e, row_e in candidatos.iterrows():
             importe_e = row_e[col_importe_e]
             if abs(importe_m - importe_e) <= tolerancia_importe:
-                es_exacto = (row_e[col_fecha_e] == fecha_m and importe_e == importe_m)
+                es_exacto = (
+                    row_e[col_fecha_e] == fecha_m and
+                    importe_e == importe_m
+                )
                 usado_mayor.add(idx_m)
                 usado_extracto.add(idx_e)
                 if es_exacto:
@@ -532,16 +546,19 @@ def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
     mayor    = mayor.drop(columns=["_idx_m"])
     extracto = extracto.drop(columns=["_idx_e"])
 
-    return (mayor.loc[match_idx_m].reset_index(drop=True),
-            extracto.loc[match_idx_e].reset_index(drop=True),
-            mayor[~mayor.index.isin(usado_mayor)].reset_index(drop=True),
-            extracto[~extracto.index.isin(usado_extracto)].reset_index(drop=True))
+    match_mayor    = mayor.loc[match_idx_m].reset_index(drop=True)
+    match_extracto = extracto.loc[match_idx_e].reset_index(drop=True)
+    falta_extracto = mayor[~mayor.index.isin(usado_mayor)].reset_index(drop=True)
+    falta_mayor    = extracto[~extracto.index.isin(usado_extracto)].reset_index(drop=True)
+
+    return match_mayor, match_extracto, falta_extracto, falta_mayor
 
 
 def cruzar_por_categoria(falta_extracto1, falta_mayor1, tolerancia=0.5):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_importe_e = get_col(falta_extracto1, "Importe", "importe")
@@ -551,6 +568,7 @@ def cruzar_por_categoria(falta_extracto1, falta_mayor1, tolerancia=0.5):
 
     fe = falta_extracto1.copy().reset_index(drop=True)
     fm = falta_mayor1.copy().reset_index(drop=True)
+
     usado_extracto = set()
     usado_mayor    = set()
     match_idx_e    = []
@@ -562,23 +580,32 @@ def cruzar_por_categoria(falta_extracto1, falta_mayor1, tolerancia=0.5):
     for cat in categorias:
         grupo_e = fe[(fe[col_conc_e] == cat) & (~fe.index.isin(usado_extracto))]
         grupo_m = fm[(fm[col_conc_m] == cat) & (~fm.index.isin(usado_mayor))]
-        if grupo_e.empty or grupo_m.empty: continue
-        if abs(grupo_e[col_importe_e].sum() - grupo_m[col_importe_m].sum()) <= tolerancia:
+
+        if grupo_e.empty or grupo_m.empty:
+            continue
+
+        suma_e = grupo_e[col_importe_e].sum()
+        suma_m = grupo_m[col_importe_m].sum()
+
+        if abs(suma_e - suma_m) <= tolerancia:
             match_idx_e.extend(grupo_e.index.tolist())
             match_idx_m.extend(grupo_m.index.tolist())
             usado_extracto.update(grupo_e.index.tolist())
             usado_mayor.update(grupo_m.index.tolist())
 
-    return (fe.loc[list(set(match_idx_e))].reset_index(drop=True),
-            fm.loc[list(set(match_idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_extracto)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_mayor)].reset_index(drop=True))
+    match_extracto2  = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+    match_mayor2     = fm.loc[list(set(match_idx_m))].reset_index(drop=True)
+    falta_extracto2  = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+    falta_mayor2     = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
+
+    return match_extracto2, match_mayor2, falta_extracto2, falta_mayor2
 
 
 def cruzar_proveedores(falta_extracto2, falta_mayor2, tolerancia=0.5):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e   = get_col(falta_extracto2, "Fecha", "fecha")
@@ -591,36 +618,58 @@ def cruzar_proveedores(falta_extracto2, falta_mayor2, tolerancia=0.5):
 
     fe = falta_extracto2.copy().reset_index(drop=True)
     fm = falta_mayor2.copy().reset_index(drop=True)
+
     usado_extracto = set()
     usado_mayor    = set()
     match_idx_e    = []
     match_idx_m    = []
 
-    for fecha in fm[fm[col_conc_m] == "Proveedores"][col_fecha_m].unique():
-        grupo_m = fm[(fm[col_fecha_m] == fecha) & (fm[col_conc_m] == "Proveedores") & (~fm.index.isin(usado_mayor))]
-        if grupo_m.empty: continue
+    proveedores_m = fm[fm[col_conc_m] == "Proveedores"]
+    fechas = proveedores_m[col_fecha_m].unique()
+
+    for fecha in fechas:
+        grupo_m = fm[
+            (fm[col_fecha_m] == fecha) &
+            (fm[col_conc_m] == "Proveedores") &
+            (~fm.index.isin(usado_mayor))
+        ]
+
+        if grupo_m.empty:
+            continue
+
+        suma_m = grupo_m[col_importe_m].sum()
+
         grupo_e = fe[
-            (fe[col_fecha_e] == fecha) & (fe[col_conc_e] == "0") &
+            (fe[col_fecha_e] == fecha) &
+            (fe[col_conc_e] == "0") &
             (~fe[col_serie_e].astype(str).str.strip().str.upper().str.contains("TP", na=False)) &
             (~fe.index.isin(usado_extracto))
         ]
-        if grupo_e.empty: continue
-        if abs(grupo_e[col_importe_e].sum() - grupo_m[col_importe_m].sum()) <= tolerancia:
+
+        if grupo_e.empty:
+            continue
+
+        suma_e = grupo_e[col_importe_e].sum()
+
+        if abs(suma_e - suma_m) <= tolerancia:
             match_idx_e.extend(grupo_e.index.tolist())
             match_idx_m.extend(grupo_m.index.tolist())
             usado_extracto.update(grupo_e.index.tolist())
             usado_mayor.update(grupo_m.index.tolist())
 
-    return (fe.loc[list(set(match_idx_e))].reset_index(drop=True),
-            fm.loc[list(set(match_idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_extracto)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_mayor)].reset_index(drop=True))
+    match_extracto3  = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+    match_mayor3     = fm.loc[list(set(match_idx_m))].reset_index(drop=True)
+    falta_extracto3  = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+    falta_mayor3     = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
+
+    return match_extracto3, match_mayor3, falta_extracto3, falta_mayor3
 
 
 def cruzar_a1tp(falta_extracto3, falta_mayor3, tolerancia=0.5):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e   = get_col(falta_extracto3, "Fecha", "fecha")
@@ -629,41 +678,62 @@ def cruzar_a1tp(falta_extracto3, falta_mayor3, tolerancia=0.5):
     col_importe_m = get_col(falta_mayor3,    "importe", "Importe")
     col_serie_e   = get_col(falta_extracto3, "Serie", "serie")
     col_conc_m    = get_col(falta_mayor3,    "conciliacion")
+
     CATEGORIAS_MAYOR = {"Sueldos", "Imp. AFIP", "Indemnizaciones"}
 
     fe = falta_extracto3.copy().reset_index(drop=True)
     fm = falta_mayor3.copy().reset_index(drop=True)
+
     usado_extracto = set()
     usado_mayor    = set()
     match_idx_e    = []
     match_idx_m    = []
 
-    tp_e = fe[fe[col_serie_e].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
-    for fecha in tp_e[col_fecha_e].unique():
+    tp_e   = fe[fe[col_serie_e].astype(str).str.strip().str.upper().str.contains("TP", na=False)]
+    fechas = tp_e[col_fecha_e].unique()
+
+    for fecha in fechas:
         grupo_e = fe[
             (fe[col_fecha_e] == fecha) &
             (fe[col_serie_e].astype(str).str.strip().str.upper().str.contains("TP", na=False)) &
             (~fe.index.isin(usado_extracto))
         ]
-        if grupo_e.empty: continue
-        grupo_m = fm[(fm[col_fecha_m] == fecha) & (fm[col_conc_m].isin(CATEGORIAS_MAYOR)) & (~fm.index.isin(usado_mayor))]
-        if grupo_m.empty: continue
-        if abs(grupo_e[col_importe_e].sum() - grupo_m[col_importe_m].sum()) <= tolerancia:
+
+        if grupo_e.empty:
+            continue
+
+        suma_e = grupo_e[col_importe_e].sum()
+
+        grupo_m = fm[
+            (fm[col_fecha_m] == fecha) &
+            (fm[col_conc_m].isin(CATEGORIAS_MAYOR)) &
+            (~fm.index.isin(usado_mayor))
+        ]
+
+        if grupo_m.empty:
+            continue
+
+        suma_m = grupo_m[col_importe_m].sum()
+
+        if abs(suma_e - suma_m) <= tolerancia:
             match_idx_e.extend(grupo_e.index.tolist())
             match_idx_m.extend(grupo_m.index.tolist())
             usado_extracto.update(grupo_e.index.tolist())
             usado_mayor.update(grupo_m.index.tolist())
 
-    return (fe.loc[list(set(match_idx_e))].reset_index(drop=True),
-            fm.loc[list(set(match_idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_extracto)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_mayor)].reset_index(drop=True))
+    match_extracto4  = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+    match_mayor4     = fm.loc[list(set(match_idx_m))].reset_index(drop=True)
+    falta_extracto4  = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+    falta_mayor4     = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
+
+    return match_extracto4, match_mayor4, falta_extracto4, falta_mayor4
 
 
 def cruzar_por_proveedor(falta_extracto4, falta_mayor4, tolerancia_importe=0.5, top_candidatos=4):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_importe_e = get_col(falta_extracto4, "Importe", "importe")
@@ -673,7 +743,10 @@ def cruzar_por_proveedor(falta_extracto4, falta_mayor4, tolerancia_importe=0.5, 
     col_conc_m    = get_col(falta_mayor4,    "conciliacion")
 
     fe = falta_extracto4.copy().reset_index(drop=True)
-    fm = falta_mayor4[falta_mayor4[col_conc_m].isin(["Proveedores", "Seguros"])].copy().reset_index(drop=True)
+
+    fm = falta_mayor4[
+        falta_mayor4[col_conc_m].isin(["Proveedores", "Seguros"])
+    ].copy().reset_index(drop=True)
 
     usado_extracto   = set()
     usado_mayor      = set()
@@ -686,43 +759,68 @@ def cruzar_por_proveedor(falta_extracto4, falta_mayor4, tolerancia_importe=0.5, 
     nombres_m        = suma_por_leyenda.index.tolist()
 
     for nombre_e, suma_e in suma_por_tercero.items():
-        candidatos = process.extract(nombre_e, nombres_m, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
-        if not candidatos: continue
+        candidatos = process.extract(
+            nombre_e,
+            nombres_m,
+            scorer=fuzz.token_sort_ratio,
+            limit=top_candidatos,
+        )
+
+        if not candidatos:
+            continue
+
         encontrado = False
+
         for nombre_m, score, _ in candidatos:
-            if nombre_m in nombres_usados_m: continue
-            if abs(suma_e - suma_por_leyenda[nombre_m]) <= tolerancia_importe:
+            if nombre_m in nombres_usados_m:
+                continue
+            suma_m = suma_por_leyenda[nombre_m]
+            if abs(suma_e - suma_m) <= tolerancia_importe:
                 idx_e = fe[(fe[col_tercero_e] == nombre_e) & (~fe.index.isin(usado_extracto))].index.tolist()
                 idx_m = fm[(fm[col_leyenda_m] == nombre_m) & (~fm.index.isin(usado_mayor))].index.tolist()
-                match_idx_e.extend(idx_e); match_idx_m.extend(idx_m)
-                usado_extracto.update(idx_e); usado_mayor.update(idx_m)
-                nombres_usados_m.add(nombre_m); encontrado = True; break
+                match_idx_e.extend(idx_e)
+                match_idx_m.extend(idx_m)
+                usado_extracto.update(idx_e)
+                usado_mayor.update(idx_m)
+                nombres_usados_m.add(nombre_m)
+                encontrado = True
+                break
+
         if not encontrado:
             for nombre_m, suma_m in suma_por_leyenda.items():
-                if nombre_m in nombres_usados_m: continue
+                if nombre_m in nombres_usados_m:
+                    continue
                 if abs(suma_e - suma_m) <= tolerancia_importe:
                     idx_e = fe[(fe[col_tercero_e] == nombre_e) & (~fe.index.isin(usado_extracto))].index.tolist()
                     idx_m = fm[(fm[col_leyenda_m] == nombre_m) & (~fm.index.isin(usado_mayor))].index.tolist()
-                    match_idx_e.extend(idx_e); match_idx_m.extend(idx_m)
-                    usado_extracto.update(idx_e); usado_mayor.update(idx_m)
-                    nombres_usados_m.add(nombre_m); encontrado = True; break
+                    match_idx_e.extend(idx_e)
+                    match_idx_m.extend(idx_m)
+                    usado_extracto.update(idx_e)
+                    usado_mayor.update(idx_m)
+                    nombres_usados_m.add(nombre_m)
+                    encontrado = True
+                    break
 
-    fm_no_considerado = falta_mayor4[~falta_mayor4[col_conc_m].isin(["Proveedores", "Seguros"])].copy()
+    match_extracto5  = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+    match_mayor5     = fm.loc[list(set(match_idx_m))].reset_index(drop=True)
+    falta_extracto5  = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+
+    fm_no_considerado = falta_mayor4[
+        ~falta_mayor4[col_conc_m].isin(["Proveedores", "Seguros"])
+    ].copy()
     falta_mayor5 = pd.concat([
         fm[~fm.index.isin(usado_mayor)].reset_index(drop=True),
         fm_no_considerado
     ], ignore_index=True)
 
-    return (fe.loc[list(set(match_idx_e))].reset_index(drop=True),
-            fm.loc[list(set(match_idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_extracto)].reset_index(drop=True),
-            falta_mayor5)
+    return match_extracto5, match_mayor5, falta_extracto5, falta_mayor5
 
 
 def cruzar_echeq(falta_extracto5, falta_mayor5, tolerancia=0.5):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e   = get_col(falta_extracto5, "Fecha", "fecha")
@@ -735,6 +833,7 @@ def cruzar_echeq(falta_extracto5, falta_mayor5, tolerancia=0.5):
 
     fe = falta_extracto5.copy().reset_index(drop=True)
     fm = falta_mayor5.copy().reset_index(drop=True)
+
     usado_extracto = set()
     usado_mayor    = set()
     match_idx_e    = []
@@ -746,108 +845,136 @@ def cruzar_echeq(falta_extracto5, falta_mayor5, tolerancia=0.5):
     )
     mask_m = fm[col_conc_m] == "Echeq"
 
-    for fecha in fe.loc[mask_e, col_fecha_e].unique():
+    fechas = fe.loc[mask_e, col_fecha_e].unique()
+
+    for fecha in fechas:
         grupo_e = fe[mask_e & (fe[col_fecha_e] == fecha) & (~fe.index.isin(usado_extracto))]
         grupo_m = fm[mask_m & (fm[col_fecha_m] == fecha) & (~fm.index.isin(usado_mayor))]
-        if grupo_e.empty or grupo_m.empty: continue
-        if abs(grupo_e[col_importe_e].sum() - grupo_m[col_importe_m].sum()) <= tolerancia:
+
+        if grupo_e.empty or grupo_m.empty:
+            continue
+
+        suma_e = grupo_e[col_importe_e].sum()
+        suma_m = grupo_m[col_importe_m].sum()
+
+        if abs(suma_e - suma_m) <= tolerancia:
             match_idx_e.extend(grupo_e.index.tolist())
             match_idx_m.extend(grupo_m.index.tolist())
             usado_extracto.update(grupo_e.index.tolist())
             usado_mayor.update(grupo_m.index.tolist())
 
-    return (fe.loc[list(set(match_idx_e))].reset_index(drop=True),
-            fm.loc[list(set(match_idx_m))].reset_index(drop=True),
-            fe[~fe.index.isin(usado_extracto)].reset_index(drop=True),
-            fm[~fm.index.isin(usado_mayor)].reset_index(drop=True))
+    match_extracto6  = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
+    match_mayor6     = fm.loc[list(set(match_idx_m))].reset_index(drop=True)
+    falta_extracto6  = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
+    falta_mayor6     = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
+
+    return match_extracto6, match_mayor6, falta_extracto6, falta_mayor6
 
 
 def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
                          match_extracto3, match_extracto5, tolerancia_importe=0.5):
     def find_col(df, keyword):
+        keyword_lower = keyword.lower()
         for c in df.columns:
-            if keyword.lower() in c.lower(): return c
+            if keyword_lower in c.lower():
+                return c
         raise KeyError(f"Columna con '{keyword}' no encontrada en {list(df.columns)}")
 
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_monto        = find_col(df_proveedores, "monto")
     col_estado       = find_col(df_proveedores, "estado")
-    col_fecha_emis_p = "Fecha de emisión"
+    col_fecha_emis_p = "Fecha de emisiÃ³n"
 
     fp = df_proveedores[
         ~df_proveedores[col_estado].astype(str).str.upper().str.contains("ERROR", na=False)
     ].copy().reset_index(drop=True)
 
     fp[col_monto] = (
-        fp[col_monto].astype(str).str.replace(",", ".", regex=False).str.strip()
-        .pipe(pd.to_numeric, errors="coerce").fillna(0.0)
+        fp[col_monto]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .str.strip()
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
     )
+
     fp[col_fecha_emis_p] = pd.to_datetime(fp[col_fecha_emis_p], errors="coerce")
 
     def cruzar_y_sacar(fp, match, tolerancia):
         col_fecha_m   = get_col(match, "Fecha", "fecha")
         col_importe_m = get_col(match, "Importe", "importe")
+
         mm = match.copy()
         mm[col_fecha_m]   = pd.to_datetime(mm[col_fecha_m], errors="coerce")
         mm[col_importe_m] = pd.to_numeric(mm[col_importe_m], errors="coerce").fillna(0.0)
+
         idx_usados = set()
         for idx_p, row_p in fp.iterrows():
             fecha_p = row_p[col_fecha_emis_p]
             monto_p = row_p[col_monto] * -1
+
             coincide = mm[
                 (mm[col_fecha_m] == fecha_p) &
                 (mm[col_importe_m].apply(lambda x: abs(x - monto_p) <= tolerancia))
             ]
             if not coincide.empty:
                 idx_usados.add(idx_p)
-        return fp[~fp.index.isin(idx_usados)].reset_index(drop=True), len(idx_usados)
 
-    fp, _ = cruzar_y_sacar(fp, match_mayor,     tolerancia=0.0)
-    fp, _ = cruzar_y_sacar(fp, match_mayor1,    tolerancia=tolerancia_importe)
-    fp, _ = cruzar_y_sacar(fp, match_extracto3, tolerancia=tolerancia_importe)
-    fp, _ = cruzar_y_sacar(fp, match_extracto5, tolerancia=tolerancia_importe)
+        eliminados = len(idx_usados)
+        fp = fp[~fp.index.isin(idx_usados)].reset_index(drop=True)
+        return fp, eliminados
+
+    fp, elim1 = cruzar_y_sacar(fp, match_mayor,     tolerancia=0.0)
+    fp, elim2 = cruzar_y_sacar(fp, match_mayor1,    tolerancia=tolerancia_importe)
+    fp, elim3 = cruzar_y_sacar(fp, match_extracto3, tolerancia=tolerancia_importe)
+    fp, elim4 = cruzar_y_sacar(fp, match_extracto5, tolerancia=tolerancia_importe)
+
     return fp
 
 
 def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
                                  ejecutar=True, df_proveedores_def=None,
                                  tolerancia_importe=0.5, top_candidatos=3):
-    if not ejecutar or df_proveedores_def is None or (hasattr(df_proveedores_def, 'empty') and df_proveedores_def.empty):
-        return (pd.DataFrame(columns=falta_extracto6.columns),
-                pd.DataFrame(columns=falta_mayor6.columns),
-                falta_extracto6.copy(), falta_mayor6.copy())
+    if not ejecutar or df_proveedores_def is None or df_proveedores_def.empty:
+        return (
+            pd.DataFrame(columns=falta_extracto6.columns),
+            pd.DataFrame(columns=falta_mayor6.columns),
+            falta_extracto6.copy(),
+            falta_mayor6.copy(),
+        )
 
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     def find_col(df, keyword):
+        keyword_lower = keyword.lower()
         for c in df.columns:
-            if keyword.lower() in c.lower(): return c
+            if keyword_lower in c.lower():
+                return c
         raise KeyError(f"Columna con '{keyword}' no encontrada en {list(df.columns)}")
 
-    col_tercero_e = get_col(falta_extracto6, "Tercero", "tercero")
-    col_importe_e = get_col(falta_extracto6, "Importe", "importe")
-    col_fecha_e   = get_col(falta_extracto6, "Fecha",   "fecha")
-    col_fecha_m   = get_col(falta_mayor6,    "fecha",   "Fecha")
-    col_importe_m = get_col(falta_mayor6,    "importe", "Importe")
-    col_conc_m    = get_col(falta_mayor6,    "conciliacion")
-    col_razon     = next((c for c in df_proveedores_def.columns if "raz" in c.lower()), None)
-    if col_razon is None:
-        raise KeyError(f"Columna razón social no encontrada en {list(df_proveedores_def.columns)}")
-    col_monto   = find_col(df_proveedores_def, "monto")
-    col_fecha_p = next((c for c in df_proveedores_def.columns if "emis" in c.lower()), None)
-    if col_fecha_p is None:
-        raise KeyError(f"Columna fecha emisión no encontrada en {list(df_proveedores_def.columns)}")
+    col_tercero_e  = get_col(falta_extracto6, "Tercero", "tercero")
+    col_importe_e  = get_col(falta_extracto6, "Importe", "importe")
+    col_fecha_e    = get_col(falta_extracto6, "Fecha", "fecha")
+    col_fecha_m    = get_col(falta_mayor6,    "fecha", "Fecha")
+    col_importe_m  = get_col(falta_mayor6,    "importe", "Importe")
+    col_conc_m     = get_col(falta_mayor6,    "conciliacion")
+    col_razon      = "RazÃ³n Social Beneficiario"
+    col_monto      = find_col(df_proveedores_def, "monto")
+    col_fecha_p    = "Fecha de emisiÃ³n"
 
     fe = falta_extracto6.copy().reset_index(drop=True)
     fm = falta_mayor6.copy().reset_index(drop=True)
     fp = df_proveedores_def.copy().reset_index(drop=True)
+
     fp[col_fecha_p] = pd.to_datetime(fp[col_fecha_p], errors="coerce")
 
     fp_monto_neg = fp.copy()
@@ -863,24 +990,37 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
     match_idx_e        = []
 
     for (nombre_e, fecha_e), suma_e in suma_por_tercero_fecha.items():
-        candidatos = process.extract(nombre_e, nombres_p, scorer=fuzz.token_sort_ratio, limit=top_candidatos)
-        if not candidatos: continue
+        candidatos = process.extract(
+            nombre_e,
+            nombres_p,
+            scorer=fuzz.token_sort_ratio,
+            limit=top_candidatos,
+        )
+
+        if not candidatos:
+            continue
+
         encontrado = False
+
         for nombre_p, score, _ in candidatos:
-            if (nombre_p, fecha_e) not in suma_por_razon_fecha.index: continue
+            if (nombre_p, fecha_e) not in suma_por_razon_fecha.index:
+                continue
             suma_p = suma_por_razon_fecha[(nombre_p, fecha_e)]
             if abs(suma_e - suma_p) <= tolerancia_importe:
                 idx_e = fe[
-                    (fe[col_tercero_e] == nombre_e) & (fe[col_fecha_e] == fecha_e) &
+                    (fe[col_tercero_e] == nombre_e) &
+                    (fe[col_fecha_e] == fecha_e) &
                     (~fe.index.isin(usado_extracto))
                 ].index.tolist()
                 fechas_matcheadas.add(fecha_e)
                 match_idx_e.extend(idx_e)
                 usado_extracto.update(idx_e)
                 nombres_matcheados.add(nombre_p)
-                encontrado = True; break
+                encontrado = True
+                break
 
     nombres_no_matcheados = set(nombres_p) - nombres_matcheados
+
     match_extracto7 = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
 
     suma_matcheada_por_fecha = {}
@@ -890,19 +1030,19 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
 
     filas_match_mayor = []
     for fecha in fechas_matcheadas:
+        suma_importe = suma_matcheada_por_fecha[fecha]
         fila = {col: "" for col in fm.columns}
         if col_fecha_m          in fila: fila[col_fecha_m]          = fecha
-        if "descripcion"        in fila: fila["descripcion"]        = "TRF INMED PROVEED"
-        if "leyenda adicional1" in fila: fila["leyenda adicional1"] = "TRF INMED PROVEED"
-        if "leyenda adicional2" in fila: fila["leyenda adicional2"] = "TRF INMED PROVEED"
-        if "leyenda adicional3" in fila: fila["leyenda adicional3"] = "TRF INMED PROVEED"
-        if col_importe_m        in fila: fila[col_importe_m]        = suma_matcheada_por_fecha[fecha]
-        if col_conc_m           in fila: fila[col_conc_m]           = "Proveedores"
+        if "descripcion"        in fila: fila["descripcion"]         = "TRF INMED PROVEED"
+        if "leyenda adicional1" in fila: fila["leyenda adicional1"]  = "TRF INMED PROVEED"
+        if "leyenda adicional2" in fila: fila["leyenda adicional2"]  = "TRF INMED PROVEED"
+        if "leyenda adicional3" in fila: fila["leyenda adicional3"]  = "TRF INMED PROVEED"
+        if col_importe_m        in fila: fila[col_importe_m]         = suma_importe
+        if col_conc_m           in fila: fila[col_conc_m]            = "Proveedores"
         filas_match_mayor.append(fila)
+
     match_mayor7 = pd.DataFrame(filas_match_mayor) if filas_match_mayor else pd.DataFrame(columns=fm.columns)
 
-    # PASO 2: sacar de falta_mayor6 las filas cuya Leyenda Adicional1
-    # contenga "PROVEEDORES" en las fechas matcheadas
     leyenda_limpia = fm.get(
         "leyenda adicional1", pd.Series([""] * len(fm))
     ).astype(str).str.upper()
@@ -917,20 +1057,28 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
 
     filas_nuevas = []
     for nombre_p in nombres_no_matcheados:
-        for _, row in fp[fp[col_razon] == nombre_p].iterrows():
-            monto = row[col_monto]; fecha = row[col_fecha_p]
+        filas_p = fp[fp[col_razon] == nombre_p]
+        for _, row in filas_p.iterrows():
+            monto = row[col_monto]
+            fecha = row[col_fecha_p]
             fila  = {col: "" for col in fm.columns}
             if col_fecha_m          in fila: fila[col_fecha_m]          = fecha
-            if "descripcion"        in fila: fila["descripcion"]        = "TRF INMED PROVEED"
-            if "debitos"            in fila: fila["debitos"]            = monto
-            if "concepto"           in fila: fila["concepto"]           = "TRF INMED PROVEED"
-            if "leyenda adicional1" in fila: fila["leyenda adicional1"] = row[col_razon]
-            if col_importe_m        in fila: fila[col_importe_m]        = -abs(monto)
-            if col_conc_m           in fila: fila[col_conc_m]           = "Proveedores"
+            if "descripcion"        in fila: fila["descripcion"]         = "TRF INMED PROVEED"
+            if "debitos"            in fila: fila["debitos"]             = monto
+            if "concepto"           in fila: fila["concepto"]            = "TRF INMED PROVEED"
+            if "leyenda adicional1" in fila: fila["leyenda adicional1"]  = row[col_razon]
+            if col_importe_m        in fila: fila[col_importe_m]         = -abs(monto)
+            if col_conc_m           in fila: fila[col_conc_m]            = "Proveedores"
             filas_nuevas.append(fila)
 
-    falta_mayor7 = (pd.concat([falta_mayor7_base, pd.DataFrame(filas_nuevas)], ignore_index=True)
-                    if filas_nuevas else falta_mayor7_base)
+    if filas_nuevas:
+        falta_mayor7 = pd.concat([
+            falta_mayor7_base,
+            pd.DataFrame(filas_nuevas)
+        ], ignore_index=True)
+    else:
+        falta_mayor7 = falta_mayor7_base
+
     falta_extracto7 = fe[~fe.index.isin(usado_extracto)].reset_index(drop=True)
 
     return match_extracto7, match_mayor7, falta_extracto7, falta_mayor7
@@ -939,25 +1087,35 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
 def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, tolerancia=0.5):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     def limpiar(texto: str) -> str:
-        if not isinstance(texto, str): return ""
+        if not isinstance(texto, str):
+            return ""
         texto = texto.lower()
         texto = re.sub(r"[.\-\s]", "", texto)
         texto = re.sub(r"[^\x20-\x7EáéíóúñüÁÉÍÓÚÑÜ]", "", texto)
-        return (texto.replace("á","a").replace("é","e").replace("í","i")
-                     .replace("ó","o").replace("ú","u").replace("ñ","n").replace("ü","u"))
+        texto = (texto
+            .replace("á", "a").replace("é", "e")
+            .replace("í", "i").replace("ó", "o")
+            .replace("ú", "u").replace("ñ", "n")
+            .replace("ü", "u")
+        )
+        return texto
 
     falta_extracto7 = falta_extracto7.copy()
+
     col_conc_falt = get_col(falta_extracto7, "conciliacion")
     col_com_falt  = get_col(falta_extracto7, "Comentario", "comentario")
 
     comentario_limp = falta_extracto7[col_com_falt].apply(limpiar)
+
     mask_acred = falta_extracto7[col_conc_falt] == "Acreditaciones"
     mask_py    = comentario_limp.apply(lambda d: "acreditacionpy" in d)
     mask_rappi = comentario_limp.apply(lambda d: "acreditacionesrappi" in d or "acreditacionrappi" in d)
+
     falta_extracto7.loc[mask_acred & mask_py,    col_conc_falt] = "Acred. PY"
     falta_extracto7.loc[mask_acred & mask_rappi, col_conc_falt] = "Acred. Rappi"
 
@@ -965,7 +1123,8 @@ def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, toler
     col_conc_cat     = get_col(df_extracto_cat2, "conciliacion")
     col_importe_falt = get_col(falta_extracto7,  "Importe", "importe")
 
-    CATEGORIAS    = ["Acreditaciones", "Acred. PY", "Acred. Rappi"]
+    CATEGORIAS = ["Acreditaciones", "Acred. PY", "Acred. Rappi"]
+
     match_cat_idx  = []
     match_falt_idx = []
     filas_resumen  = []
@@ -973,9 +1132,13 @@ def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, toler
     for cat in CATEGORIAS:
         acred_cat  = df_extracto_cat2[df_extracto_cat2[col_conc_cat] == cat]
         acred_falt = falta_extracto7[falta_extracto7[col_conc_falt] == cat]
-        if acred_cat.empty and acred_falt.empty: continue
+
+        if acred_cat.empty and acred_falt.empty:
+            continue
+
         suma_cat  = acred_cat[col_importe_cat].sum()
         suma_falt = acred_falt[col_importe_falt].sum()
+
         if abs(suma_cat - suma_falt) <= tolerancia:
             match_cat_idx.extend(acred_cat.index.tolist())
             match_falt_idx.extend(acred_falt.index.tolist())
@@ -993,8 +1156,14 @@ def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, toler
     match_acreditaciones_cat = df_extracto_cat2.loc[list(set(match_cat_idx))].reset_index(drop=True)
     match_acreditaciones     = falta_extracto7.loc[list(set(match_falt_idx))].reset_index(drop=True)
     falta_extracto8          = falta_extracto7[~falta_extracto7.index.isin(match_falt_idx)].reset_index(drop=True)
-    falta_mayor8 = (pd.concat([falta_mayor7, pd.DataFrame(filas_resumen)], ignore_index=True)
-                    if filas_resumen else falta_mayor7.copy().reset_index(drop=True))
+
+    if filas_resumen:
+        falta_mayor8 = pd.concat([
+            falta_mayor7,
+            pd.DataFrame(filas_resumen)
+        ], ignore_index=True)
+    else:
+        falta_mayor8 = falta_mayor7.copy().reset_index(drop=True)
 
     return match_acreditaciones_cat, match_acreditaciones, falta_extracto8, falta_mayor8
 
@@ -1004,100 +1173,129 @@ def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, toler
 # ─────────────────────────────────────────────────────────────────────────────
 
 def asignar_id_match(match_mayor, match_extracto):
+    assert len(match_mayor) == len(match_extracto), \
+        f"Los dfs deben tener la misma cantidad de filas: {len(match_mayor)} vs {len(match_extracto)}"
+
     df_match_mayor    = match_mayor.copy().reset_index(drop=True)
     df_match_extracto = match_extracto.copy().reset_index(drop=True)
+
     ids = list(range(1, len(df_match_mayor) + 1))
+
     df_match_mayor["match_id"]    = ids
     df_match_mayor["match_tipo"]  = "0"
     df_match_extracto["match_id"]   = ids
     df_match_extracto["match_tipo"] = "0"
+
     return df_match_mayor, df_match_extracto
 
 
 def asignar_id_match1(match_mayor1, match_extracto1, id_inicio):
     df_match_mayor1    = match_mayor1.copy().reset_index(drop=True)
     df_match_extracto1 = match_extracto1.copy().reset_index(drop=True)
+
     ids_m = list(range(id_inicio, id_inicio + len(df_match_mayor1)))
     ids_e = list(range(id_inicio, id_inicio + len(df_match_extracto1)))
+
     df_match_mayor1["match_id"]    = ids_m
     df_match_mayor1["match_tipo"]  = "1"
     df_match_extracto1["match_id"]   = ids_e
     df_match_extracto1["match_tipo"] = "1"
+
     return df_match_mayor1, df_match_extracto1
 
 
 def asignar_id_match3_categoria(match_extracto2, match_mayor2, id_inicio):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_conc_e = get_col(match_extracto2, "conciliacion")
     col_conc_m = get_col(match_mayor2,    "conciliacion")
+
     df_match_extracto2 = match_extracto2.copy().reset_index(drop=True)
     df_match_mayor2    = match_mayor2.copy().reset_index(drop=True)
+
     current_id = id_inicio
     cat_to_id = {}
     for cat in df_match_extracto2[col_conc_e].unique():
-        cat_to_id[cat] = current_id; current_id += 1
+        cat_to_id[cat] = current_id
+        current_id += 1
     for cat in df_match_mayor2[col_conc_m].unique():
         if cat not in cat_to_id:
-            cat_to_id[cat] = current_id; current_id += 1
+            cat_to_id[cat] = current_id
+            current_id += 1
+
     df_match_extracto2["match_id"]   = df_match_extracto2[col_conc_e].map(cat_to_id)
     df_match_extracto2["match_tipo"] = "2"
     df_match_mayor2["match_id"]      = df_match_mayor2[col_conc_m].map(cat_to_id)
     df_match_mayor2["match_tipo"]    = "2"
+
     return df_match_extracto2, df_match_mayor2, current_id
 
 
 def asignar_id_match3_fecha(match_extracto3, match_mayor3, id_inicio):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e = get_col(match_extracto3, "Fecha", "fecha")
     col_fecha_m = get_col(match_mayor3,    "fecha", "Fecha")
+
     df_match_extracto3 = match_extracto3.copy().reset_index(drop=True)
     df_match_mayor3    = match_mayor3.copy().reset_index(drop=True)
-    current_id = id_inicio
+
+    current_id  = id_inicio
     fecha_to_id = {}
     for fecha in list(df_match_extracto3[col_fecha_e].unique()) + list(df_match_mayor3[col_fecha_m].unique()):
         if fecha not in fecha_to_id:
-            fecha_to_id[fecha] = current_id; current_id += 1
+            fecha_to_id[fecha] = current_id
+            current_id += 1
+
     df_match_extracto3["match_id"]   = df_match_extracto3[col_fecha_e].map(fecha_to_id)
     df_match_extracto3["match_tipo"] = "3"
     df_match_mayor3["match_id"]      = df_match_mayor3[col_fecha_m].map(fecha_to_id)
     df_match_mayor3["match_tipo"]    = "3"
+
     return df_match_extracto3, df_match_mayor3, current_id
 
 
 def asignar_id_match4(match_extracto4, match_mayor4, id_inicio):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e = get_col(match_extracto4, "Fecha", "fecha")
     col_fecha_m = get_col(match_mayor4,    "fecha", "Fecha")
+
     df_match_extracto4 = match_extracto4.copy().reset_index(drop=True)
     df_match_mayor4    = match_mayor4.copy().reset_index(drop=True)
-    current_id = id_inicio
+
+    current_id  = id_inicio
     fecha_to_id = {}
     for fecha in list(df_match_extracto4[col_fecha_e].unique()) + list(df_match_mayor4[col_fecha_m].unique()):
         if fecha not in fecha_to_id:
-            fecha_to_id[fecha] = current_id; current_id += 1
+            fecha_to_id[fecha] = current_id
+            current_id += 1
+
     df_match_extracto4["match_id"]   = df_match_extracto4[col_fecha_e].map(fecha_to_id)
     df_match_extracto4["match_tipo"] = "4"
     df_match_mayor4["match_id"]      = df_match_mayor4[col_fecha_m].map(fecha_to_id)
     df_match_mayor4["match_tipo"]    = "4"
+
     return df_match_extracto4, df_match_mayor4, current_id
 
 
 def asignar_id_match5(match_extracto5, match_mayor5, id_inicio, tolerancia_importe=0.5, top_candidatos=4):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_tercero_e = get_col(match_extracto5, "Tercero", "tercero")
@@ -1107,11 +1305,15 @@ def asignar_id_match5(match_extracto5, match_mayor5, id_inicio, tolerancia_impor
 
     df_match_extracto5 = match_extracto5.copy().reset_index(drop=True)
     df_match_mayor5    = match_mayor5.copy().reset_index(drop=True)
+
     current_id = id_inicio
+
     nombres_e = df_match_extracto5[col_tercero_e].unique().tolist()
     nombres_m = df_match_mayor5[col_leyenda_m].unique().tolist()
+
     suma_por_tercero = df_match_extracto5.groupby(col_tercero_e)[col_importe_e].sum()
     suma_por_leyenda = df_match_mayor5.groupby(col_leyenda_m)[col_importe_m].sum()
+
     tercero_to_id    = {}
     leyenda_to_id    = {}
     nombres_m_usados = set()
@@ -1119,73 +1321,98 @@ def asignar_id_match5(match_extracto5, match_mayor5, id_inicio, tolerancia_impor
     for nombre_e in nombres_e:
         suma_e = suma_por_tercero.get(nombre_e, 0)
         tercero_to_id[nombre_e] = current_id
+
         candidatos = process.extract(
-            nombre_e, [n for n in nombres_m if n not in nombres_m_usados],
-            scorer=fuzz.token_sort_ratio, limit=top_candidatos)
+            nombre_e,
+            [n for n in nombres_m if n not in nombres_m_usados],
+            scorer=fuzz.token_sort_ratio,
+            limit=top_candidatos,
+        )
+
+        encontrado = False
         for nombre_m, score, _ in candidatos:
-            if abs(suma_e - suma_por_leyenda.get(nombre_m, 0)) <= tolerancia_importe:
+            suma_m = suma_por_leyenda.get(nombre_m, 0)
+            if abs(suma_e - suma_m) <= tolerancia_importe:
                 leyenda_to_id[nombre_m] = current_id
-                nombres_m_usados.add(nombre_m); break
+                nombres_m_usados.add(nombre_m)
+                encontrado = True
+                break
+
         current_id += 1
 
     df_match_extracto5["match_id"]   = df_match_extracto5[col_tercero_e].map(tercero_to_id)
     df_match_extracto5["match_tipo"] = "5"
     df_match_mayor5["match_id"]      = df_match_mayor5[col_leyenda_m].map(leyenda_to_id)
     df_match_mayor5["match_tipo"]    = "5"
+
     return df_match_extracto5, df_match_mayor5, current_id
 
 
 def asignar_id_match6(match_extracto6, match_mayor6, id_inicio):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e = get_col(match_extracto6, "Fecha", "fecha")
     col_fecha_m = get_col(match_mayor6,    "fecha", "Fecha")
+
     df_match_extracto6 = match_extracto6.copy().reset_index(drop=True)
     df_match_mayor6    = match_mayor6.copy().reset_index(drop=True)
-    current_id = id_inicio
+
+    current_id  = id_inicio
     fecha_to_id = {}
     for fecha in list(df_match_extracto6[col_fecha_e].unique()) + list(df_match_mayor6[col_fecha_m].unique()):
         if fecha not in fecha_to_id:
-            fecha_to_id[fecha] = current_id; current_id += 1
+            fecha_to_id[fecha] = current_id
+            current_id += 1
+
     df_match_extracto6["match_id"]   = df_match_extracto6[col_fecha_e].map(fecha_to_id)
     df_match_extracto6["match_tipo"] = "6"
     df_match_mayor6["match_id"]      = df_match_mayor6[col_fecha_m].map(fecha_to_id)
     df_match_mayor6["match_tipo"]    = "6"
+
     return df_match_extracto6, df_match_mayor6, current_id
 
 
 def asignar_id_match7(match_extracto7, match_mayor7, id_inicio):
     def get_col(df, *candidates):
         for c in candidates:
-            if c in df.columns: return c
+            if c in df.columns:
+                return c
         raise KeyError(f"Ninguna de {candidates} encontrada en {list(df.columns)}")
 
     col_fecha_e = get_col(match_extracto7, "Fecha", "fecha")
     col_fecha_m = get_col(match_mayor7,    "fecha", "Fecha")
+
     df_match_extracto7 = match_extracto7.copy().reset_index(drop=True)
     df_match_mayor7    = match_mayor7.copy().reset_index(drop=True)
-    current_id = id_inicio
+
+    current_id  = id_inicio
     fecha_to_id = {}
     for fecha in list(df_match_extracto7[col_fecha_e].unique()) + list(df_match_mayor7[col_fecha_m].unique()):
         if fecha not in fecha_to_id:
-            fecha_to_id[fecha] = current_id; current_id += 1
+            fecha_to_id[fecha] = current_id
+            current_id += 1
+
     df_match_extracto7["match_id"]   = df_match_extracto7[col_fecha_e].map(fecha_to_id)
     df_match_extracto7["match_tipo"] = "7"
     df_match_mayor7["match_id"]      = df_match_mayor7[col_fecha_m].map(fecha_to_id)
     df_match_mayor7["match_tipo"]    = "7"
+
     return df_match_extracto7, df_match_mayor7, current_id
 
 
 def asignar_id_match8(match_acreditaciones, match_acreditaciones_cat, id_inicio):
     df_match_acreditaciones     = match_acreditaciones.copy().reset_index(drop=True)
     df_match_acreditaciones_cat = match_acreditaciones_cat.copy().reset_index(drop=True)
+
     df_match_acreditaciones["match_id"]       = id_inicio
     df_match_acreditaciones["match_tipo"]     = "8"
     df_match_acreditaciones_cat["match_id"]   = id_inicio
     df_match_acreditaciones_cat["match_tipo"] = "8"
+
     return df_match_acreditaciones, df_match_acreditaciones_cat, id_inicio + 1
 
 
@@ -1235,7 +1462,8 @@ def correr_conciliacion_galicia(archivo_mayor, archivo_extracto, archivo_proveed
     # 4. Cruce 7 (opcional)
     if archivo_proveedores is not None:
         df_proveedores     = load_excel_file(archivo_proveedores)
-        df_proveedores_def = limpiar_proveedores(df_proveedores, match_mayor, match_mayor1, match_extracto3, match_extracto5)
+        df_proveedores_def = limpiar_proveedores(
+            df_proveedores, match_mayor, match_mayor1, match_extracto3, match_extracto5)
         match_extracto7, match_mayor7, falta_extracto7, falta_mayor7 = cruzar_proveedores_descarga(
             falta_extracto6, falta_mayor6, ejecutar=True, df_proveedores_def=df_proveedores_def)
     else:
@@ -1268,15 +1496,26 @@ def correr_conciliacion_galicia(archivo_mayor, archivo_extracto, archivo_proveed
         return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
     match_mayor_def = _safe_concat([
-        df_match_mayor, df_match_mayor1,
-        df_match_extracto2, df_match_extracto3, df_match_extracto4,
-        df_match_extracto5, df_match_extracto6, df_match_extracto7,
+        df_match_mayor,
+        df_match_mayor1,
+        df_match_extracto2,
+        df_match_extracto3,
+        df_match_extracto4,
+        df_match_extracto5,
+        df_match_extracto6,
+        df_match_extracto7,
         df_match_acreditaciones,
     ])
+
     match_extracto_def = _safe_concat([
-        df_match_extracto, df_match_extracto1,
-        df_match_mayor2, df_match_mayor3, df_match_mayor4,
-        df_match_mayor5, df_match_mayor6, df_match_mayor7,
+        df_match_extracto,
+        df_match_extracto1,
+        df_match_mayor2,
+        df_match_mayor3,
+        df_match_mayor4,
+        df_match_mayor5,
+        df_match_mayor6,
+        df_match_mayor7,
         df_match_acreditaciones_cat,
     ])
 
