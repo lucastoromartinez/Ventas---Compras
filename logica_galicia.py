@@ -937,9 +937,14 @@ def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
     return fp
 
 
-def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
-                                 ejecutar=True, df_proveedores_def=None,
-                                 tolerancia_importe=0.5, top_candidatos=3):
+def cruzar_proveedores_descarga(
+    falta_extracto6,
+    falta_mayor6,
+    ejecutar=True,
+    df_proveedores_def=None,
+    tolerancia_importe=0.5,
+    top_candidatos=3,
+):
     if not ejecutar or df_proveedores_def is None or df_proveedores_def.empty:
         return (
             pd.DataFrame(columns=falta_extracto6.columns),
@@ -988,6 +993,7 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
     nombres_matcheados = set()
     fechas_matcheadas  = set()
     match_idx_e        = []
+    combos_agregar     = set()
 
     for (nombre_e, fecha_e), suma_e in suma_por_tercero_fecha.items():
         candidatos = process.extract(
@@ -1019,7 +1025,12 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
                 encontrado = True
                 break
 
-    nombres_no_matcheados = set(nombres_p) - nombres_matcheados
+        if not encontrado:
+            mejor = candidatos[0]
+            mejor_nombre, mejor_score = mejor[0], mejor[1]
+            suma_mejor = suma_por_razon_fecha.get((mejor_nombre, fecha_e), 0)
+            if mejor_score == 100 and suma_mejor != 0:
+                combos_agregar.add((mejor_nombre, fecha_e))
 
     match_extracto7 = fe.loc[list(set(match_idx_e))].reset_index(drop=True)
 
@@ -1056,11 +1067,13 @@ def cruzar_proveedores_descarga(falta_extracto6, falta_mayor6,
     falta_mayor7_base = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
 
     filas_nuevas = []
-    for nombre_p in nombres_no_matcheados:
-        filas_p = fp[fp[col_razon] == nombre_p]
+    for nombre_p, fecha in combos_agregar:
+        filas_p = fp[
+            (fp[col_razon] == nombre_p) &
+            (fp[col_fecha_p] == fecha)
+        ]
         for _, row in filas_p.iterrows():
             monto = row[col_monto]
-            fecha = row[col_fecha_p]
             fila  = {col: "" for col in fm.columns}
             if col_fecha_m          in fila: fila[col_fecha_m]          = fecha
             if "descripcion"        in fila: fila["descripcion"]         = "TRF INMED PROVEED"
