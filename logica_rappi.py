@@ -1,52 +1,64 @@
 import io
 import re
+import zipfile
 import pandas as pd
 import openpyxl
 import pdfplumber
 
 
 # ─────────────────────────────────────────────
-# IMPORTAR LIQUIDACIÓN (Excel)
+# IMPORTAR LIQUIDACIONES (múltiples Excel)
 # ─────────────────────────────────────────────
 
-def importar_liquidacion(archivo):
-    wb = openpyxl.load_workbook(archivo, data_only=True)
-    ws = wb['Resumen']
+def importar_liquidaciones(archivos):
+    liquidaciones = []
+    for archivo in archivos:
+        wb = openpyxl.load_workbook(archivo, data_only=True)
+        ws = wb['Resumen']
 
-    merged_ranges = list(ws.merged_cells.ranges)
-    for rango in merged_ranges:
-        if rango.min_col == 2:
-            valor = ws.cell(rango.min_row, 2).value
-            ws.unmerge_cells(str(rango))
-            for fila in range(rango.min_row, rango.max_row + 1):
-                ws.cell(fila, 2).value = valor
+        id_pago = ws.cell(row=7, column=4).value
 
-    registros = []
-    for row in ws.iter_rows(min_row=10, values_only=True):
-        if not any(c is not None for c in row):
-            continue
-        registros.append({
-            'Grupo'  : row[1],
-            'Valores': row[2],
-            'Total'  : row[3],
-        })
+        merged_ranges = list(ws.merged_cells.ranges)
+        for rango in merged_ranges:
+            if rango.min_col == 2:
+                valor = ws.cell(rango.min_row, 2).value
+                ws.unmerge_cells(str(rango))
+                for fila in range(rango.min_row, rango.max_row + 1):
+                    ws.cell(fila, 2).value = valor
 
-    df = pd.DataFrame(registros)
-    df['Grupo'] = df['Grupo'].ffill()
-    df['Valores'] = df['Valores'].ffill()
-    df['Total'] = pd.to_numeric(df['Total'], errors='coerce')
-    df = df.dropna(subset=['Valores']).reset_index(drop=True)
-    return df
+        registros = []
+        for row in ws.iter_rows(min_row=10, values_only=True):
+            if not any(c is not None for c in row):
+                continue
+            registros.append({
+                'Grupo'  : row[1],
+                'Valores': row[2],
+                'Total'  : row[3],
+            })
+
+        df = pd.DataFrame(registros)
+        df['Grupo']   = df['Grupo'].ffill()
+        df['Valores'] = df['Valores'].ffill()
+        df['Total']   = pd.to_numeric(df['Total'], errors='coerce')
+        df = df.dropna(subset=['Valores']).reset_index(drop=True)
+
+        liquidaciones.append({'id_pago': id_pago, 'df': df})
+    return liquidaciones
 
 
-def depurar_liquidacion(df):
-    excluir = ['SUM of Venta Bruta', 'SUM of Descuento de Producto', 'SUM of Subtotal antes de impuestos']
-    df = df[~df['Valores'].isin(excluir)]
-    df = df[df['Grupo'] != 'Valor total a transferir']
-    df = df[df['Total'].notna()]
-    df = df[df['Total'] != 0]
-    df['Total'] = df['Total'].round(2)
-    return df.reset_index(drop=True)
+def depurar_liquidaciones(liquidaciones):
+    excluir  = ['SUM of Venta Bruta', 'SUM of Descuento de Producto', 'SUM of Subtotal antes de impuestos']
+    conservar = ['SUM of Uso y alquiler de plataforma Rappi', 'SUM of Tarifa transaccional']
+
+    for liq in liquidaciones:
+        df = liq['df']
+        df = df[~df['Valores'].isin(excluir)]
+        df = df[df['Grupo'] != 'Valor total a transferir']
+        df = df[df['Total'].notna()]
+        df = df[(df['Total'] != 0) | (df['Valores'].isin(conservar))]
+        df['Total'] = df['Total'].round(2)
+        liq['df'] = df.reset_index(drop=True)
+    return liquidaciones
 
 
 # ─────────────────────────────────────────────
@@ -67,6 +79,24 @@ def _parse_factura(file_obj):
     obs_top    = next(w['top'] for w in words if w['text']=='Observaciones' and w['x0']<120)
     det_top    = next(w['top'] for w in words if w['text']=='Código' and w['x0']>200)
     total_top  = next(w['top'] for w in words if w['text']=='Total' and 460<w['x0']<510)
+
+    nro_factura = None
+    for i, w in enumerate(words):
+        if w['text'] == 'N°:' and w['x0'] > 450:
+            if i + 1 < len(words):
+                nro_factura = words[i + 1]['text']
+            break
+
+    pid = None
+    for i, w in enumerate(words):
+        if w['text'] == 'PID:':
+            if i + 1 < len(words):
+                pid = int(words[i + 1]['text'])
+            break
+        if w['text'] == 'Lot:':
+            if i + 1 < len(words):
+                pid = int(words[i + 1]['text'])
+            break
 
     tbl_words = [w for w in words if header_top < w['top'] < obs_top]
 
@@ -137,58 +167,119 @@ def _parse_factura(file_obj):
             'P.Total':     collect_imp(rw, 'impuesto'),
         })
 
-    return pd.concat([df_main, pd.DataFrame(imp_rows)], ignore_index=True)
+    df = pd.concat([df_main, pd.DataFrame(imp_rows)], ignore_index=True)
+
+    primera_cod = df['Cod'].iloc[0].replace(' ', '').lower()
+    tipo = 'publicidad' if 'serviciosdepublicidad' in primera_cod else 'servicios'
+
+    return {'nro_factura': nro_factura, 'pid': pid, 'tipo': tipo, 'df': df}
 
 
 def importar_facturas(archivos_pdf):
-    COLUMNAS = ['Cod', 'Cant', 'Descripción', 'Imp', 'P.Unit', 'P.Total']
-    df_pub, df_srv = [], []
+    facturas = []
     for f in archivos_pdf:
-        df = _parse_factura(f)
-        primera_cod = df['Cod'].iloc[0].replace(' ', '').lower()
-        if 'serviciosdepublicidad' in primera_cod:
-            df_pub.append(df)
-        else:
-            df_srv.append(df)
-    df_publicidad = pd.concat(df_pub, ignore_index=True) if df_pub else pd.DataFrame(columns=COLUMNAS)
-    df_servicios  = pd.concat(df_srv, ignore_index=True) if df_srv else pd.DataFrame(columns=COLUMNAS)
-    return df_publicidad, df_servicios
+        factura = _parse_factura(f)
+        facturas.append(factura)
+    return facturas
 
 
-def depurar_facturas(df):
-    if df.empty:
-        return df
-    for col in ['P.Unit', 'P.Total']:
-        df[col] = (
-            df[col]
-            .astype(str)
-            .str.replace('$', '', regex=False)
-            .str.replace('.', '', regex=False)
-            .str.replace(',', '.', regex=False)
-            .pipe(pd.to_numeric, errors='coerce')
-            .round(2)
-        )
-    df = df[df['P.Total'].abs() > 0.5].reset_index(drop=True)
-    return df
+def depurar_facturas(facturas):
+    for factura in facturas:
+        df = factura['df']
+        for col in ['P.Unit', 'P.Total']:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace('$', '', regex=False)
+                .str.replace('.', '', regex=False)
+                .str.replace(',', '.', regex=False)
+                .pipe(pd.to_numeric, errors='coerce')
+                .round(2)
+            )
+        df = df[df['P.Total'].abs() > 0.5].reset_index(drop=True)
+        factura['df'] = df
+    return facturas
 
 
 # ─────────────────────────────────────────────
-# CRUCES
+# ASIGNACIÓN: facturas → liquidaciones
 # ─────────────────────────────────────────────
 
-def cruce_publicidad_liquidacion(df_publicidad, df_liquidacion):
+def asignar_facturas(facturas, liquidaciones):
+    TOLERANCIA = 0.5
+    advertencias = []
+
+    for liq in liquidaciones:
+        liq['facturas_publicidad'] = []
+        liq['facturas_servicios']  = []
+        liq['nros_factura']        = []
+
+    for factura in facturas:
+        df_fac  = factura['df']
+        tipo    = factura['tipo']
+        nro_fac = factura['nro_factura']
+        asignada = False
+
+        if tipo == 'servicios':
+            mask_bank = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('ar-bankfeerestaurantes', na=False)
+            mask_com  = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('ar-comisionesrestaurant', na=False)
+            val_bank = abs(df_fac.loc[mask_bank, 'P.Total'].values[0]) if mask_bank.any() else None
+            val_com  = abs(df_fac.loc[mask_com,  'P.Total'].values[0]) if mask_com.any()  else None
+
+            for liq in liquidaciones:
+                df_liq = liq['df']
+                mask_tar = df_liq['Valores'].str.contains('SUM of Tarifa transaccional', na=False)
+                mask_uso = df_liq['Valores'].str.contains('SUM of Uso y alquiler de plataforma Rappi', na=False)
+                val_tar = abs(df_liq.loc[mask_tar, 'Total'].values[0]) if mask_tar.any() else None
+                val_uso = abs(df_liq.loc[mask_uso, 'Total'].values[0]) if mask_uso.any() else None
+
+                checks = []
+                if val_bank is not None and val_tar is not None:
+                    checks.append(abs(val_bank - val_tar) <= TOLERANCIA)
+                if val_com is not None and val_uso is not None:
+                    checks.append(abs(val_com - val_uso) <= TOLERANCIA)
+
+                if checks and all(checks):
+                    liq['facturas_servicios'].append(factura)
+                    liq['nros_factura'].append(nro_fac)
+                    asignada = True
+                    break
+
+        elif tipo == 'publicidad':
+            mask_pub = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('serviciosdepublicidadindexaccionrappi', na=False)
+            suma_pub = abs(df_fac.loc[mask_pub, 'P.Total'].sum()) if mask_pub.any() else None
+
+            for liq in liquidaciones:
+                df_liq = liq['df']
+                mask_ads = df_liq['Valores'].str.contains('SUM of Cuota de RappiAds', na=False)
+                val_ads  = abs(df_liq.loc[mask_ads, 'Total'].values[0]) if mask_ads.any() else None
+
+                if suma_pub is not None and val_ads is not None and abs(suma_pub - val_ads) <= TOLERANCIA:
+                    liq['facturas_publicidad'].append(factura)
+                    liq['nros_factura'].append(nro_fac)
+                    asignada = True
+                    break
+
+        if not asignada:
+            advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
+
+    return liquidaciones, advertencias
+
+
+# ─────────────────────────────────────────────
+# CRUCES INTERNOS
+# ─────────────────────────────────────────────
+
+def _cruce_publicidad(df_publicidad, df_liquidacion):
     TOLERANCIA = 0.5
 
     if df_publicidad.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), df_liquidacion.copy().reset_index(drop=True), {
-            'match_pub': 0, 'match_liq': 0, 'falta_liq': 0, 'falta_pub': len(df_liquidacion)
-        }
+        return pd.DataFrame(), pd.DataFrame(), df_liquidacion.copy().reset_index(drop=True)
 
     disponibles_liq = list(df_liquidacion.index)
-    idx_match_pub = []
-    idx_match_liq = []
+    idx_match_pub, idx_match_liq = [], []
 
-    mask_pub = df_publicidad['Cod'] == 'Servicios de Publicidad Index Accion Rappi'
+    mask_pub = df_publicidad['Cod'].str.replace(' ','').str.lower().str.contains('serviciosdepublicidadindexaccionrappi', na=False)
     idx_pub  = df_publicidad[mask_pub].index.tolist()
 
     if idx_pub:
@@ -209,37 +300,24 @@ def cruce_publicidad_liquidacion(df_publicidad, df_liquidacion):
                 disponibles_liq.remove(j)
                 break
 
-    match_publicidad  = df_publicidad.loc[idx_match_pub].reset_index(drop=True)
-    match_liquidacion = df_liquidacion.loc[idx_match_liq].reset_index(drop=True)
-    falta_pub1        = df_liquidacion.drop(index=idx_match_liq).reset_index(drop=True)
-    falta_liq1        = df_publicidad.drop(index=idx_match_pub).reset_index(drop=True)
-
-    stats = {
-        'match_pub': len(match_publicidad),
-        'match_liq': len(match_liquidacion),
-        'falta_liq': len(falta_liq1),
-        'falta_pub': len(falta_pub1),
-    }
-    return match_publicidad, match_liquidacion, falta_liq1, falta_pub1, stats
+    match_liq  = df_liquidacion.loc[idx_match_liq].reset_index(drop=True)
+    falta_liq  = df_liquidacion.drop(index=idx_match_liq).reset_index(drop=True)
+    match_pub  = df_publicidad.loc[idx_match_pub].reset_index(drop=True)
+    return match_pub, match_liq, falta_liq
 
 
-def cruzar_liquidacion_servicio(df_servicios, falta_publicidad1):
+def _cruce_servicios(df_servicios, falta_pub):
     TOLERANCIA = 0.5
 
     if df_servicios.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), falta_publicidad1.copy().reset_index(drop=True), {
-            'paso1': 0, 'paso2': 0, 'paso3': 0,
-            'match_srv': 0, 'match_liq': 0, 'falta_fac': len(falta_publicidad1), 'falta_liq2': 0
-        }
+        return pd.DataFrame(), pd.DataFrame(), falta_pub.copy().reset_index(drop=True)
 
     disponibles_srv = list(df_servicios.index)
-    disponibles_liq = list(falta_publicidad1.index)
-    idx_match_srv = []
-    idx_match_liq = []
+    disponibles_liq = list(falta_pub.index)
+    idx_match_srv, idx_match_liq = [], []
 
-    # Paso 1: match 1 a 1
     for i in list(disponibles_liq):
-        val = abs(falta_publicidad1.loc[i, 'Total'])
+        val = abs(falta_pub.loc[i, 'Total'])
         for j in disponibles_srv:
             if abs(val - abs(df_servicios.loc[j, 'P.Total'])) <= TOLERANCIA:
                 idx_match_liq.append(i)
@@ -248,15 +326,11 @@ def cruzar_liquidacion_servicio(df_servicios, falta_publicidad1):
                 disponibles_srv.remove(j)
                 break
 
-    paso1 = len(idx_match_liq)
-
-    # Paso 2: IVA plataforma + Descuento vs 1 entrada
-    resto_liq = falta_publicidad1.loc[disponibles_liq].copy()
-    mask_iva = resto_liq['Valores'].str.contains('IVA Uso y alquiler de plataforma Rappi', na=False)
-    mask_dsc = resto_liq['Valores'].str.contains('Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler', na=False)
+    resto_liq = falta_pub.loc[disponibles_liq].copy()
+    mask_iva  = resto_liq['Valores'].str.contains('IVA Uso y alquiler de plataforma Rappi', na=False)
+    mask_dsc  = resto_liq['Valores'].str.contains('Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler', na=False)
     idx_iva_dsc = resto_liq[mask_iva | mask_dsc].index.tolist()
 
-    paso2 = 0
     if idx_iva_dsc:
         suma_iva = resto_liq.loc[idx_iva_dsc, 'Total'].sum()
         for j in disponibles_srv:
@@ -265,73 +339,128 @@ def cruzar_liquidacion_servicio(df_servicios, falta_publicidad1):
                 idx_match_srv.append(j)
                 disponibles_liq = [i for i in disponibles_liq if i not in idx_iva_dsc]
                 disponibles_srv.remove(j)
-                paso2 = len(idx_iva_dsc)
                 break
 
-    # Paso 3: suma por grupo
-    resto_liq = falta_publicidad1.loc[disponibles_liq].copy()
-    grupos_sum = resto_liq.groupby('Grupo')['Total'].sum()
-    idx_match_srv2  = []
-    idx_grupo_match = []
+    resto_liq   = falta_pub.loc[disponibles_liq].copy()
+    grupos_sum  = resto_liq.groupby('Grupo')['Total'].sum()
+    idx_srv2, idx_grupos = [], []
 
     for grupo, suma in grupos_sum.items():
         for j in disponibles_srv:
             if abs(abs(suma) - abs(df_servicios.loc[j, 'P.Total'])) <= TOLERANCIA:
-                idx_match_srv2.append(j)
-                idx_grupo_match.append(grupo)
+                idx_srv2.append(j)
+                idx_grupos.append(grupo)
                 disponibles_srv.remove(j)
                 break
 
-    idx_liq_grupo = resto_liq[resto_liq['Grupo'].isin(idx_grupo_match)].index.tolist()
+    idx_liq_grupo = resto_liq[resto_liq['Grupo'].isin(idx_grupos)].index.tolist()
 
-    todos_match_liq = idx_match_liq + idx_liq_grupo
-    todos_match_srv = idx_match_srv + idx_match_srv2
+    todos_liq = idx_match_liq + idx_liq_grupo
+    todos_srv = idx_match_srv + idx_srv2
 
-    match_servicios    = df_servicios.loc[todos_match_srv].reset_index(drop=True)
-    match_liquidacion  = falta_publicidad1.loc[todos_match_liq].reset_index(drop=True)
-    falta_factura      = falta_publicidad1.drop(index=todos_match_liq).reset_index(drop=True)
-    falta_liquidacion2 = df_servicios.drop(index=todos_match_srv).reset_index(drop=True)
+    match_liq  = falta_pub.loc[todos_liq].reset_index(drop=True)
+    falta_fac  = falta_pub.drop(index=todos_liq).reset_index(drop=True)
+    return df_servicios.loc[todos_srv].reset_index(drop=True), match_liq, falta_fac
+
+
+# ─────────────────────────────────────────────
+# PROCESAMIENTO POR LIQUIDACIÓN
+# ─────────────────────────────────────────────
+
+def procesar_liquidaciones(liquidaciones):
+    COLUMNAS_FAC = ['Cod', 'Cant', 'Descripción', 'Imp', 'P.Unit', 'P.Total']
+    resumen_rows = []
+
+    for liq in liquidaciones:
+        df_liq       = liq['df'].copy()
+        facturas_pub = liq['facturas_publicidad']
+        facturas_srv = liq['facturas_servicios']
+        all_match_liq = []
+        falta_actual  = df_liq.copy()
+
+        if not facturas_pub:
+            _, _, falta_actual = _cruce_publicidad(pd.DataFrame(columns=COLUMNAS_FAC), falta_actual)
+        else:
+            for factura in facturas_pub:
+                df_pub = factura['df'].copy().reset_index(drop=True)
+                _, match_liq, falta_actual = _cruce_publicidad(df_pub, falta_actual)
+                if not match_liq.empty:
+                    match_liq = match_liq.copy()
+                    match_liq['nro_factura'] = factura['nro_factura']
+                    all_match_liq.append(match_liq)
+
+        if not facturas_srv:
+            _, _, falta_actual = _cruce_servicios(pd.DataFrame(columns=COLUMNAS_FAC), falta_actual)
+        else:
+            for factura in facturas_srv:
+                df_srv = factura['df'].copy().reset_index(drop=True)
+                _, match_liq, falta_actual = _cruce_servicios(df_srv, falta_actual)
+                if not match_liq.empty:
+                    match_liq = match_liq.copy()
+                    match_liq['nro_factura'] = factura['nro_factura']
+                    all_match_liq.append(match_liq)
+
+        liq['match_liquidacion'] = (
+            pd.concat(all_match_liq, ignore_index=True)
+            if all_match_liq
+            else pd.DataFrame(columns=list(df_liq.columns) + ['nro_factura'])
+        )
+        liq['falta_factura'] = falta_actual.copy().reset_index(drop=True)
+
+        for factura in facturas_pub + facturas_srv:
+            resumen_rows.append({'nro_factura': factura['nro_factura'], 'id_pago': liq['id_pago']})
+
+    df_resumen = (
+        pd.DataFrame(resumen_rows)
+        if resumen_rows
+        else pd.DataFrame(columns=['nro_factura', 'id_pago'])
+    )
+    return liquidaciones, df_resumen
+
+
+# ─────────────────────────────────────────────
+# FUNCIÓN PRINCIPAL → devuelve ZIP en memoria
+# ─────────────────────────────────────────────
+
+def correr_rappi(archivos_liq, archivos_pdf):
+    liquidaciones = importar_liquidaciones(archivos_liq)
+    liquidaciones = depurar_liquidaciones(liquidaciones)
+
+    facturas = importar_facturas(archivos_pdf)
+    facturas = depurar_facturas(facturas)
+
+    liquidaciones, advertencias = asignar_facturas(facturas, liquidaciones)
+    liquidaciones, df_resumen   = procesar_liquidaciones(liquidaciones)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for liq in liquidaciones:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                liq['match_liquidacion'].to_excel(writer, sheet_name='match_liquidacion', index=False)
+                liq['falta_factura'].to_excel(writer, sheet_name='falta_factura', index=False)
+            buf.seek(0)
+            zf.writestr(f"liquidacion_{liq['id_pago']}.xlsx", buf.read())
+
+        buf_res = io.BytesIO()
+        df_resumen.to_excel(buf_res, index=False, engine='openpyxl')
+        buf_res.seek(0)
+        zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
+
+    zip_buf.seek(0)
 
     stats = {
-        'paso1': paso1, 'paso2': paso2, 'paso3': len(idx_liq_grupo),
-        'match_srv': len(match_servicios),
-        'match_liq': len(match_liquidacion),
-        'falta_fac': len(falta_factura),
-        'falta_liq2': len(falta_liquidacion2),
+        'n_liquidaciones': len(liquidaciones),
+        'n_facturas':      len(facturas),
+        'advertencias':    advertencias,
+        'detalle': [
+            {
+                'id_pago':  liq['id_pago'],
+                'match':    len(liq['match_liquidacion']),
+                'falta':    len(liq['falta_factura']),
+                'facturas': liq['nros_factura'],
+            }
+            for liq in liquidaciones
+        ]
     }
-    return match_servicios, match_liquidacion, falta_liquidacion2, falta_factura, stats
-
-
-# ─────────────────────────────────────────────
-# FUNCIÓN PRINCIPAL
-# ─────────────────────────────────────────────
-
-def correr_rappi(archivo_liquidacion, archivos_pdf):
-    df_liq = importar_liquidacion(archivo_liquidacion)
-    df_liq = depurar_liquidacion(df_liq)
-
-    df_pub_raw, df_srv_raw = importar_facturas(archivos_pdf)
-    df_publicidad = depurar_facturas(df_pub_raw)
-    df_servicios  = depurar_facturas(df_srv_raw)
-
-    (match_pub, match_liq_pub,
-     falta_liq1, falta_pub1, stats_pub) = cruce_publicidad_liquidacion(df_publicidad, df_liq)
-
-    (match_srv, match_liq_srv,
-     falta_liq2, falta_fac, stats_srv) = cruzar_liquidacion_servicio(df_servicios, falta_pub1)
-
-    stats = {**stats_pub, **stats_srv}
-
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df_liq.to_excel(writer, sheet_name='Liquidación depurada', index=False)
-        df_publicidad.to_excel(writer, sheet_name='Facturas publicidad', index=False)
-        df_servicios.to_excel(writer, sheet_name='Facturas servicios', index=False)
-        match_pub.to_excel(writer, sheet_name='Match publicidad', index=False)
-        match_liq_pub.to_excel(writer, sheet_name='Match liq. publicidad', index=False)
-        match_srv.to_excel(writer, sheet_name='Match servicios', index=False)
-        match_liq_srv.to_excel(writer, sheet_name='Match liq. servicios', index=False)
-        falta_fac.to_excel(writer, sheet_name='Sin factura', index=False)
-        falta_liq2.to_excel(writer, sheet_name='Sin liquidación', index=False)
-    buf.seek(0)
-    return buf, stats
+    return zip_buf, stats
