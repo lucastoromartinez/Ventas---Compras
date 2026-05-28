@@ -55,12 +55,9 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
 
 .counter-box {
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
-    border-radius: 6px;
-    padding: 1.2rem;
-    text-align: center;
-    margin: 1.5rem 0;
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 6px; padding: 1.2rem;
+    text-align: center; margin: 1.5rem 0;
 }
 .counter-box .counter-num {
     font-family: 'IBM Plex Mono', monospace;
@@ -70,8 +67,7 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .counter-box .counter-label {
     font-size: 0.75rem; color: #555;
     text-transform: uppercase; letter-spacing: 1px;
-    margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
+    margin-top: 0.4rem; font-family: 'IBM Plex Mono', monospace;
 }
 
 .metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }
@@ -90,6 +86,15 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 }
 .metric-card.warn .metric-value { color: #facc15; }
 .metric-card.ok   .metric-value { color: #4ade80; }
+
+.liq-card {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 6px; padding: 0.9rem 1.2rem; margin: 0.5rem 0;
+    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+}
+.liq-card .liq-id { color: #c084fc; font-weight: 600; font-size: 0.85rem; }
+.liq-card .liq-detail { color: #888; margin-top: 0.3rem; }
+.liq-card.warn { border-color: #facc1555; }
 
 .divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
 
@@ -112,19 +117,14 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .back-btn > button:hover { color: #c084fc !important; border-color: #c084fc !important; }
 
 .pdf-list {
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
-    border-radius: 6px;
-    padding: 1rem 1.2rem;
-    margin: 1rem 0;
-    max-height: 200px;
-    overflow-y: auto;
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 6px; padding: 1rem 1.2rem;
+    margin: 1rem 0; max-height: 200px; overflow-y: auto;
 }
 .pdf-item {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.72rem; color: #888;
-    padding: 0.2rem 0;
-    border-bottom: 1px solid #222;
+    padding: 0.2rem 0; border-bottom: 1px solid #222;
 }
 .pdf-item:last-child { border-bottom: none; }
 .pdf-item::before { content: "📄 "; }
@@ -177,7 +177,6 @@ with tab_payway:
             <div class="counter-label">PDF{"s" if len(archivos) != 1 else ""} cargado{"s" if len(archivos) != 1 else ""}</div>
         </div>
         """, unsafe_allow_html=True)
-
         items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos)
         st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
 
@@ -220,14 +219,22 @@ with tab_payway:
 with tab_rappi:
     st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown('<div class="upload-label">Liquidación Rappi (Excel)</div>', unsafe_allow_html=True)
-    archivo_liq = st.file_uploader(
+    st.markdown('<div class="upload-label">Liquidaciones Rappi (Excel — una o más)</div>', unsafe_allow_html=True)
+    archivos_liq = st.file_uploader(
         "rappi_liq",
         type=["xlsx", "xls"],
-        accept_multiple_files=False,
+        accept_multiple_files=True,
         label_visibility="collapsed",
-        key="rappi_liquidacion"
+        key="rappi_liquidaciones"
     )
+
+    if archivos_liq:
+        st.markdown(f"""
+        <div class="counter-box">
+            <div class="counter-num">{len(archivos_liq)}</div>
+            <div class="counter-label">liquidación{"es" if len(archivos_liq) != 1 else ""} cargada{"s" if len(archivos_liq) != 1 else ""}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
@@ -240,36 +247,29 @@ with tab_rappi:
     )
 
     if archivos_pdf:
-        st.markdown(f"""
-        <div class="counter-box">
-            <div class="counter-num">{len(archivos_pdf)}</div>
-            <div class="counter-label">factura{"s" if len(archivos_pdf) != 1 else ""} cargada{"s" if len(archivos_pdf) != 1 else ""}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
         items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos_pdf)
         st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    todo_ok_rappi = bool(archivo_liq and archivos_pdf)
-    if not archivo_liq:
-        st.info("Cargá la liquidación Excel de Rappi para continuar.")
+    todo_ok = bool(archivos_liq and archivos_pdf)
+    if not archivos_liq:
+        st.info("Cargá al menos una liquidación Excel de Rappi.")
     elif not archivos_pdf:
         st.info("Cargá al menos una factura PDF de Rappi.")
 
     boton_rappi = st.button(
-        "CRUZAR FACTURAS vs LIQUIDACIÓN",
-        disabled=not todo_ok_rappi,
+        "CRUZAR FACTURAS vs LIQUIDACIONES",
+        disabled=not todo_ok,
         use_container_width=True,
         key="btn_rappi"
     )
 
-    if boton_rappi and todo_ok_rappi:
+    if boton_rappi and todo_ok:
         with st.spinner("Procesando Rappi..."):
             try:
-                buf_r, stats_r = correr_rappi(archivo_liq, archivos_pdf)
-                st.session_state["resultado_rappi"] = {"buf": buf_r, "stats": stats_r}
+                zip_buf, stats = correr_rappi(archivos_liq, archivos_pdf)
+                st.session_state["resultado_rappi"] = {"zip": zip_buf, "stats": stats}
             except Exception as e:
                 st.error(f"Error al procesar: {e}")
 
@@ -280,38 +280,40 @@ with tab_rappi:
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
         st.success("¡Listo! El cruce está generado.")
 
-        falta_fac  = s.get('falta_fac', 0)
-        falta_liq2 = s.get('falta_liq2', 0)
-        clase_ff   = "warn" if falta_fac  > 0 else "ok"
-        clase_fl   = "warn" if falta_liq2 > 0 else "ok"
-
         st.markdown(f"""
         <div class="metric-row">
             <div class="metric-card ok">
-                <div class="metric-value">{s.get('match_pub', 0)}</div>
-                <div class="metric-label">Match publicidad</div>
+                <div class="metric-value">{s['n_liquidaciones']}</div>
+                <div class="metric-label">Liquidaciones</div>
             </div>
             <div class="metric-card ok">
-                <div class="metric-value">{s.get('match_srv', 0)}</div>
-                <div class="metric-label">Match servicios</div>
-            </div>
-            <div class="metric-card {clase_ff}">
-                <div class="metric-value">{falta_fac}</div>
-                <div class="metric-label">Sin factura</div>
-            </div>
-            <div class="metric-card {clase_fl}">
-                <div class="metric-value">{falta_liq2}</div>
-                <div class="metric-label">Sin liquidación</div>
+                <div class="metric-value">{s['n_facturas']}</div>
+                <div class="metric-label">Facturas</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
+        for d in s['detalle']:
+            clase = "liq-card warn" if d['falta'] > 0 else "liq-card"
+            facturas_str = ', '.join(d['facturas']) if d['facturas'] else '—'
+            st.markdown(f"""
+            <div class="{clase}">
+                <div class="liq-id">ID Pago: {d['id_pago']}</div>
+                <div class="liq-detail">✅ {d['match']} match &nbsp;|&nbsp; ⚠️ {d['falta']} sin factura</div>
+                <div class="liq-detail">Facturas: {facturas_str}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if s['advertencias']:
+            for adv in s['advertencias']:
+                st.warning(adv)
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Rappi",
-            data=r["buf"],
-            file_name="reporte_rappi.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            label="📥 Descargar resultados Rappi (.zip)",
+            data=r["zip"],
+            file_name="resultados_rappi.zip",
+            mime="application/zip",
             use_container_width=True,
             key="dl_rappi"
         )
