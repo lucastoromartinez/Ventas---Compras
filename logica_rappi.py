@@ -13,7 +13,7 @@ import pdfplumber
 def importar_liquidaciones(archivos):
     liquidaciones = []
     for archivo in archivos:
-        wb = openpyxl.load_workbook(archivo, data_only=True)
+        wb = openpyxl.load_workbook(io.BytesIO(archivo.read()), data_only=True)
         ws = wb['Resumen']
 
         id_pago = ws.cell(row=7, column=4).value
@@ -66,7 +66,7 @@ def depurar_liquidaciones(liquidaciones):
 # ─────────────────────────────────────────────
 
 def _parse_factura(file_obj):
-    with pdfplumber.open(file_obj) as pdf:
+    with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
         words = pdf.pages[0].extract_words()
 
     COL = {'cod':(36,115), 'cant':(115,158), 'desc':(158,379),
