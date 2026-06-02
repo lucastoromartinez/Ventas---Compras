@@ -47,7 +47,7 @@ def importar_liquidaciones(archivos):
 
 
 def depurar_liquidaciones(liquidaciones):
-    excluir  = ['SUM of Venta Bruta', 'SUM of Descuento de Producto', 'SUM of Subtotal antes de impuestos']
+    excluir   = ['SUM of Venta Bruta', 'SUM of Descuento de Producto', 'SUM of Subtotal antes de impuestos']
     conservar = ['SUM of Uso y alquiler de plataforma Rappi', 'SUM of Tarifa transaccional']
 
     for liq in liquidaciones:
@@ -69,8 +69,9 @@ def _parse_factura(file_obj):
     with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
         words = pdf.pages[0].extract_words()
 
+    # ← CORRECCIÓN: rangos ampliados para tolerar números más anchos
     COL = {'cod':(36,115), 'cant':(115,158), 'desc':(158,379),
-           'imp':(379,440), 'punit':(440,522), 'ptotal':(520,600)}
+           'imp':(379,440), 'punit':(400,500), 'ptotal':(500,600)}
     IMP = {'codigo':(200,257), 'alicuota':(316,363), 'impuesto':(363,520)}
 
     def x_in(w, rng): return rng[0] <= w['x0'] < rng[1]
@@ -300,9 +301,9 @@ def _cruce_publicidad(df_publicidad, df_liquidacion):
                 disponibles_liq.remove(j)
                 break
 
-    match_liq  = df_liquidacion.loc[idx_match_liq].reset_index(drop=True)
-    falta_liq  = df_liquidacion.drop(index=idx_match_liq).reset_index(drop=True)
-    match_pub  = df_publicidad.loc[idx_match_pub].reset_index(drop=True)
+    match_liq = df_liquidacion.loc[idx_match_liq].reset_index(drop=True)
+    falta_liq = df_liquidacion.drop(index=idx_match_liq).reset_index(drop=True)
+    match_pub = df_publicidad.loc[idx_match_pub].reset_index(drop=True)
     return match_pub, match_liq, falta_liq
 
 
@@ -341,8 +342,8 @@ def _cruce_servicios(df_servicios, falta_pub):
                 disponibles_srv.remove(j)
                 break
 
-    resto_liq   = falta_pub.loc[disponibles_liq].copy()
-    grupos_sum  = resto_liq.groupby('Grupo')['Total'].sum()
+    resto_liq  = falta_pub.loc[disponibles_liq].copy()
+    grupos_sum = resto_liq.groupby('Grupo')['Total'].sum()
     idx_srv2, idx_grupos = [], []
 
     for grupo, suma in grupos_sum.items():
@@ -358,8 +359,8 @@ def _cruce_servicios(df_servicios, falta_pub):
     todos_liq = idx_match_liq + idx_liq_grupo
     todos_srv = idx_match_srv + idx_srv2
 
-    match_liq  = falta_pub.loc[todos_liq].reset_index(drop=True)
-    falta_fac  = falta_pub.drop(index=todos_liq).reset_index(drop=True)
+    match_liq = falta_pub.loc[todos_liq].reset_index(drop=True)
+    falta_fac = falta_pub.drop(index=todos_liq).reset_index(drop=True)
     return df_servicios.loc[todos_srv].reset_index(drop=True), match_liq, falta_fac
 
 
