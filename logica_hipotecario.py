@@ -529,8 +529,10 @@ def correr_conciliacion_hipotecario(archivo_mayor, archivo_extracto):
     if len(dc5) > 0: dc5["match_id"] = id5; dc5["match_tipo"] = "5"
 
     # 12. Consolidar match definitivo
-    match_mayor_def = pd.concat(_limpiar_dfs([dm0, dm1, de2, de3, de4, dd5]), ignore_index=True)
-    match_ext_def   = pd.concat(_limpiar_dfs([de0, de1, dm2, dm3, dm4, dc5]), ignore_index=True)
+    lista_mayor = _limpiar_dfs([dm0, dm1, de2, de3, de4, dd5])
+    lista_ext   = _limpiar_dfs([de0, de1, dm2, dm3, dm4, dc5])
+    match_mayor_def = pd.concat(lista_mayor, ignore_index=True) if lista_mayor else pd.DataFrame()
+    match_ext_def   = pd.concat(lista_ext,   ignore_index=True) if lista_ext   else pd.DataFrame()
 
     stats = {
         "match_exacto":     len(mm0),
