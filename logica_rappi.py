@@ -69,7 +69,6 @@ def _parse_factura(file_obj):
     with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
         words = pdf.pages[0].extract_words()
 
-    # ← CORRECCIÓN: rangos ampliados para tolerar números más anchos
     COL = {'cod':(36,115), 'cant':(115,158), 'desc':(158,379),
            'imp':(379,440), 'punit':(400,500), 'ptotal':(500,600)}
     IMP = {'codigo':(200,257), 'alicuota':(316,363), 'impuesto':(363,520)}
@@ -81,6 +80,7 @@ def _parse_factura(file_obj):
     det_top    = next(w['top'] for w in words if w['text']=='Código' and w['x0']>200)
     total_top  = next(w['top'] for w in words if w['text']=='Total' and 460<w['x0']<510)
 
+    # Número de factura
     nro_factura = None
     for i, w in enumerate(words):
         if w['text'] == 'N°:' and w['x0'] > 450:
@@ -88,6 +88,7 @@ def _parse_factura(file_obj):
                 nro_factura = words[i + 1]['text']
             break
 
+    # PID
     pid = None
     for i, w in enumerate(words):
         if w['text'] == 'PID:':
@@ -98,6 +99,20 @@ def _parse_factura(file_obj):
             if i + 1 < len(words):
                 pid = int(words[i + 1]['text'])
             break
+
+    # Fecha Factura
+    fecha_factura = None
+    for i, w in enumerate(words):
+        if w['text'] == 'Fecha:' and w['x0'] > 450:
+            if i + 1 < len(words):
+                fecha_factura = words[i + 1]['text']
+            break
+
+    # Inicio y Fin de Periodo (formato YYYY-MM-DD en zona descripción)
+    date_pattern   = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+    dates_found    = [w['text'] for w in words if date_pattern.match(w['text']) and 150 < w['x0'] < 400]
+    inicio_periodo = dates_found[0] if len(dates_found) >= 1 else None
+    fin_periodo    = dates_found[1] if len(dates_found) >= 2 else None
 
     tbl_words = [w for w in words if header_top < w['top'] < obs_top]
 
@@ -173,7 +188,15 @@ def _parse_factura(file_obj):
     primera_cod = df['Cod'].iloc[0].replace(' ', '').lower()
     tipo = 'publicidad' if 'serviciosdepublicidad' in primera_cod else 'servicios'
 
-    return {'nro_factura': nro_factura, 'pid': pid, 'tipo': tipo, 'df': df}
+    return {
+        'nro_factura':    nro_factura,
+        'pid':            pid,
+        'tipo':           tipo,
+        'fecha_factura':  fecha_factura,
+        'inicio_periodo': inicio_periodo,
+        'fin_periodo':    fin_periodo,
+        'df':             df,
+    }
 
 
 def importar_facturas(archivos_pdf):
@@ -224,15 +247,15 @@ def asignar_facturas(facturas, liquidaciones):
         if tipo == 'servicios':
             mask_bank = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('ar-bankfeerestaurantes', na=False)
             mask_com  = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('ar-comisionesrestaurant', na=False)
-            val_bank = abs(df_fac.loc[mask_bank, 'P.Total'].values[0]) if mask_bank.any() else None
-            val_com  = abs(df_fac.loc[mask_com,  'P.Total'].values[0]) if mask_com.any()  else None
+            val_bank  = abs(df_fac.loc[mask_bank, 'P.Total'].values[0]) if mask_bank.any() else None
+            val_com   = abs(df_fac.loc[mask_com,  'P.Total'].values[0]) if mask_com.any()  else None
 
             for liq in liquidaciones:
-                df_liq = liq['df']
+                df_liq   = liq['df']
                 mask_tar = df_liq['Valores'].str.contains('SUM of Tarifa transaccional', na=False)
                 mask_uso = df_liq['Valores'].str.contains('SUM of Uso y alquiler de plataforma Rappi', na=False)
-                val_tar = abs(df_liq.loc[mask_tar, 'Total'].values[0]) if mask_tar.any() else None
-                val_uso = abs(df_liq.loc[mask_uso, 'Total'].values[0]) if mask_uso.any() else None
+                val_tar  = abs(df_liq.loc[mask_tar, 'Total'].values[0]) if mask_tar.any() else None
+                val_uso  = abs(df_liq.loc[mask_uso, 'Total'].values[0]) if mask_uso.any() else None
 
                 checks = []
                 if val_bank is not None and val_tar is not None:
@@ -251,7 +274,7 @@ def asignar_facturas(facturas, liquidaciones):
             suma_pub = abs(df_fac.loc[mask_pub, 'P.Total'].sum()) if mask_pub.any() else None
 
             for liq in liquidaciones:
-                df_liq = liq['df']
+                df_liq   = liq['df']
                 mask_ads = df_liq['Valores'].str.contains('SUM of Cuota de RappiAds', na=False)
                 val_ads  = abs(df_liq.loc[mask_ads, 'Total'].values[0]) if mask_ads.any() else None
 
@@ -327,9 +350,9 @@ def _cruce_servicios(df_servicios, falta_pub):
                 disponibles_srv.remove(j)
                 break
 
-    resto_liq = falta_pub.loc[disponibles_liq].copy()
-    mask_iva  = resto_liq['Valores'].str.contains('IVA Uso y alquiler de plataforma Rappi', na=False)
-    mask_dsc  = resto_liq['Valores'].str.contains('Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler', na=False)
+    resto_liq   = falta_pub.loc[disponibles_liq].copy()
+    mask_iva    = resto_liq['Valores'].str.contains('IVA Uso y alquiler de plataforma Rappi', na=False)
+    mask_dsc    = resto_liq['Valores'].str.contains('Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler', na=False)
     idx_iva_dsc = resto_liq[mask_iva | mask_dsc].index.tolist()
 
     if idx_iva_dsc:
@@ -355,9 +378,8 @@ def _cruce_servicios(df_servicios, falta_pub):
                 break
 
     idx_liq_grupo = resto_liq[resto_liq['Grupo'].isin(idx_grupos)].index.tolist()
-
-    todos_liq = idx_match_liq + idx_liq_grupo
-    todos_srv = idx_match_srv + idx_srv2
+    todos_liq     = idx_match_liq + idx_liq_grupo
+    todos_srv     = idx_match_srv + idx_srv2
 
     match_liq = falta_pub.loc[todos_liq].reset_index(drop=True)
     falta_fac = falta_pub.drop(index=todos_liq).reset_index(drop=True)
@@ -409,12 +431,18 @@ def procesar_liquidaciones(liquidaciones):
         liq['falta_factura'] = falta_actual.copy().reset_index(drop=True)
 
         for factura in facturas_pub + facturas_srv:
-            resumen_rows.append({'nro_factura': factura['nro_factura'], 'id_pago': liq['id_pago']})
+            resumen_rows.append({
+                'nro_factura':    factura['nro_factura'],
+                'id_pago':        liq['id_pago'],
+                'inicio_periodo': factura.get('inicio_periodo'),
+                'fin_periodo':    factura.get('fin_periodo'),
+                'fecha_factura':  factura.get('fecha_factura'),
+            })
 
     df_resumen = (
         pd.DataFrame(resumen_rows)
         if resumen_rows
-        else pd.DataFrame(columns=['nro_factura', 'id_pago'])
+        else pd.DataFrame(columns=['nro_factura', 'id_pago', 'inicio_periodo', 'fin_periodo', 'fecha_factura'])
     )
     return liquidaciones, df_resumen
 
