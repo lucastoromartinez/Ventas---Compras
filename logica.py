@@ -1,9 +1,11 @@
-from pathlib import Path
 import re
 import unicodedata
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
-from typing import Literal
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
 
 
 # ─────────────────────────────────────────────
@@ -19,12 +21,25 @@ def load_excel_file(file) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 
 def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Depura el DataFrame del sistema (robusto a variaciones de nombres de columnas:
+    mayúsculas/minúsculas, tildes, puntos, espacios, guiones).
+
+    - Normaliza CUIT: elimina guiones/espacios
+    - Divide Nro. en "Pto. Venta" y "N°Comprobante" (split por guion, sin ceros a izquierda)
+      Maneja: sin guion, más de un guion, em/en dash, espacios alrededor del guion,
+      y Pto. Venta vacío por error de carga
+    - Filtra filas donde Tipo Doc. == 'Factura Gastos' (robusto)
+    - Convierte columnas de importes a float
+    - Dropea columnas originales CUIT y Nro. (las reales detectadas)
+    """
+
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
 
     def _norm_col(s: str) -> str:
         s = str(s)
-        s = s.replace("\u00a0", " ")
+        s = s.replace(" ", " ")
         s = s.strip().lower()
         s = unicodedata.normalize("NFKD", s)
         s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -49,8 +64,8 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
             )
         return None
 
-    c_cuit = _resolve(["CUIT", "Cuit", "CUIT ", "C.U.I.T", "C U I T", "CUIT/CUIL"])
-    c_nro  = _resolve(["Nro.", "Nro", "Numero", "Número", "N°", "Nro comprobante", "Nro Comprobante"])
+    c_cuit     = _resolve(["CUIT", "Cuit", "CUIT ", "C.U.I.T", "C U I T", "CUIT/CUIL"])
+    c_nro      = _resolve(["Nro.", "Nro", "Numero", "Número", "N°", "Nro comprobante", "Nro Comprobante"])
     c_tipo_doc = _resolve(["Tipo Doc.", "Tipo Doc", "Tipo Documento", "Tipo de Documento"], required=False)
 
     df["CUIT_norm"] = (
@@ -59,32 +74,49 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
         .str.replace("-", "", regex=False)
         .str.replace(" ", "", regex=False)
         .str.strip()
-    )
-
-    df["Nro_norm"] = (
-        df[c_nro]
         .astype(str)
-        .str.strip()
-        .str.replace("-", "", regex=False)
     )
 
-    df["CUIT_norm"] = df["CUIT_norm"].astype(str)
-    df["Nro_norm"]  = df["Nro_norm"].astype(str)
+    def _parse_nro(s: str) -> tuple[str, str]:
+        s = str(s).strip()
+        # Normalizar separadores no estándar
+        s = s.replace('−', '-').replace('–', '-')  # em dash / en dash
+        s = re.sub(r'\s*-\s*', '-', s)                       # espacios alrededor del guión
+        count = s.count('-')
+        if count == 0:
+            left, right = s[:4], s[4:]
+        elif count == 1:
+            left, right = s.split('-', 1)
+        else:
+            idx   = s.index('-')
+            left  = s[:idx]
+            right = s[idx + 1:].replace('-', '')
+        pto  = left.lstrip('0')
+        comp = right.lstrip('0')
+        if pto == '' and len(right) >= 3 and right[0] != '0' and right[1:3] == '00':
+            pto  = right[0]
+            comp = right[1:].lstrip('0')
+        return pto, comp
+
+    parsed = df[c_nro].astype(str).str.strip().apply(_parse_nro)
+
+    df["Pto. Venta"]    = parsed.apply(lambda x: x[0]).astype(str)
+    df["N°Comprobante"] = parsed.apply(lambda x: x[1]).astype(str)
 
     importes_aliases: dict[str, list[str]] = {
         "Imp. Neto Gravado":    ["Imp. Neto Gravado", "Imp Neto Gravado", "Neto Gravado", "Neto Grav"],
         "Imp. Neto No Gravado": ["Imp. Neto No Gravado", "Imp Neto No Gravado", "Neto No Gravado", "No Gravado"],
-        "IVA 10,5%":  ["IVA 10,5%", "IVA 10.5%", "IVA 10,5", "IVA 10.5", "IVA 10"],
-        "IVA 21%":    ["IVA 21%", "IVA 21", "IVA21"],
-        "IVA 27%":    ["IVA 27%", "IVA 27", "IVA27"],
-        "Imp. Int.":  ["Imp. Int.", "Imp Int", "Impuestos Internos", "Imp Internos"],
-        "Perc. Gcias.":    ["Perc. Gcias.", "Perc Gcias", "Percepcion Ganancias", "Perc. Ganancias"],
-        "Perc. IVA":       ["Perc. IVA", "Perc IVA", "Percepcion IVA"],
-        "Perc. IIBB CABA": ["Perc. IIBB CABA", "Perc IIBB CABA", "Percep IIBB CABA", "IIBB CABA"],
-        "Perc. IIBB BS AS":["Perc. IIBB BS AS", "Perc IIBB BS AS", "Perc. IIBB Bs As", "IIBB BS AS", "IIBB Buenos Aires"],
-        "Perc. SUSS":  ["Perc. SUSS", "Perc SUSS", "Percepcion SUSS", "SUSS"],
-        "SIRCREB":     ["SIRCREB", "Sircreb"],
-        "Total":       ["Total", "Importe Total", "Total Comprobante", "Total Factura"],
+        "IVA 10,5%":            ["IVA 10,5%", "IVA 10.5%", "IVA 10,5", "IVA 10.5", "IVA 10"],
+        "IVA 21%":              ["IVA 21%", "IVA 21", "IVA21"],
+        "IVA 27%":              ["IVA 27%", "IVA 27", "IVA27"],
+        "Imp. Int.":            ["Imp. Int.", "Imp Int", "Impuestos Internos", "Imp Internos"],
+        "Perc. Gcias.":         ["Perc. Gcias.", "Perc Gcias", "Percepcion Ganancias", "Perc. Ganancias"],
+        "Perc. IVA":            ["Perc. IVA", "Perc IVA", "Percepcion IVA"],
+        "Perc. IIBB CABA":      ["Perc. IIBB CABA", "Perc IIBB CABA", "Percep IIBB CABA", "IIBB CABA"],
+        "Perc. IIBB BS AS":     ["Perc. IIBB BS AS", "Perc IIBB BS AS", "Perc. IIBB Bs As", "IIBB BS AS", "IIBB Buenos Aires"],
+        "Perc. SUSS":           ["Perc. SUSS", "Perc SUSS", "Percepcion SUSS", "SUSS"],
+        "SIRCREB":              ["SIRCREB", "Sircreb"],
+        "Total":                ["Total", "Importe Total", "Total Comprobante", "Total Factura"],
     }
 
     col_importes_reales: dict[str, str] = {}
@@ -97,15 +129,11 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
 
     if c_tipo_doc is not None:
-        tipo_norm = (
-            df[c_tipo_doc]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-        )
+        tipo_norm = df[c_tipo_doc].astype(str).str.strip().str.lower()
         df = df[~tipo_norm.eq("factura gastos")].copy()
 
     df = df.drop(columns=[c_cuit, c_nro], errors="ignore")
+
     return df
 
 
@@ -115,38 +143,39 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
 
 def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     df.columns = df.columns.str.strip()
 
-    # Detectar columnas de Punto de Venta y Número Desde robustamente
-    def _find_col(df, candidates):
-        for c in candidates:
-            if c in df.columns:
-                return c
-        return None
+    df = df.rename(columns={
+        "Punto de Venta": "Pto. Venta",
+        "NÃºmero Desde":  "N°Comprobante",
+    })
 
-    c_pto_vta = _find_col(df, ["Punto de Venta", "Pto. Venta", "Pto Venta"])
-    c_nro_desde = _find_col(df, ["Número Desde", "NÃºmero Desde", "Numero Desde", "Nro Desde", "Nro. Desde"])
+    df = df.drop(columns=["NÃºmero Hasta"], errors="ignore")
 
-    if c_pto_vta and c_nro_desde:
-        df[c_pto_vta]   = pd.to_numeric(df[c_pto_vta], errors="coerce")
-        df[c_nro_desde] = pd.to_numeric(df[c_nro_desde], errors="coerce")
-        df[c_pto_vta]   = df[c_pto_vta].astype("Int64").astype(str).str.zfill(4)
-        df[c_nro_desde] = df[c_nro_desde].astype("Int64").astype(str).str.zfill(8)
-        df["Nro_norm"]  = df[c_pto_vta] + df[c_nro_desde]
-        df = df.drop(columns=[c_pto_vta, c_nro_desde])
-
-    c_emisor = _find_col(df, ["Nro. Doc. Emisor", "Nro Doc Emisor", "CUIT Emisor"])
-    if c_emisor:
-        df[c_emisor] = df[c_emisor].astype(str).str.strip()
+    df["Nro. Doc. Emisor"] = df["Nro. Doc. Emisor"].astype(str).str.strip()
 
     columnas_importe = [
-        "Imp. Neto Gravado IVA 0%", "IVA 2,5%", "Imp. Neto Gravado IVA 2,5%",
-        "IVA 5%", "Imp. Neto Gravado IVA 5%", "IVA 10,5%", "Imp. Neto Gravado IVA 10,5%",
-        "IVA 21%", "Imp. Neto Gravado IVA 21%", "IVA 27%", "Imp. Neto Gravado IVA 27%",
-        "Imp. Neto Gravado Total", "Imp. Neto No Gravado", "Imp. Op. Exentas",
-        "Otros Tributos", "Total IVA", "Imp. Total",
+        "Imp. Neto Gravado IVA 0%",
+        "IVA 2,5%",
+        "Imp. Neto Gravado IVA 2,5%",
+        "IVA 5%",
+        "Imp. Neto Gravado IVA 5%",
+        "IVA 10,5%",
+        "Imp. Neto Gravado IVA 10,5%",
+        "IVA 21%",
+        "Imp. Neto Gravado IVA 21%",
+        "IVA 27%",
+        "Imp. Neto Gravado IVA 27%",
+        "Imp. Neto Gravado Total",
+        "Imp. Neto No Gravado",
+        "Imp. Op. Exentas",
+        "Otros Tributos",
+        "Total IVA",
+        "Imp. Total",
     ]
     columnas_importe = [c for c in columnas_importe if c in df.columns]
+
     df[columnas_importe] = df[columnas_importe].apply(pd.to_numeric, errors="coerce")
 
     if (
@@ -156,25 +185,32 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
     ):
         tipo_tmp = pd.to_numeric(df["Tipo de Comprobante"].astype(str).str.strip(), errors="coerce")
         mask_111213 = tipo_tmp.isin([11, 12, 13])
+
         mask_fill = mask_111213 & (
             df["Imp. Neto No Gravado"].isna() | (df["Imp. Neto No Gravado"] == 0)
         )
+
         df.loc[mask_fill, "Imp. Neto No Gravado"] = df.loc[mask_fill, "Imp. Total"]
 
     if "Tipo Cambio" in df.columns:
         df["Tipo Cambio"] = pd.to_numeric(df["Tipo Cambio"], errors="coerce")
+
         mask_tc = df["Tipo Cambio"].notna() & (df["Tipo Cambio"] != 1)
+
         for col in columnas_importe:
             df.loc[mask_tc, col] = df.loc[mask_tc, col] * df.loc[mask_tc, "Tipo Cambio"]
 
     df["Tipo de Comprobante"] = pd.to_numeric(
-        df["Tipo de Comprobante"].astype(str).str.strip(), errors="coerce"
+        df["Tipo de Comprobante"].astype(str).str.strip(),
+        errors="coerce"
     )
+
     mask_nc = df["Tipo de Comprobante"].isin([3, 8, 13])
     df.loc[mask_nc, columnas_importe] *= -1
 
     if "Imp. Neto Gravado IVA 0%" in df.columns:
         df["Imp. Neto Gravado IVA 0%"] = pd.to_numeric(df["Imp. Neto Gravado IVA 0%"], errors="coerce")
+
     if "Imp. Neto No Gravado" in df.columns:
         df["Imp. Neto No Gravado"] = pd.to_numeric(df["Imp. Neto No Gravado"], errors="coerce")
 
@@ -182,48 +218,112 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# CRUCE 1: por Nro + CUIT
+# CRUCE 1: por Pto. Venta + N°Comprobante + CUIT
 # ─────────────────────────────────────────────
 
-def cruzar_por_nro_y_cuit(df_sistema: pd.DataFrame, df_arca: pd.DataFrame):
-    sis  = df_sistema.copy()
-    arca = df_arca.copy()
+def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame):
+    sis  = df_sistema_dep.copy().reset_index(drop=True)
+    arca = df_arca_dep.copy().reset_index(drop=True)
+
     sis.columns  = sis.columns.str.strip()
     arca.columns = arca.columns.str.strip()
 
-    sis["_conteo"]  = sis.groupby(["Nro_norm", "CUIT_norm"]).cumcount() + 1
-    arca["_conteo"] = arca.groupby(["Nro_norm", "Nro. Doc. Emisor"]).cumcount() + 1
+    sis["_idx_sis"]   = sis.index
+    arca["_idx_arca"] = arca.index
 
-    merge = pd.merge(
-        sis, arca,
-        left_on=["Nro_norm", "CUIT_norm", "_conteo"],
-        right_on=["Nro_norm", "Nro. Doc. Emisor", "_conteo"],
-        how="outer", indicator=True, suffixes=("_sis", "_arca")
+    sis["_conteo"]  = sis.groupby( ["Pto. Venta", "N°Comprobante", "CUIT_norm"       ]).cumcount() + 1
+    arca["_conteo"] = arca.groupby(["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor"]).cumcount() + 1
+
+    merge_df = pd.merge(
+        sis,
+        arca,
+        left_on  =["Pto. Venta", "N°Comprobante", "CUIT_norm",        "_conteo"],
+        right_on =["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor", "_conteo"],
+        how      ="outer",
+        indicator=True,
+        suffixes =("_sis", "_arca"),
     )
 
-    merge["CUIT"] = merge["CUIT_norm"].combine_first(merge["Nro. Doc. Emisor"])
+    match_raw         = merge_df[merge_df["_merge"] == "both"      ].copy()
+    falta_arca_raw    = merge_df[merge_df["_merge"] == "left_only" ].copy()
+    falta_sistema_raw = merge_df[merge_df["_merge"] == "right_only"].copy()
 
-    match            = merge[merge["_merge"] == "both"].copy()
-    faltantes_arca   = merge[merge["_merge"] == "left_only"].copy()
-    faltantes_sistema = merge[merge["_merge"] == "right_only"].copy()
+    sis_rename = {
+        "Fecha":               "Fecha_Sistema",
+        "Pto. Venta":          "Pto. Venta_sistema",
+        "N°Comprobante":       "N°Comprobante_sistema",
+        "CUIT_norm":           "cuit_sistema",
+        "Imp. Neto Gravado":   "Gravado_sistema",
+        "Imp. Neto No Gravado":"No Gravado_sistema",
+        "Total":               "Imp. Total_sistema",
+    }
 
-    cols_keep = ["Nro_norm", "CUIT"]
-    for df_ in [match, faltantes_arca, faltantes_sistema]:
-        extra = [c for c in df_.columns if c not in cols_keep + ["_conteo", "_merge"]]
-        df_ = df_[cols_keep + extra]
+    arca_cols_rename = {
+        "Fecha de EmisiÃ³n":      "Fecha_arca",
+        "Pto. Venta":             "Pto. Venta_arca",
+        "N°Comprobante":          "N°Comprobante_arca",
+        "Nro. Doc. Emisor":       "cuit_arca",
+        "Imp. Neto No Gravado":   "No gravado_arca",
+        "Imp. Neto Gravado Total":"Gravado_arca",
+        "Imp. Total":             "Imp. Total_arca",
+    }
 
-    match.drop(columns=["_conteo", "_merge"], errors="ignore", inplace=True)
-    faltantes_arca.drop(columns=["_conteo", "_merge"], errors="ignore", inplace=True)
-    faltantes_sistema.drop(columns=["_conteo", "_merge"], errors="ignore", inplace=True)
+    arca_cols_available = [c for c in arca_cols_rename if c in arca.columns]
 
-    return match, faltantes_sistema, faltantes_arca
+    def _from_sis(idx_series):
+        return (
+            sis.loc[idx_series.astype(int).values]
+            .drop(columns=["_conteo", "_idx_sis"], errors="ignore")
+            .rename(columns=sis_rename)
+            .reset_index(drop=True)
+        )
+
+    def _from_arca(idx_series, cols=None):
+        rows = arca.loc[idx_series.astype(int).values]
+        if cols:
+            rows = rows[cols]
+        return (
+            rows
+            .drop(columns=["_conteo", "_idx_arca"], errors="ignore")
+            .rename(columns=arca_cols_rename)
+            .reset_index(drop=True)
+        )
+
+    match = pd.concat([
+        _from_sis(match_raw["_idx_sis"]),
+        _from_arca(match_raw["_idx_arca"], cols=arca_cols_available),
+    ], axis=1)
+
+    falta_arca = _from_sis(falta_arca_raw["_idx_sis"])
+
+    falta_sistema = _from_arca(falta_sistema_raw["_idx_arca"])
+
+    return match, falta_sistema, falta_arca
 
 
 # ─────────────────────────────────────────────
 # REVISAR INCONSISTENCIAS EN MATCH
 # ─────────────────────────────────────────────
 
-def revisar_inconsistencias_en_match(match: pd.DataFrame, tol_pesos: float = 1.0) -> pd.DataFrame:
+def revisar_inconsistencias_en_match(
+    match: pd.DataFrame,
+    tol_pesos: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Arma `revisar` desde `match` cuando NO coinciden:
+      - Fecha_Sistema vs Fecha_arca                → comparación exacta
+      - Gravado_sistema vs Gravado_arca            → tolerancia +/- tol_pesos
+      - No Gravado_sistema vs No gravado_arca      → tolerancia +/- tol_pesos
+      - Imp. Total_sistema vs Imp. Total_arca      → tolerancia +/- tol_pesos
+
+    Regla extra:
+      - Si el motivo es SOLO "No Gravado" y Tipo de Comprobante == 11, NO incluir (Factura C)
+      - Si Tipo de Comprobante no está en match, la exclusión se omite sin romper.
+
+    Agrega `comentario` con: "Fecha" / "Gravado" / "No Gravado" / "Total".
+    Pueden combinarse: "Fecha, Gravado, No Gravado, Total".
+    """
+
     df = match.copy()
     df.columns = df.columns.astype(str).str.strip()
 
@@ -232,112 +332,191 @@ def revisar_inconsistencias_en_match(match: pd.DataFrame, tol_pesos: float = 1.0
         for c in candidates:
             if c in cols:
                 return c
-        raise KeyError(f"No encontré columna. Candidatos={candidates}. Disponibles={list(df_.columns)}")
+        raise KeyError(
+            f"revisar_inconsistencias_en_match: no encontré columna. "
+            f"Candidatos={candidates}. Disponibles={list(df_.columns)}"
+        )
 
-    def _to_dt_norm(series): return pd.to_datetime(series, errors="coerce").dt.normalize()
-    def _to_num(series):     return pd.to_numeric(series, errors="coerce")
+    def _pick_optional(df_: pd.DataFrame, candidates: list[str]) -> str | None:
+        cols = set(df_.columns)
+        for c in candidates:
+            if c in cols:
+                return c
+        return None
 
-    c_nro       = _pick(df, ["Nro_norm"])
-    c_cuit_norm = _pick(df, ["CUIT_norm", "CUIT"])
-    c_fecha_sis  = _pick(df, ["Fecha"])
-    c_fecha_arca = _pick(df, ["Fecha de EmisiÃ³n", "Fecha de Emisión", "Fecha de Emision"])
-    c_grav_sis   = _pick(df, ["Imp. Neto Gravado"])
-    c_grav_arca  = _pick(df, ["Imp. Neto Gravado Total"])
-    c_nograv_sis  = _pick(df, ["Imp. Neto No Gravado_sis", "Imp. Neto No Gravado"])
-    c_nograv_arca = _pick(df, ["Imp. Neto No Gravado_arca", "Imp. Neto No Gravado"])
-    c_tipo_comp   = _pick(df, ["Tipo de Comprobante"])
+    def _to_dt_norm(series: pd.Series) -> pd.Series:
+        return pd.to_datetime(series, errors="coerce").dt.normalize()
 
-    mask_fecha  = ~(_to_dt_norm(df[c_fecha_sis]) == _to_dt_norm(df[c_fecha_arca]))
-    grav_sis    = _to_num(df[c_grav_sis]).fillna(0.0).round(2)
-    grav_arca   = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
-    mask_grav   = (grav_sis - grav_arca).abs() > float(tol_pesos)
+    def _to_num(series: pd.Series) -> pd.Series:
+        return pd.to_numeric(series, errors="coerce")
 
-    nograv_sis  = _to_num(df[c_nograv_sis]).fillna(0.0).round(2)
-    nograv_arca = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
+    c_fecha_sis   = _pick(df, ["Fecha_Sistema"])
+    c_fecha_arca  = _pick(df, ["Fecha_arca"])
+
+    c_grav_sis    = _pick(df, ["Gravado_sistema"])
+    c_grav_arca   = _pick(df, ["Gravado_arca"])
+
+    c_nograv_sis  = _pick(df, ["No Gravado_sistema"])
+    c_nograv_arca = _pick(df, ["No gravado_arca"])
+
+    c_total_sis   = _pick(df, ["Imp. Total_sistema"])
+    c_total_arca  = _pick(df, ["Imp. Total_arca"])
+
+    c_tipo_comp   = _pick_optional(df, ["Tipo de Comprobante"])
+
+    mask_fecha = ~(
+        _to_dt_norm(df[c_fecha_sis]) == _to_dt_norm(df[c_fecha_arca])
+    )
+
+    grav_sis  = _to_num(df[c_grav_sis ]).fillna(0.0).round(2)
+    grav_arca = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
+    mask_grav = (grav_sis - grav_arca).abs() > float(tol_pesos)
+
+    nograv_sis      = _to_num(df[c_nograv_sis ]).fillna(0.0).round(2)
+    nograv_arca     = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
     mask_nograv_raw = (nograv_sis - nograv_arca).abs() > float(tol_pesos)
 
-    tipo_comp = pd.to_numeric(df[c_tipo_comp], errors="coerce")
-    mask_nograv = mask_nograv_raw & ~(tipo_comp == 11)
-    mask_any    = mask_fecha | mask_grav | mask_nograv
-    revisar     = df.loc[mask_any].copy()
+    total_sis  = _to_num(df[c_total_sis ]).fillna(0.0).round(2)
+    total_arca = _to_num(df[c_total_arca]).fillna(0.0).round(2)
+    mask_total = (total_sis - total_arca).abs() > float(tol_pesos)
 
-    def _comentario_row(i):
+    if c_tipo_comp is not None:
+        tipo_comp    = pd.to_numeric(df[c_tipo_comp], errors="coerce")
+        mask_excluir = tipo_comp == 11
+    else:
+        mask_excluir = pd.Series(False, index=df.index)
+
+    mask_nograv = mask_nograv_raw & ~mask_excluir
+
+    mask_any = mask_fecha | mask_grav | mask_nograv | mask_total
+    revisar  = df.loc[mask_any].copy()
+
+    def _comentario_row(i: int) -> str:
         motivos = []
         if bool(mask_fecha.loc[i]):  motivos.append("Fecha")
         if bool(mask_grav.loc[i]):   motivos.append("Gravado")
         if bool(mask_nograv.loc[i]): motivos.append("No Gravado")
+        if bool(mask_total.loc[i]):  motivos.append("Total")
         return ", ".join(motivos)
 
     revisar["comentario"] = (
-        [_comentario_row(i) for i in revisar.index] if not revisar.empty
+        [_comentario_row(i) for i in revisar.index]
+        if not revisar.empty
         else pd.Series(dtype="object")
     )
-    revisar["Nro_norm_sis"]  = revisar[c_nro]
-    revisar["Nro_norm_arca"] = revisar[c_nro]
-    revisar["CUIT_sis"]      = revisar[c_cuit_norm]
-    revisar["CUIT_arca"]     = revisar[c_cuit_norm]
 
     return revisar
 
 
 # ─────────────────────────────────────────────
-# DEPURAR FALTANTES POST MERGE
+# CRUCE 2: faltantes por N°Comprobante + CUIT (sin Pto. Venta)
 # ─────────────────────────────────────────────
 
-def depurar_faltantes_post_merge(
-    df_faltante: pd.DataFrame,
-    origen: Literal["sis", "arca"],
-    drop_all_null_cols: bool = True
-) -> pd.DataFrame:
-    df = df_faltante.copy()
-    df.columns = df.columns.str.strip()
+def cruce2(revisar1: pd.DataFrame, falta_arca: pd.DataFrame, falta_sistema: pd.DataFrame):
+    """
+    Segundo cruce: cruza falta_arca y falta_sistema por N°Comprobante + CUIT (sin Pto. Venta).
 
-    sufijo_origen = f"_{origen}"
-    sufijo_otro   = "_arca" if origen == "sis" else "_sis"
+    - Los que matchean se sacan de los faltantes y se agregan a revisar con comentario "Pto. Venta".
+    - Los que no matchean permanecen en sus respectivos faltantes.
+    """
 
-    df = df.drop(columns=[c for c in df.columns if c.endswith(sufijo_otro)], errors="ignore")
-    rename_map = {c: c.replace(sufijo_origen, "") for c in df.columns if c.endswith(sufijo_origen)}
-    df = df.rename(columns=rename_map)
+    fa = falta_arca.copy().reset_index(drop=True)
+    fs = falta_sistema.copy().reset_index(drop=True)
 
-    if drop_all_null_cols:
-        df = df.dropna(axis=1, how="all")
+    fa.columns = fa.columns.str.strip()
+    fs.columns = fs.columns.str.strip()
 
-    return df
+    fa["_idx_fa"] = fa.index
+    fs["_idx_fs"] = fs.index
+
+    fa["_conteo"] = fa.groupby(["N°Comprobante_sistema", "cuit_sistema"]).cumcount() + 1
+    fs["_conteo"] = fs.groupby(["N°Comprobante_arca",    "cuit_arca"   ]).cumcount() + 1
+
+    merge_df = pd.merge(
+        fa,
+        fs,
+        left_on  =["N°Comprobante_sistema", "cuit_sistema", "_conteo"],
+        right_on =["N°Comprobante_arca",    "cuit_arca",    "_conteo"],
+        how      ="outer",
+        indicator=True,
+        suffixes =("_fa", "_fs"),
+    )
+
+    match_raw = merge_df[merge_df["_merge"] == "both"].copy()
+
+    arca_cols_match = [
+        "Fecha_arca", "Pto. Venta_arca", "N°Comprobante_arca",
+        "cuit_arca", "No gravado_arca", "Gravado_arca", "Imp. Total_arca",
+    ]
+
+    if not match_raw.empty:
+        fa_idx = match_raw["_idx_fa"].astype(int).values
+        fs_idx = match_raw["_idx_fs"].astype(int).values
+
+        fa_match = (
+            fa.loc[fa_idx]
+            .drop(columns=["_conteo", "_idx_fa"], errors="ignore")
+            .reset_index(drop=True)
+        )
+
+        arca_cols_available = [c for c in arca_cols_match if c in fs.columns]
+        fs_match = (
+            fs.loc[fs_idx, arca_cols_available]
+            .reset_index(drop=True)
+        )
+
+        new_match = pd.concat([fa_match, fs_match], axis=1)
+        new_match["comentario"] = "Pto. Venta"
+
+        revisar = pd.concat([revisar1, new_match], ignore_index=True)
+    else:
+        revisar = revisar1.copy()
+
+    matched_fa_idx = set(match_raw["_idx_fa"].dropna().astype(int))
+    matched_fs_idx = set(match_raw["_idx_fs"].dropna().astype(int))
+
+    falta_arca_new = (
+        fa.loc[~fa["_idx_fa"].isin(matched_fa_idx)]
+        .drop(columns=["_conteo", "_idx_fa"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    falta_sistema_new = (
+        fs.loc[~fs["_idx_fs"].isin(matched_fs_idx)]
+        .drop(columns=["_conteo", "_idx_fs"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    return revisar, falta_arca_new, falta_sistema_new
 
 
 # ─────────────────────────────────────────────
-# CRUCE 2: faltantes por CUIT/Fecha/Importes
+# CRUCE 3: tolerante a errores en N°Comprobante o CUIT
 # ─────────────────────────────────────────────
 
-def cruzar_faltantes_por_cuit_fecha_importes_append_revisar(
+def cruce3(
     revisar: pd.DataFrame,
-    faltantes_sistema_dep: pd.DataFrame,
-    faltantes_arca_dep: pd.DataFrame,
+    falta_arca: pd.DataFrame,
+    falta_sistema: pd.DataFrame,
     tol_pesos: float = 1.0,
-    fecha_format_sis: str | None = None,
-    fecha_format_arca: str | None = None,
     preferir_match_minimo: bool = True,
-):
-    def _pick_col(df, candidates):
-        for c in candidates:
-            if c in df.columns:
-                return c
-        raise KeyError(f"No encontré: {candidates}. Disponibles: {list(df.columns)}")
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Tercer cruce (tolerante a errores en N°Comprobante o CUIT) entre faltantes.
 
-    def _to_date(series, fmt):
-        if fmt:
-            dt = pd.to_datetime(series, errors="coerce", format=fmt)
-            mask = dt.isna()
-            if mask.any():
-                dt.loc[mask] = pd.to_datetime(series.loc[mask], errors="coerce")
-        else:
-            dt = pd.to_datetime(series, errors="coerce")
-        return dt.dt.date
+    A) Primero busca por N°Comprobante + Fecha + importes (tol)
+       => falló el CUIT en cruces anteriores → comentario "CUIT"
+    B) Luego, sobre el remanente, busca por CUIT + Fecha + importes (tol)
+       => falló el N°Comprobante → comentario "N°Comprobante"
+    """
 
-    def _to_amount(series):
+    def _to_date(series: pd.Series) -> pd.Series:
+        return pd.to_datetime(series, errors="coerce").dt.date
+
+    def _to_amount(series: pd.Series) -> pd.Series:
         return pd.to_numeric(series, errors="coerce").round(2)
 
-    def _align_columns(base, add):
+    def _align_columns(base: pd.DataFrame, add: pd.DataFrame) -> pd.DataFrame:
         add2 = add.copy()
         for c in base.columns:
             if c not in add2.columns:
@@ -345,153 +524,264 @@ def cruzar_faltantes_por_cuit_fecha_importes_append_revisar(
         extras = [c for c in add2.columns if c not in base.columns]
         return add2[base.columns.tolist() + extras]
 
-    def _resolver_1a1(candidatos_ok):
-        usados_sis, usados_arca, seleccionados = set(), set(), []
+    def _resolver_1a1(candidatos_ok: pd.DataFrame) -> tuple[pd.DataFrame, set[int], set[int]]:
+        usados_fa: set[int] = set()
+        usados_fs: set[int] = set()
+        seleccionados = []
         for _, row in candidatos_ok.iterrows():
-            id_s, id_a = int(row["_id_sis"]), int(row["_id_arca"])
-            if id_s not in usados_sis and id_a not in usados_arca:
-                usados_sis.add(id_s); usados_arca.add(id_a)
+            id_fa = int(row["_id_fa"])
+            id_fs = int(row["_id_fs"])
+            if (id_fa not in usados_fa) and (id_fs not in usados_fs):
+                usados_fa.add(id_fa)
+                usados_fs.add(id_fs)
                 seleccionados.append(row)
-        return pd.DataFrame(seleccionados).copy(), usados_sis, usados_arca
+        return pd.DataFrame(seleccionados).copy(), usados_fa, usados_fs
 
-    arca = faltantes_sistema_dep.copy()
-    sis  = faltantes_arca_dep.copy()
-    arca.columns = arca.columns.astype(str).str.strip()
-    sis.columns  = sis.columns.astype(str).str.strip()
+    fa = falta_arca.copy().reset_index(drop=True)
+    fs = falta_sistema.copy().reset_index(drop=True)
+    fa.columns = fa.columns.str.strip()
+    fs.columns = fs.columns.str.strip()
 
-    col_nro_arca  = _pick_col(arca, ["Nro_norm"])
-    col_nro_sis   = _pick_col(sis,  ["Nro_norm"])
-    col_cuit_arca = _pick_col(arca, ["CUIT"])
-    col_cuit_sis  = _pick_col(sis,  ["CUIT"])
-    col_fecha_arca = _pick_col(arca, ["Fecha de Emisión", "Fecha de EmisiÃ³n", "Fecha de Emision", "Fecha"])
-    col_fecha_sis  = _pick_col(sis,  ["Fecha"])
-    col_ng_arca    = _pick_col(arca, ["Imp. Neto Gravado Total", "Neto Gravado Total"])
-    col_nng_arca   = _pick_col(arca, ["Imp. Neto No Gravado", "Neto No Gravado"])
-    col_ng_sis     = _pick_col(sis,  ["Imp. Neto Gravado"])
-    col_nng_sis    = _pick_col(sis,  ["Imp. Neto No Gravado"])
+    fa["_id_fa"] = np.arange(len(fa), dtype=int)
+    fs["_id_fs"] = np.arange(len(fs), dtype=int)
 
-    for df_, col_nro, col_cuit, col_fecha, col_ng, col_nng, fmt in [
-        (arca, col_nro_arca, col_cuit_arca, col_fecha_arca, col_ng_arca, col_nng_arca, fecha_format_arca),
-        (sis,  col_nro_sis,  col_cuit_sis,  col_fecha_sis,  col_ng_sis,  col_nng_sis,  fecha_format_sis),
-    ]:
-        df_["_nro_key"]   = df_[col_nro].astype(str).str.strip()
-        df_["_cuit_key"]  = df_[col_cuit].astype(str).str.strip().str.replace("-", "", regex=False).str.replace(" ", "", regex=False)
-        df_["_fecha_key"] = _to_date(df_[col_fecha], fmt)
-        df_["_ng_key"]    = _to_amount(df_[col_ng]).fillna(0.0)
-        df_["_nng_key"]   = _to_amount(df_[col_nng]).fillna(0.0)
+    fa["_nro_key"]  = fa["N°Comprobante_sistema"].astype(str).str.strip()
+    fs["_nro_key"]  = fs["N°Comprobante_arca"].astype(str).str.strip()
 
-    arca["_id_arca"] = np.arange(len(arca), dtype=int)
-    sis["_id_sis"]   = np.arange(len(sis),  dtype=int)
+    fa["_cuit_key"] = (
+        fa["cuit_sistema"].astype(str).str.strip()
+        .str.replace("-", "", regex=False).str.replace(" ", "", regex=False)
+    )
+    fs["_cuit_key"] = (
+        fs["cuit_arca"].astype(str).str.strip()
+        .str.replace("-", "", regex=False).str.replace(" ", "", regex=False)
+    )
 
-    # A) Match por Nro + Fecha
-    cand_nro = pd.merge(sis, arca, on=["_nro_key", "_fecha_key"], how="inner",
-                        suffixes=("_sis", "_arca"), validate="many_to_many")
-    revisar_nro = pd.DataFrame()
-    usados_sis_nro, usados_arca_nro = set(), set()
+    fa["_fecha_key"] = _to_date(fa["Fecha_Sistema"])
+    fs["_fecha_key"] = _to_date(fs["Fecha_arca"])
+
+    fa["_ng_key"]  = _to_amount(fa["Gravado_sistema"  ]).fillna(0.0)
+    fa["_nng_key"] = _to_amount(fa["No Gravado_sistema"]).fillna(0.0)
+    fs["_ng_key"]  = _to_amount(fs["Gravado_arca"     ]).fillna(0.0)
+    fs["_nng_key"] = _to_amount(fs["No gravado_arca"  ]).fillna(0.0)
+
+    arca_cols_match     = ["Fecha_arca", "Pto. Venta_arca", "N°Comprobante_arca",
+                           "cuit_arca", "No gravado_arca", "Gravado_arca", "Imp. Total_arca"]
+    arca_cols_available = [c for c in arca_cols_match if c in fs.columns]
+
+    def _build_match_rows(resolved: pd.DataFrame, comentario_val: str) -> pd.DataFrame:
+        if resolved.empty:
+            return pd.DataFrame()
+        fa_idx = resolved["_id_fa"].astype(int).values
+        fs_idx = resolved["_id_fs"].astype(int).values
+        temp_cols = [c for c in fa.columns if c.startswith("_")]
+        fa_match = (
+            fa.loc[fa_idx]
+            .drop(columns=temp_cols, errors="ignore")
+            .reset_index(drop=True)
+        )
+        fs_match = (
+            fs.loc[fs_idx, arca_cols_available]
+            .reset_index(drop=True)
+        )
+        result = pd.concat([fa_match, fs_match], axis=1)
+        result["comentario"] = comentario_val
+        return result
+
+    # A) N°Comprobante + Fecha + importes → "CUIT"
+    cand_nro = pd.merge(
+        fa, fs,
+        on=["_nro_key", "_fecha_key"],
+        how="inner",
+        suffixes=("_fa", "_fs"),
+        validate="many_to_many",
+    )
+
+    match_nro_rows = pd.DataFrame()
+    usados_fa_nro: set[int] = set()
+    usados_fs_nro: set[int] = set()
 
     if not cand_nro.empty:
-        cand_nro["_diff_ng"]    = (cand_nro["_ng_key_sis"]  - cand_nro["_ng_key_arca"]).abs()
-        cand_nro["_diff_nng"]   = (cand_nro["_nng_key_sis"] - cand_nro["_nng_key_arca"]).abs()
+        cand_nro["_diff_ng"]    = (cand_nro["_ng_key_fa"]  - cand_nro["_ng_key_fs"]).abs()
+        cand_nro["_diff_nng"]   = (cand_nro["_nng_key_fa"] - cand_nro["_nng_key_fs"]).abs()
         cand_nro["_diff_total"] = cand_nro["_diff_ng"] + cand_nro["_diff_nng"]
-        cand_nro_ok = cand_nro[(cand_nro["_diff_ng"] <= tol_pesos) & (cand_nro["_diff_nng"] <= tol_pesos)].copy()
+
+        cand_nro_ok = cand_nro[
+            (cand_nro["_diff_ng"]  <= tol_pesos) &
+            (cand_nro["_diff_nng"] <= tol_pesos)
+        ].copy()
+
         if not cand_nro_ok.empty and preferir_match_minimo:
-            cand_nro_ok = cand_nro_ok.sort_values(["_nro_key", "_fecha_key", "_diff_total", "_id_sis", "_id_arca"])
+            cand_nro_ok = cand_nro_ok.sort_values(
+                by=["_nro_key", "_fecha_key", "_diff_total", "_diff_ng", "_diff_nng", "_id_fa", "_id_fs"],
+                ascending=True,
+            )
+
         if not cand_nro_ok.empty:
-            revisar_nro, usados_sis_nro, usados_arca_nro = _resolver_1a1(cand_nro_ok)
-            if not revisar_nro.empty:
-                revisar_nro["comentario"] = "CUIT"
+            resolved, usados_fa_nro, usados_fs_nro = _resolver_1a1(cand_nro_ok)
+            match_nro_rows = _build_match_rows(resolved, "CUIT")
 
-    sis_rem  = sis[~sis["_id_sis"].isin(usados_sis_nro)].copy()
-    arca_rem = arca[~arca["_id_arca"].isin(usados_arca_nro)].copy()
+    fa_rem = fa[~fa["_id_fa"].isin(usados_fa_nro)].copy()
+    fs_rem = fs[~fs["_id_fs"].isin(usados_fs_nro)].copy()
 
-    # B) Match por CUIT + Fecha
-    cand_cuit = pd.merge(sis_rem, arca_rem, on=["_cuit_key", "_fecha_key"], how="inner",
-                         suffixes=("_sis", "_arca"), validate="many_to_many")
-    revisar_cuit = pd.DataFrame()
-    usados_sis_cuit, usados_arca_cuit = set(), set()
+    # B) CUIT + Fecha + importes → "N°Comprobante"
+    cand_cuit = pd.merge(
+        fa_rem, fs_rem,
+        on=["_cuit_key", "_fecha_key"],
+        how="inner",
+        suffixes=("_fa", "_fs"),
+        validate="many_to_many",
+    )
+
+    match_cuit_rows = pd.DataFrame()
+    usados_fa_cuit: set[int] = set()
+    usados_fs_cuit: set[int] = set()
 
     if not cand_cuit.empty:
-        cand_cuit["_diff_ng"]    = (cand_cuit["_ng_key_sis"]  - cand_cuit["_ng_key_arca"]).abs()
-        cand_cuit["_diff_nng"]   = (cand_cuit["_nng_key_sis"] - cand_cuit["_nng_key_arca"]).abs()
+        cand_cuit["_diff_ng"]    = (cand_cuit["_ng_key_fa"]  - cand_cuit["_ng_key_fs"]).abs()
+        cand_cuit["_diff_nng"]   = (cand_cuit["_nng_key_fa"] - cand_cuit["_nng_key_fs"]).abs()
         cand_cuit["_diff_total"] = cand_cuit["_diff_ng"] + cand_cuit["_diff_nng"]
-        cand_cuit_ok = cand_cuit[(cand_cuit["_diff_ng"] <= tol_pesos) & (cand_cuit["_diff_nng"] <= tol_pesos)].copy()
+
+        cand_cuit_ok = cand_cuit[
+            (cand_cuit["_diff_ng"]  <= tol_pesos) &
+            (cand_cuit["_diff_nng"] <= tol_pesos)
+        ].copy()
+
         if not cand_cuit_ok.empty and preferir_match_minimo:
-            cand_cuit_ok = cand_cuit_ok.sort_values(["_cuit_key", "_fecha_key", "_diff_total", "_id_sis", "_id_arca"])
+            cand_cuit_ok = cand_cuit_ok.sort_values(
+                by=["_cuit_key", "_fecha_key", "_diff_total", "_diff_ng", "_diff_nng", "_id_fa", "_id_fs"],
+                ascending=True,
+            )
+
         if not cand_cuit_ok.empty:
-            revisar_cuit, usados_sis_cuit, usados_arca_cuit = _resolver_1a1(cand_cuit_ok)
-            if not revisar_cuit.empty:
-                revisar_cuit["comentario"] = "Nro Factura"
+            resolved, usados_fa_cuit, usados_fs_cuit = _resolver_1a1(cand_cuit_ok)
+            match_cuit_rows = _build_match_rows(resolved, "N°Comprobante")
 
-    faltante_arca_def      = sis_rem[~sis_rem["_id_sis"].isin(usados_sis_cuit)].copy()
-    faltantes_sistema_def  = arca_rem[~arca_rem["_id_arca"].isin(usados_arca_cuit)].copy()
+    falta_arca_new = (
+        fa_rem[~fa_rem["_id_fa"].isin(usados_fa_cuit)]
+        .drop(columns=[c for c in fa_rem.columns if c.startswith("_")], errors="ignore")
+        .reset_index(drop=True)
+    )
+    falta_sistema_new = (
+        fs_rem[~fs_rem["_id_fs"].isin(usados_fs_cuit)]
+        .drop(columns=[c for c in fs_rem.columns if c.startswith("_")], errors="ignore")
+        .reset_index(drop=True)
+    )
 
-    for d in (faltante_arca_def, faltantes_sistema_def):
-        d.drop(columns=[c for c in d.columns if c.startswith("_")], errors="ignore", inplace=True)
+    nuevos = [df for df in [match_nro_rows, match_cuit_rows] if not df.empty]
 
-    nuevos = [df_ for df_ in [revisar_nro, revisar_cuit] if not df_.empty]
     if not nuevos:
-        revisar_total = revisar.copy()
+        revisar_new = revisar.copy()
     else:
         revisar_2         = pd.concat(nuevos, ignore_index=True)
         revisar_2_aligned = _align_columns(revisar, revisar_2)
-        revisar_total     = pd.concat([revisar, revisar_2_aligned], ignore_index=True)
+        revisar_new       = pd.concat([revisar, revisar_2_aligned], ignore_index=True)
 
-    return revisar_total, faltante_arca_def, faltantes_sistema_def
+    return revisar_new, falta_arca_new, falta_sistema_new
 
 
 # ─────────────────────────────────────────────
-# EXPORTAR A BUFFER EN MEMORIA
+# EXPORTAR A BUFFER EN MEMORIA (descargable único)
 # ─────────────────────────────────────────────
 
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
-    faltante_arca_def: pd.DataFrame,
-    faltantes_sistema_def: pd.DataFrame,
-):
-    from io import BytesIO
+    falta_arca: pd.DataFrame,
+    falta_sistema: pd.DataFrame,
+) -> bytes:
+    DATE_FORMAT = "DD/MM/YYYY"
 
-    columnas_revisar = [
-        "Nro_norm_sis", "CUIT_sis", "Razón Social", "Tipo Doc.", "Fecha",
-        "Tipo Cambio", "Imp. Neto Gravado", "Imp. Neto No Gravado_sis",
-        "Imp. Neto Gravado Total", "Imp. Neto No Gravado_arca",
-        "IVA 21%_sis", "IVA 10,5%_sis", "IVA 27%_sis", "comentario",
+    ordered_fa = [
+        "Fecha_Sistema", "Razón Social", "cuit_sistema", "Condición",
+        "Pto. Venta_sistema", "N°Comprobante_sistema",
+        "Gravado_sistema", "No Gravado_sistema",
+        "IVA 10,5%", "IVA 21%", "IVA 27%", "Imp. Int.", "Perc. Gcias.",
+        "Perc. IVA", "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "SIRCREB",
+        "Imp. Total_sistema",
     ]
-    columnas_revisar = [c for c in columnas_revisar if c in revisar.columns]
-    revisar_out = revisar[columnas_revisar].copy()
+    rename_fa = {
+        "Fecha_Sistema":         "Fecha",
+        "cuit_sistema":          "CUIT",
+        "Pto. Venta_sistema":    "Pto. Venta",
+        "N°Comprobante_sistema": "N°Comprobante",
+        "Gravado_sistema":       "Imp. Neto Gravado",
+        "No Gravado_sistema":    "Imp. Neto No Gravado",
+        "Imp. Total_sistema":    "Total",
+    }
+    fa_out = (
+        falta_arca[[c for c in ordered_fa if c in falta_arca.columns]]
+        .copy()
+        .rename(columns=rename_fa)
+    )
+    fa_date_cols = ["Fecha"]
 
-    revisar_out = revisar_out.rename(columns={
-        "Nro_norm_sis":           "Nro Comprobante",
-        "CUIT_sis":               "CUIT",
-        "Imp. Neto Gravado":      "Gravado_sis",
-        "Imp. Neto No Gravado_sis":  "No Gravado_sis",
-        "Imp. Neto Gravado Total":   "Gravado_arca",
-        "Imp. Neto No Gravado_arca": "No Gravado_arca",
-        "IVA 21%_sis":   "IVA 21%",
-        "IVA 10,5%_sis": "IVA 10,5%",
-        "IVA 27%_sis":   "IVA 27%",
-        "comentario":    "Comentario",
-    })
+    ordered_rev = [
+        "Fecha_Sistema", "Fecha_arca",
+        "Razón Social",
+        "Pto. Venta_sistema",    "Pto. Venta_arca",
+        "N°Comprobante_sistema", "N°Comprobante_arca",
+        "Gravado_sistema",       "Gravado_arca",
+        "No Gravado_sistema",    "No gravado_arca",
+        "Imp. Total_sistema",    "Imp. Total_arca",
+        "comentario",
+    ]
+    rev_out = (
+        revisar[[c for c in ordered_rev if c in revisar.columns]]
+        .copy()
+    )
+    rev_date_cols = ["Fecha_Sistema", "Fecha_arca"]
 
-    if "Nro Comprobante" in revisar_out.columns:
-        revisar_out["Nro Comprobante"] = (
-            revisar_out["Nro Comprobante"].astype(str).str.zfill(12).str.slice(0, 4)
-            + "-"
-            + revisar_out["Nro Comprobante"].astype(str).str.zfill(12).str.slice(4)
-        )
+    fs_out       = falta_sistema.copy()
+    fs_date_cols = ["Fecha_arca"]
 
-    # Reporte principal (3 solapas)
-    buf_reporte = BytesIO()
-    with pd.ExcelWriter(buf_reporte, engine="openpyxl") as writer:
-        revisar_out.to_excel(writer, sheet_name="revisar", index=False)
-        faltante_arca_def.to_excel(writer, sheet_name="faltante_arca", index=False)
-        faltantes_sistema_def.to_excel(writer, sheet_name="faltante_sistema", index=False)
+    def _prep_df(df: pd.DataFrame, date_col_names: list[str]) -> tuple[pd.DataFrame, list[int]]:
+        df = df.copy()
+        date_col_indices = []
+        for i, col in enumerate(df.columns, start=1):
+            if col in date_col_names:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+                date_col_indices.append(i)
+        return df, date_col_indices
 
-    # Faltante sistema (archivo separado)
-    buf_faltante = BytesIO()
-    with pd.ExcelWriter(buf_faltante, engine="openpyxl") as writer:
-        faltantes_sistema_def.to_excel(writer, sheet_name="faltante_sistema", index=False)
+    fa_prep,  fa_date_idx  = _prep_df(fa_out,  fa_date_cols)
+    rev_prep, rev_date_idx = _prep_df(rev_out, rev_date_cols)
+    fs_prep,  fs_date_idx  = _prep_df(fs_out,  fs_date_cols)
 
-    return buf_reporte.getvalue(), buf_faltante.getvalue()
+    def _style_sheet(ws, date_col_indices: list[int]) -> None:
+        thin          = Side(style="thin")
+        header_fill   = PatternFill(start_color="C0C0C0", end_color="C0C0C0", fill_type="solid")
+        header_font   = Font(bold=True)
+        header_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for cell in ws[1]:
+            cell.fill      = header_fill
+            cell.font      = header_font
+            cell.border    = header_border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for col_idx in date_col_indices:
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
+
+        for col in ws.columns:
+            max_len = max(
+                (len(str(cell.value)) if cell.value is not None else 0 for cell in col),
+                default=10,
+            )
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        rev_prep.to_excel(writer, sheet_name="revisar",       index=False)
+        fa_prep.to_excel( writer, sheet_name="falta_arca",    index=False)
+        fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
+
+        wb = writer.book
+        _style_sheet(wb["revisar"],       rev_date_idx)
+        _style_sheet(wb["falta_arca"],    fa_date_idx)
+        _style_sheet(wb["falta_sistema"], fs_date_idx)
+
+    return buf.getvalue()
 
 
 # ─────────────────────────────────────────────
@@ -502,31 +792,26 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca    = load_excel_file(archivo_arca)
     df_sistema = load_excel_file(archivo_sistema)
 
-    df_arca    = depurar_arca(df_arca)
-    df_sistema = depurar_sistema(df_sistema)
+    df_arca_dep    = depurar_arca(df_arca)
+    df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, faltantes_sistema, faltantes_arca = cruzar_por_nro_y_cuit(df_sistema, df_arca)
+    match, falta_sistema1, falta_arca1 = cruce1(df_arca_dep, df_sistema_dep)
 
-    revisar = revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos)
+    revisar1 = revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos)
 
-    faltantes_sistema_dep = depurar_faltantes_post_merge(faltantes_sistema, origen="arca")
-    faltantes_arca_dep    = depurar_faltantes_post_merge(faltantes_arca,    origen="sis")
+    revisar2, falta_arca2, falta_sistema2 = cruce2(revisar1, falta_arca1, falta_sistema1)
 
-    revisar, faltante_arca_def, faltantes_sistema_def = \
-        cruzar_faltantes_por_cuit_fecha_importes_append_revisar(
-            revisar=revisar,
-            faltantes_sistema_dep=faltantes_sistema_dep,
-            faltantes_arca_dep=faltantes_arca_dep,
-            tol_pesos=tol_pesos,
-        )
+    revisar3, falta_arca3, falta_sistema3 = cruce3(
+        revisar2, falta_arca2, falta_sistema2, tol_pesos=tol_pesos
+    )
 
     stats = {
         "match":             len(match),
-        "revisar":           len(revisar),
-        "faltante_arca":     len(faltante_arca_def),
-        "faltante_sistema":  len(faltantes_sistema_def),
+        "revisar":           len(revisar3),
+        "faltante_arca":     len(falta_arca3),
+        "faltante_sistema":  len(falta_sistema3),
     }
 
-    buf_reporte, buf_faltante = generar_excel_en_memoria(revisar, faltante_arca_def, faltantes_sistema_def)
+    buf_reporte = generar_excel_en_memoria(revisar3, falta_arca3, falta_sistema3)
 
-    return buf_reporte, buf_faltante, stats
+    return buf_reporte, stats
