@@ -89,7 +89,7 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 # Botón volver
 st.markdown('<div class="back-btn">', unsafe_allow_html=True)
 if st.button("← Volver al inicio"):
-    st.switch_page(st.Page("app_principal.py", title="Inicio", icon="⚡"))
+    st.switch_page("app_home.py")
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("""
@@ -122,15 +122,14 @@ boton = st.button("CRUZAR COMPROBANTES", disabled=not ambos_cargados, use_contai
 if boton and ambos_cargados:
     with st.spinner("Procesando..."):
         try:
-            buf_reporte, buf_faltante, stats = correr_cruce(
+            buf_reporte, stats = correr_cruce(
                 archivo_arca=archivo_arca,
                 archivo_sistema=archivo_sistema,
                 tol_pesos=tol,
             )
             st.session_state["resultado_compras"] = {
-                "buf_reporte":  buf_reporte,
-                "buf_faltante": buf_faltante,
-                "stats":        stats,
+                "buf_reporte": buf_reporte,
+                "stats":       stats,
             }
         except Exception as e:
             st.error(f"Error al procesar: {e}")
@@ -168,20 +167,10 @@ if "resultado_compras" in st.session_state:
     """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    dcol1, dcol2 = st.columns(2)
-    with dcol1:
-        st.download_button(
-            label="📥 Descargar reporte completo",
-            data=r["buf_reporte"],
-            file_name="reporte_cruce.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with dcol2:
-        st.download_button(
-            label="📥 Descargar faltante sistema",
-            data=r["buf_faltante"],
-            file_name="faltante_sistema.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+    st.download_button(
+        label="📥 Descargar reporte completo",
+        data=r["buf_reporte"],
+        file_name="reporte_cruce.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
