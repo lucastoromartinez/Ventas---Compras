@@ -158,6 +158,7 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
             "devolucionpagocontransferencia",
             "naveventacontarjeta",
             "navepagocontransferencia",
+            "navedevolución", 
         )),
         desc.apply(lambda d: contiene(d,
             "serviciopagoaProveedores",
@@ -452,27 +453,80 @@ def cruzar_mayor_extracto(df_mayor_dep, df_extracto_dep):
 
     col_fecha_m   = get_col(mayor,    "Fecha", "fecha")
     col_importe_m = get_col(mayor,    "Importe", "importe")
+    col_tercero_m = get_col(mayor,    "Tercero", "tercero")
     col_fecha_e   = get_col(extracto, "fecha", "Fecha")
     col_importe_e = get_col(extracto, "importe", "Importe")
+    col_conc_e    = get_col(extracto, "conciliacion")
+    col_leyenda_e = get_col(extracto, "leyenda adicional1")
 
     mayor["_key"]    = mayor[col_fecha_m].astype(str) + "|" + mayor[col_importe_m].astype(str)
     extracto["_key"] = extracto[col_fecha_e].astype(str) + "|" + extracto[col_importe_e].astype(str)
-    mayor["_count"]    = mayor.groupby("_key").cumcount()
-    extracto["_count"] = extracto.groupby("_key").cumcount()
-    mayor["_idx_m"]    = mayor.index
-    extracto["_idx_e"] = extracto.index
 
-    merged = mayor[["_key", "_count", "_idx_m"]].merge(
-        extracto[["_key", "_count", "_idx_e"]],
-        on=["_key", "_count"], how="outer", indicator=True)
+    grupos_m = mayor.groupby("_key").indices
+    grupos_e = extracto.groupby("_key").indices
 
-    idx_match_m        = merged.loc[merged["_merge"] == "both",       "_idx_m"].dropna().astype(int).tolist()
-    idx_match_e        = merged.loc[merged["_merge"] == "both",       "_idx_e"].dropna().astype(int).tolist()
-    idx_falta_extracto = merged.loc[merged["_merge"] == "left_only",  "_idx_m"].dropna().astype(int).tolist()
-    idx_falta_mayor    = merged.loc[merged["_merge"] == "right_only", "_idx_e"].dropna().astype(int).tolist()
+    idx_match_m = []
+    idx_match_e = []
 
-    mayor    = mayor.drop(columns=["_key", "_count", "_idx_m"])
-    extracto = extracto.drop(columns=["_key", "_count", "_idx_e"])
+    for key, idx_e in grupos_e.items():
+        idx_e = list(idx_e)
+        idx_m = list(grupos_m.get(key, []))
+
+        if not idx_m:
+            continue
+
+        if len(idx_e) == 1 and len(idx_m) == 1:
+            idx_match_e.append(idx_e[0])
+            idx_match_m.append(idx_m[0])
+            continue
+
+        # Ambigüedad: más de un candidato de algún lado para la misma Fecha+Importe.
+        disponibles_m = list(idx_m)
+
+        # Renglones de extracto categoría "Proveedores": desambiguar por fuzzy
+        # Leyenda Adicional1 (extracto) vs Tercero (mayor).
+        idx_e_prov  = [i for i in idx_e if extracto.at[i, col_conc_e] == "Proveedores"]
+        idx_e_resto = [i for i in idx_e if i not in idx_e_prov]
+
+        pares_score = []
+        for i_e in idx_e_prov:
+            nombre_e = str(extracto.at[i_e, col_leyenda_e])
+            for i_m in disponibles_m:
+                nombre_m = str(mayor.at[i_m, col_tercero_m])
+                score = fuzz.token_sort_ratio(nombre_e, nombre_m)
+                pares_score.append((score, i_e, i_m))
+
+        pares_score.sort(key=lambda x: x[0], reverse=True)
+
+        usados_e = set()
+        usados_m = set()
+        for score, i_e, i_m in pares_score:
+            if i_e in usados_e or i_m in usados_m:
+                continue
+            idx_match_e.append(i_e)
+            idx_match_m.append(i_m)
+            usados_e.add(i_e)
+            usados_m.add(i_m)
+
+        disponibles_m = [i for i in disponibles_m if i not in usados_m]
+
+        # Resto de categorías: sin identificador confiable, aparear en orden
+        # asegurando 1 a 1 (nunca repetir una misma entrada de ningún lado).
+        pendientes_e = [i for i in idx_e_resto if i not in usados_e] + \
+                       [i for i in idx_e_prov if i not in usados_e]
+
+        for i_e, i_m in zip(pendientes_e, disponibles_m):
+            idx_match_e.append(i_e)
+            idx_match_m.append(i_m)
+
+    idx_match_m_set = set(idx_match_m)
+    idx_match_e_set = set(idx_match_e)
+
+    idx_falta_extracto = [i for i in mayor.index    if i not in idx_match_m_set]
+    idx_falta_mayor     = [i for i in extracto.index if i not in idx_match_e_set]
+
+    mayor    = mayor.drop(columns=["_key"])
+    extracto = extracto.drop(columns=["_key"])
 
     match_mayor    = mayor.loc[idx_match_m].reset_index(drop=True)
     match_extracto = extracto.loc[idx_match_e].reset_index(drop=True)
@@ -495,8 +549,11 @@ def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
 
     col_fecha_m   = get_col(mayor,    "Fecha", "fecha")
     col_importe_m = get_col(mayor,    "Importe", "importe")
+    col_tercero_m = get_col(mayor,    "Tercero", "tercero")
+    col_conc_m    = get_col(mayor,    "conciliacion")
     col_fecha_e   = get_col(extracto, "fecha", "Fecha")
     col_importe_e = get_col(extracto, "importe", "Importe")
+    col_leyenda_e = get_col(extracto, "leyenda adicional1")
 
     mayor["_idx_m"]    = mayor.index
     extracto["_idx_e"] = extracto.index
@@ -523,25 +580,49 @@ def cruzar_con_tolerancia(df_mayor_cat, df_extracto_sin_acreditaciones,
             (~extracto.index.isin(usado_extracto))
         ].copy()
 
-        candidatos["_dist_fecha"] = (candidatos[col_fecha_e] - fecha_m).abs()
-        candidatos = candidatos.sort_values("_dist_fecha")
+        if candidatos.empty:
+            continue
 
-        for idx_e, row_e in candidatos.iterrows():
-            importe_e = row_e[col_importe_e]
-            if abs(importe_m - importe_e) <= tolerancia_importe:
-                es_exacto = (
-                    row_e[col_fecha_e] == fecha_m and
-                    importe_e == importe_m
-                )
-                usado_mayor.add(idx_m)
-                usado_extracto.add(idx_e)
-                if es_exacto:
-                    match_idx_m_exacto.append(idx_m)
-                    match_idx_e_exacto.append(idx_e)
-                else:
-                    match_idx_m.append(idx_m)
-                    match_idx_e.append(idx_e)
-                break
+        candidatos["_dist_importe"] = (candidatos[col_importe_e] - importe_m).abs()
+        candidatos = candidatos[candidatos["_dist_importe"] <= tolerancia_importe]
+
+        if candidatos.empty:
+            continue
+
+        if len(candidatos) == 1:
+            idx_e = candidatos.index[0]
+        elif row_m[col_conc_m] == "Proveedores":
+            # Ambigüedad en categoría Proveedores: desambiguar por fuzzy
+            # Tercero (mayor) vs Leyenda Adicional1 (extracto).
+            nombre_m = str(row_m[col_tercero_m])
+            candidatos["_score"] = candidatos[col_leyenda_e].apply(
+                lambda nombre_e: fuzz.token_sort_ratio(nombre_m, str(nombre_e))
+            )
+            candidatos = candidatos.sort_values(
+                ["_score", "_dist_importe"], ascending=[False, True]
+            )
+            idx_e = candidatos.index[0]
+        else:
+            # Sin identificador confiable: el más cercano en fecha y, en
+            # caso de empate, en importe.
+            candidatos["_dist_fecha"] = (candidatos[col_fecha_e] - fecha_m).abs()
+            candidatos = candidatos.sort_values(
+                ["_dist_fecha", "_dist_importe"], ascending=[True, True]
+            )
+            idx_e = candidatos.index[0]
+
+        row_e     = extracto.loc[idx_e]
+        importe_e = row_e[col_importe_e]
+        es_exacto = (row_e[col_fecha_e] == fecha_m and importe_e == importe_m)
+
+        usado_mayor.add(idx_m)
+        usado_extracto.add(idx_e)
+        if es_exacto:
+            match_idx_m_exacto.append(idx_m)
+            match_idx_e_exacto.append(idx_e)
+        else:
+            match_idx_m.append(idx_m)
+            match_idx_e.append(idx_e)
 
     mayor    = mayor.drop(columns=["_idx_m"])
     extracto = extracto.drop(columns=["_idx_e"])
@@ -969,6 +1050,7 @@ def cruzar_proveedores_descarga(
     col_tercero_e  = get_col(falta_extracto6, "Tercero", "tercero")
     col_importe_e  = get_col(falta_extracto6, "Importe", "importe")
     col_fecha_e    = get_col(falta_extracto6, "Fecha", "fecha")
+    col_serie_e    = get_col(falta_extracto6, "Serie", "serie")
     col_fecha_m    = get_col(falta_mayor6,    "fecha", "Fecha")
     col_importe_m  = get_col(falta_mayor6,    "importe", "Importe")
     col_conc_m     = get_col(falta_mayor6,    "conciliacion")
@@ -985,7 +1067,13 @@ def cruzar_proveedores_descarga(
     fp_monto_neg = fp.copy()
     fp_monto_neg[col_monto] = fp_monto_neg[col_monto] * -1
 
-    suma_por_tercero_fecha = fe.groupby([col_tercero_e, col_fecha_e])[col_importe_e].sum()
+    # Se excluyen renglones de Mayor con Serie "TP": son asientos internos de
+    # cuenta transitoria/clearing (ej. "Cobro a cuenta A4TP-x") que pueden
+    # compartir Tercero y Fecha con un pago real a proveedor y, de incluirse,
+    # contaminan la suma agrupada haciendo fallar el match por tolerancia.
+    fe_prov = fe[~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)]
+
+    suma_por_tercero_fecha = fe_prov.groupby([col_tercero_e, col_fecha_e])[col_importe_e].sum()
     suma_por_razon_fecha   = fp_monto_neg.groupby([col_razon, col_fecha_p])[col_monto].sum()
     nombres_p = fp_monto_neg[col_razon].unique().tolist()
 
@@ -1016,6 +1104,7 @@ def cruzar_proveedores_descarga(
                 idx_e = fe[
                     (fe[col_tercero_e] == nombre_e) &
                     (fe[col_fecha_e] == fecha_e) &
+                    (~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)) &
                     (~fe.index.isin(usado_extracto))
                 ].index.tolist()
                 fechas_matcheadas.add(fecha_e)
