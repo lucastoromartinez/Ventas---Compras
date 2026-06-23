@@ -39,7 +39,7 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
 
     def _norm_col(s: str) -> str:
         s = str(s)
-        s = s.replace(" ", " ")
+        s = s.replace("\u00a0", " ")
         s = s.strip().lower()
         s = unicodedata.normalize("NFKD", s)
         s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -79,9 +79,8 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
 
     def _parse_nro(s: str) -> tuple[str, str]:
         s = str(s).strip()
-        # Normalizar separadores no estándar
-        s = s.replace('−', '-').replace('–', '-')  # em dash / en dash
-        s = re.sub(r'\s*-\s*', '-', s)                       # espacios alrededor del guión
+        s = s.replace('\u2212', '-').replace('\u2013', '-')  # em dash / en dash
+        s = re.sub(r'\s*-\s*', '-', s)
         count = s.count('-')
         if count == 0:
             left, right = s[:4], s[4:]
@@ -265,6 +264,8 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame):
         "Nro. Doc. Emisor":       "cuit_arca",
         "Imp. Neto No Gravado":   "No gravado_arca",
         "Imp. Neto Gravado Total":"Gravado_arca",
+        "Imp. Op. Exentas":       "Exentas_arca",
+        "Otros Tributos":         "Otros Tributos_arca",
         "Imp. Total":             "Imp. Total_arca",
     }
 
@@ -314,6 +315,9 @@ def revisar_inconsistencias_en_match(
       - Fecha_Sistema vs Fecha_arca                → comparación exacta
       - Gravado_sistema vs Gravado_arca            → tolerancia +/- tol_pesos
       - No Gravado_sistema vs No gravado_arca      → tolerancia +/- tol_pesos
+        (si no coincide, se compara contra Otros Tributos_arca, y si tampoco
+         coincide, contra Exentas_arca; solo se marca inconsistencia si no
+         matchea contra ninguna de las tres)
       - Imp. Total_sistema vs Imp. Total_arca      → tolerancia +/- tol_pesos
 
     Regla extra:
@@ -356,8 +360,10 @@ def revisar_inconsistencias_en_match(
     c_grav_sis    = _pick(df, ["Gravado_sistema"])
     c_grav_arca   = _pick(df, ["Gravado_arca"])
 
-    c_nograv_sis  = _pick(df, ["No Gravado_sistema"])
-    c_nograv_arca = _pick(df, ["No gravado_arca"])
+    c_nograv_sis    = _pick(df, ["No Gravado_sistema"])
+    c_nograv_arca   = _pick(df, ["No gravado_arca"])
+    c_otros_trib    = _pick_optional(df, ["Otros Tributos_arca"])
+    c_exentas_arca  = _pick_optional(df, ["Exentas_arca"])
 
     c_total_sis   = _pick(df, ["Imp. Total_sistema"])
     c_total_arca  = _pick(df, ["Imp. Total_arca"])
@@ -372,9 +378,20 @@ def revisar_inconsistencias_en_match(
     grav_arca = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
     mask_grav = (grav_sis - grav_arca).abs() > float(tol_pesos)
 
-    nograv_sis      = _to_num(df[c_nograv_sis ]).fillna(0.0).round(2)
-    nograv_arca     = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
-    mask_nograv_raw = (nograv_sis - nograv_arca).abs() > float(tol_pesos)
+    nograv_sis  = _to_num(df[c_nograv_sis ]).fillna(0.0).round(2)
+    nograv_arca = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
+
+    coincide_nograv = (nograv_sis - nograv_arca).abs() <= float(tol_pesos)
+
+    if c_otros_trib is not None:
+        otros_trib       = _to_num(df[c_otros_trib]).fillna(0.0).round(2)
+        coincide_nograv |= (nograv_sis - otros_trib).abs() <= float(tol_pesos)
+
+    if c_exentas_arca is not None:
+        exentas_arca      = _to_num(df[c_exentas_arca]).fillna(0.0).round(2)
+        coincide_nograv  |= (nograv_sis - exentas_arca).abs() <= float(tol_pesos)
+
+    mask_nograv_raw = ~coincide_nograv
 
     total_sis  = _to_num(df[c_total_sis ]).fillna(0.0).round(2)
     total_arca = _to_num(df[c_total_arca]).fillna(0.0).round(2)
@@ -446,7 +463,8 @@ def cruce2(revisar1: pd.DataFrame, falta_arca: pd.DataFrame, falta_sistema: pd.D
 
     arca_cols_match = [
         "Fecha_arca", "Pto. Venta_arca", "N°Comprobante_arca",
-        "cuit_arca", "No gravado_arca", "Gravado_arca", "Imp. Total_arca",
+        "cuit_arca", "No gravado_arca", "Gravado_arca",
+        "Exentas_arca", "Otros Tributos_arca", "Imp. Total_arca",
     ]
 
     if not match_raw.empty:
@@ -566,7 +584,8 @@ def cruce3(
     fs["_nng_key"] = _to_amount(fs["No gravado_arca"  ]).fillna(0.0)
 
     arca_cols_match     = ["Fecha_arca", "Pto. Venta_arca", "N°Comprobante_arca",
-                           "cuit_arca", "No gravado_arca", "Gravado_arca", "Imp. Total_arca"]
+                           "cuit_arca", "No gravado_arca", "Gravado_arca",
+                           "Exentas_arca", "Otros Tributos_arca", "Imp. Total_arca"]
     arca_cols_available = [c for c in arca_cols_match if c in fs.columns]
 
     def _build_match_rows(resolved: pd.DataFrame, comentario_val: str) -> pd.DataFrame:
@@ -722,6 +741,7 @@ def generar_excel_en_memoria(
         "N°Comprobante_sistema", "N°Comprobante_arca",
         "Gravado_sistema",       "Gravado_arca",
         "No Gravado_sistema",    "No gravado_arca",
+        "Otros Tributos_arca",   "Exentas_arca",
         "Imp. Total_sistema",    "Imp. Total_arca",
         "comentario",
     ]
