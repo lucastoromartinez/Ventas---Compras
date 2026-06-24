@@ -1057,7 +1057,7 @@ def cruzar_proveedores_descarga(
     col_conc_m     = get_col(falta_mayor6,    "conciliacion")
     col_razon      = "RazÃ³n Social Beneficiario"
     col_monto      = find_col(df_proveedores_def, "monto")
-    col_fecha_p    = "Fecha de emisiÃ³n"
+    col_fecha_p    = "Fecha de pago"
 
     fe = falta_extracto6.copy().reset_index(drop=True)
     fm = falta_mayor6.copy().reset_index(drop=True)
