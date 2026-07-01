@@ -971,6 +971,7 @@ def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
     col_monto        = find_col(df_proveedores, "monto")
     col_estado       = find_col(df_proveedores, "estado")
     col_fecha_emis_p = "Fecha de emisiÃ³n"
+    col_fecha_pago_p = "Fecha de pago"
 
     fp = df_proveedores[
         ~df_proveedores[col_estado].astype(str).str.upper().str.contains("ERROR", na=False)
@@ -986,6 +987,7 @@ def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
     )
 
     fp[col_fecha_emis_p] = pd.to_datetime(fp[col_fecha_emis_p], errors="coerce")
+    fp[col_fecha_pago_p] = pd.to_datetime(fp[col_fecha_pago_p], errors="coerce")
 
     def cruzar_y_sacar(fp, match, tolerancia):
         col_fecha_m   = get_col(match, "Fecha", "fecha")
@@ -997,12 +999,17 @@ def limpiar_proveedores(df_proveedores, match_mayor, match_mayor1,
 
         idx_usados = set()
         for idx_p, row_p in fp.iterrows():
-            fecha_p = row_p[col_fecha_emis_p]
             monto_p = row_p[col_monto] * -1
-
-            coincide = mm[
-                (mm[col_fecha_m] == fecha_p) &
-                (mm[col_importe_m].apply(lambda x: abs(x - monto_p) <= tolerancia))
+            candidatos_monto = mm[
+                mm[col_importe_m].apply(lambda x: abs(x - monto_p) <= tolerancia)
+            ]
+            if candidatos_monto.empty:
+                continue
+            fecha_emis = row_p[col_fecha_emis_p]
+            fecha_pago = row_p[col_fecha_pago_p]
+            coincide = candidatos_monto[
+                (candidatos_monto[col_fecha_m] == fecha_emis) |
+                (candidatos_monto[col_fecha_m] == fecha_pago)
             ]
             if not coincide.empty:
                 idx_usados.add(idx_p)
