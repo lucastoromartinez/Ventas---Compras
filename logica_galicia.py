@@ -1090,6 +1090,7 @@ def cruzar_proveedores_descarga(
 
     usado_extracto     = set()
     nombres_matcheados = set()
+    pares_matcheados   = set()   # (nombre_p, fecha) de matches exitosos
     fechas_matcheadas  = set()
     match_idx_e        = []
     combos_agregar     = set()
@@ -1122,6 +1123,7 @@ def cruzar_proveedores_descarga(
                 match_idx_e.extend(idx_e)
                 usado_extracto.update(idx_e)
                 nombres_matcheados.add(nombre_p)
+                pares_matcheados.add((nombre_p, fecha_e))
                 encontrado = True
                 break
 
@@ -1185,10 +1187,35 @@ def cruzar_proveedores_descarga(
             if col_conc_m           in fila: fila[col_conc_m]            = "Proveedores"
             filas_nuevas.append(fila)
 
-    if filas_nuevas:
+    # Entradas de pagos masivos que no fueron matcheadas ni están en combos_agregar:
+    # pueden ser pagos emitidos que aún no aparecen en el mayor → van a falta_mayor.
+    filas_sin_match = []
+    for _, row in fp.iterrows():
+        razon      = row[col_razon]
+        fecha_pago = row[col_fecha_pago]
+        fecha_emis = row[col_fecha_emis]
+        ya_matcheado = (
+            any((razon, f) in pares_matcheados for f in [fecha_pago, fecha_emis]) or
+            any((razon, f) in combos_agregar   for f in [fecha_pago, fecha_emis])
+        )
+        if not ya_matcheado:
+            monto = row[col_monto]
+            fecha_usar = fecha_pago if pd.notna(fecha_pago) else fecha_emis
+            fila  = {col: "" for col in fm.columns}
+            if col_fecha_m          in fila: fila[col_fecha_m]          = fecha_usar
+            if "descripcion"        in fila: fila["descripcion"]         = "TRF INMED PROVEED"
+            if "debitos"            in fila: fila["debitos"]             = monto
+            if "concepto"           in fila: fila["concepto"]            = "TRF INMED PROVEED"
+            if "leyenda adicional1" in fila: fila["leyenda adicional1"]  = razon
+            if col_importe_m        in fila: fila[col_importe_m]         = -abs(float(monto)) if monto else 0
+            if col_conc_m           in fila: fila[col_conc_m]            = "Proveedores"
+            filas_sin_match.append(fila)
+
+    todas_filas_nuevas = filas_nuevas + filas_sin_match
+    if todas_filas_nuevas:
         falta_mayor7 = pd.concat([
             falta_mayor7_base,
-            pd.DataFrame(filas_nuevas)
+            pd.DataFrame(todas_filas_nuevas)
         ], ignore_index=True)
     else:
         falta_mayor7 = falta_mayor7_base
