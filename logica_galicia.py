@@ -1057,13 +1057,15 @@ def cruzar_proveedores_descarga(
     col_conc_m     = get_col(falta_mayor6,    "conciliacion")
     col_razon      = "RazÃ³n Social Beneficiario"
     col_monto      = find_col(df_proveedores_def, "monto")
-    col_fecha_p    = "Fecha de pago"
+    col_fecha_pago = "Fecha de pago"
+    col_fecha_emis = "Fecha de emisiÃ³n"
 
     fe = falta_extracto6.copy().reset_index(drop=True)
     fm = falta_mayor6.copy().reset_index(drop=True)
     fp = df_proveedores_def.copy().reset_index(drop=True)
 
-    fp[col_fecha_p] = pd.to_datetime(fp[col_fecha_p], errors="coerce")
+    fp[col_fecha_pago] = pd.to_datetime(fp[col_fecha_pago], errors="coerce")
+    fp[col_fecha_emis] = pd.to_datetime(fp[col_fecha_emis], errors="coerce")
 
     fp_monto_neg = fp.copy()
     fp_monto_neg[col_monto] = fp_monto_neg[col_monto] * -1
@@ -1075,8 +1077,16 @@ def cruzar_proveedores_descarga(
     fe_prov = fe[~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)]
 
     suma_por_tercero_fecha = fe_prov.groupby([col_tercero_e, col_fecha_e])[col_importe_e].sum()
-    suma_por_razon_fecha   = fp_monto_neg.groupby([col_razon, col_fecha_p])[col_monto].sum()
+    suma_por_razon_pago    = fp_monto_neg.groupby([col_razon, col_fecha_pago])[col_monto].sum()
+    suma_por_razon_emision = fp_monto_neg.groupby([col_razon, col_fecha_emis])[col_monto].sum()
     nombres_p = fp_monto_neg[col_razon].unique().tolist()
+
+    def buscar_suma_p(nombre_p, fecha_e):
+        if (nombre_p, fecha_e) in suma_por_razon_pago.index:
+            return suma_por_razon_pago[(nombre_p, fecha_e)]
+        if (nombre_p, fecha_e) in suma_por_razon_emision.index:
+            return suma_por_razon_emision[(nombre_p, fecha_e)]
+        return None
 
     usado_extracto     = set()
     nombres_matcheados = set()
@@ -1098,9 +1108,9 @@ def cruzar_proveedores_descarga(
         encontrado = False
 
         for nombre_p, score, _ in candidatos:
-            if (nombre_p, fecha_e) not in suma_por_razon_fecha.index:
+            suma_p = buscar_suma_p(nombre_p, fecha_e)
+            if suma_p is None:
                 continue
-            suma_p = suma_por_razon_fecha[(nombre_p, fecha_e)]
             if abs(suma_e - suma_p) <= tolerancia_importe:
                 idx_e = fe[
                     (fe[col_tercero_e] == nombre_e) &
@@ -1118,7 +1128,9 @@ def cruzar_proveedores_descarga(
         if not encontrado:
             mejor = candidatos[0]
             mejor_nombre, mejor_score = mejor[0], mejor[1]
-            suma_mejor = suma_por_razon_fecha.get((mejor_nombre, fecha_e), 0)
+            suma_mejor = buscar_suma_p(mejor_nombre, fecha_e)
+            if suma_mejor is None:
+                suma_mejor = 0
             if mejor_score == 100 and suma_mejor != 0:
                 combos_agregar.add((mejor_nombre, fecha_e))
 
@@ -1158,10 +1170,9 @@ def cruzar_proveedores_descarga(
 
     filas_nuevas = []
     for nombre_p, fecha in combos_agregar:
-        filas_p = fp[
-            (fp[col_razon] == nombre_p) &
-            (fp[col_fecha_p] == fecha)
-        ]
+        filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_pago] == fecha)]
+        if filas_p.empty:
+            filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_emis] == fecha)]
         for _, row in filas_p.iterrows():
             monto = row[col_monto]
             fila  = {col: "" for col in fm.columns}
