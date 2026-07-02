@@ -1081,12 +1081,64 @@ def cruzar_proveedores_descarga(
     # cuenta transitoria/clearing (ej. "Cobro a cuenta A4TP-x") que pueden
     # compartir Tercero y Fecha con un pago real a proveedor y, de incluirse,
     # contaminan la suma agrupada haciendo fallar el match por tolerancia.
-    fe_prov = fe[~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)]
-
-    suma_por_tercero_fecha = fe_prov.groupby([col_tercero_e, col_fecha_e])[col_importe_e].sum()
-    suma_por_razon_pago    = fp_monto_neg.groupby([col_razon, col_fecha_pago])[col_monto].sum()
-    suma_por_razon_emision = fp_monto_neg.groupby([col_razon, col_fecha_emis])[col_monto].sum()
+    fe_prov   = fe[~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)]
     nombres_p = fp_monto_neg[col_razon].unique().tolist()
+
+    usado_extracto     = set()
+    idx_fp_usados      = set()
+    nombres_matcheados = set()
+    pares_matcheados   = set()
+    fechas_matcheadas  = set()
+    match_idx_e        = []
+    combos_agregar     = set()
+
+    # Pre-computar candidatos fuzzy por nombre único de Tercero
+    candidatos_por_tercero = {}
+    for nombre_e in fe_prov[col_tercero_e].unique():
+        candidatos_por_tercero[nombre_e] = process.extract(
+            nombre_e, nombres_p, scorer=fuzz.token_sort_ratio, limit=top_candidatos,
+        )
+
+    # ── Paso 1: matching 1 a 1 (fila de mayor vs fila de pagos masivos) ──────
+    for idx_e, row_e in fe_prov.iterrows():
+        if idx_e in usado_extracto:
+            continue
+        nombre_e  = row_e[col_tercero_e]
+        fecha_e   = row_e[col_fecha_e]
+        importe_e = row_e[col_importe_e]
+
+        candidatos = candidatos_por_tercero.get(nombre_e, [])
+        if not candidatos:
+            continue
+
+        for nombre_p, score, _ in candidatos:
+            fp_cand = fp_monto_neg[
+                (fp_monto_neg[col_razon] == nombre_p) &
+                (~fp_monto_neg.index.isin(idx_fp_usados)) &
+                (
+                    (fp_monto_neg[col_fecha_pago] == fecha_e) |
+                    (fp_monto_neg[col_fecha_emis] == fecha_e)
+                ) &
+                (fp_monto_neg[col_monto].apply(lambda m: abs(importe_e - m) <= tolerancia_importe))
+            ]
+
+            if not fp_cand.empty:
+                idx_fp = fp_cand.index[0]
+                idx_fp_usados.add(idx_fp)
+                usado_extracto.add(idx_e)
+                match_idx_e.append(idx_e)
+                fechas_matcheadas.add(fecha_e)
+                nombres_matcheados.add(nombre_p)
+                pares_matcheados.add((nombre_p, fecha_e))
+                break
+
+    # ── Paso 2: matching por suma sobre remanentes ────────────────────────────
+    fe_prov_rest = fe_prov[~fe_prov.index.isin(usado_extracto)]
+    fp_neg_rest  = fp_monto_neg[~fp_monto_neg.index.isin(idx_fp_usados)]
+
+    suma_por_tercero_fecha  = fe_prov_rest.groupby([col_tercero_e, col_fecha_e])[col_importe_e].sum()
+    suma_por_razon_pago     = fp_neg_rest.groupby([col_razon, col_fecha_pago])[col_monto].sum()
+    suma_por_razon_emision  = fp_neg_rest.groupby([col_razon, col_fecha_emis])[col_monto].sum()
 
     def buscar_suma_p(nombre_p, fecha_e):
         if (nombre_p, fecha_e) in suma_por_razon_pago.index:
@@ -1095,19 +1147,10 @@ def cruzar_proveedores_descarga(
             return suma_por_razon_emision[(nombre_p, fecha_e)]
         return None
 
-    usado_extracto     = set()
-    nombres_matcheados = set()
-    pares_matcheados   = set()   # (nombre_p, fecha) de matches exitosos
-    fechas_matcheadas  = set()
-    match_idx_e        = []
-    combos_agregar     = set()
-
     for (nombre_e, fecha_e), suma_e in suma_por_tercero_fecha.items():
-        candidatos = process.extract(
-            nombre_e,
-            nombres_p,
-            scorer=fuzz.token_sort_ratio,
-            limit=top_candidatos,
+        candidatos = candidatos_por_tercero.get(nombre_e) or process.extract(
+            nombre_e, fp_neg_rest[col_razon].unique().tolist(),
+            scorer=fuzz.token_sort_ratio, limit=top_candidatos,
         )
 
         if not candidatos:
@@ -1120,15 +1163,23 @@ def cruzar_proveedores_descarga(
             if suma_p is None:
                 continue
             if abs(suma_e - suma_p) <= tolerancia_importe:
-                idx_e = fe[
-                    (fe[col_tercero_e] == nombre_e) &
-                    (fe[col_fecha_e] == fecha_e) &
-                    (~fe[col_serie_e].astype(str).str.contains("TP", case=False, na=False)) &
-                    (~fe.index.isin(usado_extracto))
+                idx_e_list = fe_prov_rest[
+                    (fe_prov_rest[col_tercero_e] == nombre_e) &
+                    (fe_prov_rest[col_fecha_e] == fecha_e) &
+                    (~fe_prov_rest.index.isin(usado_extracto))
+                ].index.tolist()
+                idx_fp_list = fp_neg_rest[
+                    (fp_neg_rest[col_razon] == nombre_p) &
+                    (
+                        (fp_neg_rest[col_fecha_pago] == fecha_e) |
+                        (fp_neg_rest[col_fecha_emis] == fecha_e)
+                    ) &
+                    (~fp_neg_rest.index.isin(idx_fp_usados))
                 ].index.tolist()
                 fechas_matcheadas.add(fecha_e)
-                match_idx_e.extend(idx_e)
-                usado_extracto.update(idx_e)
+                match_idx_e.extend(idx_e_list)
+                usado_extracto.update(idx_e_list)
+                idx_fp_usados.update(idx_fp_list)
                 nombres_matcheados.add(nombre_p)
                 pares_matcheados.add((nombre_p, fecha_e))
                 encontrado = True
@@ -1177,12 +1228,12 @@ def cruzar_proveedores_descarga(
     usado_mayor = set(fm[mask_trf].index.tolist())
     falta_mayor7_base = fm[~fm.index.isin(usado_mayor)].reset_index(drop=True)
 
-    filas_nuevas = []
+    filas_nuevas  = []
     for nombre_p, fecha in combos_agregar:
-        filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_pago] == fecha)]
+        filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_pago] == fecha) & (~fp.index.isin(idx_fp_usados))]
         if filas_p.empty:
-            filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_emis] == fecha)]
-        for _, row in filas_p.iterrows():
+            filas_p = fp[(fp[col_razon] == nombre_p) & (fp[col_fecha_emis] == fecha) & (~fp.index.isin(idx_fp_usados))]
+        for idx_p, row in filas_p.iterrows():
             monto = row[col_monto]
             fila  = {col: "" for col in fm.columns}
             if col_fecha_m          in fila: fila[col_fecha_m]          = fecha
@@ -1193,18 +1244,18 @@ def cruzar_proveedores_descarga(
             if col_importe_m        in fila: fila[col_importe_m]         = -abs(monto)
             if col_conc_m           in fila: fila[col_conc_m]            = "Proveedores"
             filas_nuevas.append(fila)
+            idx_fp_usados.add(idx_p)
 
     # Entradas de pagos masivos que no fueron matcheadas ni están en combos_agregar:
     # pueden ser pagos emitidos que aún no aparecen en el mayor → van a falta_mayor.
     filas_sin_match = []
-    for _, row in fp.iterrows():
+    for idx_p, row in fp.iterrows():
+        if idx_p in idx_fp_usados:
+            continue
         razon      = row[col_razon]
         fecha_pago = row[col_fecha_pago]
         fecha_emis = row[col_fecha_emis]
-        ya_matcheado = (
-            any((razon, f) in pares_matcheados for f in [fecha_pago, fecha_emis]) or
-            any((razon, f) in combos_agregar   for f in [fecha_pago, fecha_emis])
-        )
+        ya_matcheado = any((razon, f) in pares_matcheados for f in [fecha_pago, fecha_emis])
         if not ya_matcheado:
             monto = row[col_monto]
             fecha_usar = fecha_pago if pd.notna(fecha_pago) else fecha_emis
