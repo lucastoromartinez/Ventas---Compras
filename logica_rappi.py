@@ -230,7 +230,7 @@ def depurar_facturas(facturas):
 # ─────────────────────────────────────────────
 
 def asignar_facturas(facturas, liquidaciones):
-    TOLERANCIA = 0.5
+    TOLERANCIA = 1
     advertencias = []
 
     for liq in liquidaciones:
@@ -295,7 +295,7 @@ def asignar_facturas(facturas, liquidaciones):
 # ─────────────────────────────────────────────
 
 def _cruce_publicidad(df_publicidad, df_liquidacion):
-    TOLERANCIA = 0.5
+    TOLERANCIA = 1
 
     if df_publicidad.empty:
         return pd.DataFrame(), pd.DataFrame(), df_liquidacion.copy().reset_index(drop=True)
@@ -331,7 +331,7 @@ def _cruce_publicidad(df_publicidad, df_liquidacion):
 
 
 def _cruce_servicios(df_servicios, falta_pub):
-    TOLERANCIA = 0.5
+    TOLERANCIA = 1
 
     if df_servicios.empty:
         return pd.DataFrame(), pd.DataFrame(), falta_pub.copy().reset_index(drop=True)
