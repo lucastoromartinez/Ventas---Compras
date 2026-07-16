@@ -1,6 +1,7 @@
 import streamlit as st
 from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
+from logica_cupones     import correr_conciliacion_cupones
 
 st.set_page_config(
     page_title="Conciliaciones Bancarias",
@@ -118,7 +119,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_galicia, tab_hipotecario = st.tabs(["🏦  Banco Galicia", "🏦  Banco Hipotecario"])
+tab_galicia, tab_hipotecario, tab_cupones = st.tabs(
+    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🎟️  Cupones"]
+)
 
 
 # ═══════════════════════════════════════════════
@@ -292,6 +295,82 @@ with tab_hipotecario:
             label="📥 Descargar reporte Hipotecario",
             data=r["buf"],
             file_name="conciliacion_hipotecario.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+
+# ═══════════════════════════════════════════════
+# TAB CUPONES
+# ═══════════════════════════════════════════════
+with tab_cupones:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col6, col7 = st.columns(2)
+    with col6:
+        st.markdown('<div class="upload-label">Extracto Banco</div>', unsafe_allow_html=True)
+        archivo_banco_c = st.file_uploader("banco_c", type=["xlsx","xls"],
+                                            label_visibility="collapsed", key="banco_c")
+    with col7:
+        st.markdown('<div class="upload-label">Reporte Nave</div>', unsafe_allow_html=True)
+        archivo_nave_c = st.file_uploader("nave_c", type=["xlsx","xls"],
+                                           label_visibility="collapsed", key="nave_c")
+
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+    todos_c = all([archivo_banco_c, archivo_nave_c])
+    if not todos_c:
+        st.info("Cargá el Extracto Banco y el Reporte Nave para habilitar la conciliación.")
+
+    boton_c = st.button("CONCILIAR CUPONES", disabled=not todos_c,
+                         use_container_width=True, key="btn_cupones")
+
+    if boton_c and todos_c:
+        with st.spinner("Procesando Cupones..."):
+            try:
+                buf_c, stats_c = correr_conciliacion_cupones(
+                    archivo_banco=archivo_banco_c,
+                    archivo_nave=archivo_nave_c,
+                )
+                st.session_state["resultado_cupones"] = {"buf": buf_c, "stats": stats_c}
+            except Exception as e:
+                st.error(f"Error al procesar Cupones: {e}")
+
+    if "resultado_cupones" in st.session_state:
+        r = st.session_state["resultado_cupones"]
+        s = r["stats"]
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        clase_fb = "error" if s["falta_banco"] > 0 else "metric-card"
+        clase_fn = "error" if s["falta_nave"]  > 0 else "metric-card"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric-card">
+                <div class="metric-value">{s['grupos_matcheados']}</div>
+                <div class="metric-label">Grupos matcheados</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{s['match_ajustado']}</div>
+                <div class="metric-label">Match con ajuste</div>
+            </div>
+            <div class="metric-card {clase_fb}">
+                <div class="metric-value">{s['falta_banco']}</div>
+                <div class="metric-label">Falta Banco</div>
+            </div>
+            <div class="metric-card {clase_fn}">
+                <div class="metric-value">{s['falta_nave']}</div>
+                <div class="metric-label">Falta Nave</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Descargar reporte Cupones",
+            data=r["buf"],
+            file_name="conciliacion_cupones.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
