@@ -222,10 +222,19 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         desc.apply(lambda d: contiene(d,
             "trfordenjudic",
         )),
+        desc.apply(lambda d: contiene(d,
+            "depefvoautoservicio",
+        )),
+        desc.apply(lambda d: contiene(d,
+            "acreditamientoprismacomercio",
+            "transferenciapei",
+            "devolucionpei",
+            "anulpagocomercio",
+        )),
     ]
 
     categorias = [
-        "Acreditaciones",
+        "Acred. Nave",
         "Cobranzas",
         "Descuento Galicia",
         "Echeq",
@@ -238,12 +247,15 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
         "Imp. AFIP",
         "Propinas",
         "Transf. Judicial",
+        "Deposito",
+        "Acred. Prisma",
     ]
 
     df["conciliacion"] = "0"
     for condicion, categoria in zip(condiciones, categorias):
         df.loc[condicion & (df["conciliacion"] == "0"), "conciliacion"] = categoria
 
+    print(df["conciliacion"].value_counts())
     return df
 
 
@@ -334,8 +346,10 @@ def categorizar_extracto_v2(df: pd.DataFrame) -> pd.DataFrame:
     es_transf_cash_prov = desc == limpiar("TRANSFERENCIAS CASH PROVEEDORES")
     es_rappi    = ley_ad1_limpio.apply(lambda d: "rappi" in d)
     es_delivery = ley_ad1_limpio.apply(lambda d: limpiar("delivery hero fi") in d)
+    es_amex     = ley_ad1_limpio.apply(lambda d: limpiar("american express") in d)
     df.loc[sin_cat & es_transf_cash_prov & es_rappi,    "conciliacion"] = "Acred. Rappi"
     df.loc[sin_cat & es_transf_cash_prov & es_delivery, "conciliacion"] = "Acred. PY"
+    df.loc[sin_cat & es_transf_cash_prov & es_amex,     "conciliacion"] = "Acred. AmEx"
     sin_cat = df["conciliacion"] == "0"
 
     es_reintegro_promo = desc == limpiar("REINTEGRO PROMOCION GALICIA")
@@ -344,7 +358,12 @@ def categorizar_extracto_v2(df: pd.DataFrame) -> pd.DataFrame:
 
     es_snp_prov = desc == limpiar("SNP PAGO A PROVEEDORES")
     df.loc[sin_cat & es_snp_prov, "conciliacion"] = "Proveedores"
+    sin_cat = df["conciliacion"] == "0"
 
+    es_sueldo_ley = ley_ad1_limpio.apply(lambda d: "sueldo" in d)
+    df.loc[sin_cat & es_sueldo_ley, "conciliacion"] = "Sueldos"
+
+    print(df["conciliacion"].value_counts())
     return df
 
 
@@ -382,7 +401,16 @@ def categorizar_mayor_v1(df: pd.DataFrame) -> pd.DataFrame:
     comentario_raw = df["Comentario"].astype(str).str.strip()
 
     condiciones = [
-        comentario.apply(lambda d: contiene(d, "acreditacion", "acreditaciones")),
+        # Acred. Nave  → comentario contiene "acrednave"
+        comentario.apply(lambda d: "acrednave" in d),
+        # Acred. PY    → comentario contiene "acredpy"
+        comentario.apply(lambda d: "acredpy" in d),
+        # Acred. Rappi → comentario contiene "acredrappi"
+        comentario.apply(lambda d: "acredrappi" in d),
+        # Acred. Prisma → comentario contiene "acredprisma"
+        comentario.apply(lambda d: "acredprisma" in d),
+        # Acred. AmEx  → comentario contiene "acredamex"
+        comentario.apply(lambda d: "acredamex" in d),
         comentario.apply(lambda d: contiene(d, "cobronf")),
         comentario.apply(lambda d: contiene(d, "descuento", "descuentos")),
         comentario.apply(lambda d: contiene(d, "pagogb", "gb", "sircreb", "impdeb/cred")),
@@ -392,7 +420,11 @@ def categorizar_mayor_v1(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     categorias = [
-        "Acreditaciones",
+        "Acred. Nave",
+        "Acred. PY",
+        "Acred. Rappi",
+        "Acred. Prisma",
+        "Acred. AmEx",
         "Cobranzas",
         "Descuento Galicia",
         "Gastos Bancarios",
@@ -1311,18 +1343,27 @@ def cruzar_acreditaciones(df_extracto_cat2, falta_extracto7, falta_mayor7, toler
 
     comentario_limp = falta_extracto7[col_com_falt].apply(limpiar)
 
-    mask_acred = falta_extracto7[col_conc_falt] == "Acreditaciones"
-    mask_py    = comentario_limp.apply(lambda d: "acreditacionpy" in d)
-    mask_rappi = comentario_limp.apply(lambda d: "acreditacionesrappi" in d or "acreditacionrappi" in d)
+    # Normalizar nombre viejo → Acred. Nave (por si el mayor viene con el nombre anterior)
+    mask_acred_viejo = falta_extracto7[col_conc_falt] == "Acreditaciones"
+    falta_extracto7.loc[mask_acred_viejo, col_conc_falt] = "Acred. Nave"
 
-    falta_extracto7.loc[mask_acred & mask_py,    col_conc_falt] = "Acred. PY"
-    falta_extracto7.loc[mask_acred & mask_rappi, col_conc_falt] = "Acred. Rappi"
+    # Subdividir Acred. Nave según el comentario
+    mask_acred   = falta_extracto7[col_conc_falt] == "Acred. Nave"
+    mask_py      = comentario_limp.apply(lambda d: "acredpy"     in d)
+    mask_rappi   = comentario_limp.apply(lambda d: "acredrappi"  in d)
+    mask_prisma  = comentario_limp.apply(lambda d: "acredprisma" in d)
+    mask_amex    = comentario_limp.apply(lambda d: "acredamex"   in d)
+
+    falta_extracto7.loc[mask_acred & mask_py,     col_conc_falt] = "Acred. PY"
+    falta_extracto7.loc[mask_acred & mask_rappi,  col_conc_falt] = "Acred. Rappi"
+    falta_extracto7.loc[mask_acred & mask_prisma, col_conc_falt] = "Acred. Prisma"
+    falta_extracto7.loc[mask_acred & mask_amex,   col_conc_falt] = "Acred. AmEx"
 
     col_importe_cat  = get_col(df_extracto_cat2, "importe", "Importe")
     col_conc_cat     = get_col(df_extracto_cat2, "conciliacion")
     col_importe_falt = get_col(falta_extracto7,  "Importe", "importe")
 
-    CATEGORIAS = ["Acreditaciones", "Acred. PY", "Acred. Rappi"]
+    CATEGORIAS = ["Acred. Nave", "Acred. PY", "Acred. Rappi", "Acred. Prisma", "Acred. AmEx"]
 
     match_cat_idx  = []
     match_falt_idx = []
@@ -1644,7 +1685,9 @@ def correr_conciliacion_galicia(archivo_mayor, archivo_extracto, archivo_proveed
     df_extracto_cat  = categorizar_extracto_v1(df_extracto_dep)
     df_extracto_cat2 = categorizar_extracto_v2(df_extracto_cat)
     df_extracto_sin_acreditaciones = df_extracto_cat2[
-        ~df_extracto_cat2["conciliacion"].isin(["Acreditaciones", "Acred. PY", "Acred. Rappi"])
+        ~df_extracto_cat2["conciliacion"].isin([
+            "Acred. Nave", "Acred. PY", "Acred. Rappi", "Acred. Prisma", "Acred. AmEx",
+        ])
     ].reset_index(drop=True)
     df_mayor_cat = categorizar_mayor_v1(df_mayor_dep)
     df_mayor_cat = categorizar_mayor_v2(df_mayor_cat)
