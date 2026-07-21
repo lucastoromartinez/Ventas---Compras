@@ -18,7 +18,9 @@ def importar_liquidaciones(archivos):
         wb = openpyxl.load_workbook(io.BytesIO(archivo.read()), data_only=True)
         ws = wb['Resumen']
 
-        id_pago = ws.cell(row=7, column=4).value
+        id_pago            = ws.cell(row=7, column=4).value
+        inicio_periodo_liq = ws.cell(row=3, column=4).value
+        fin_periodo_liq    = ws.cell(row=4, column=4).value
 
         merged_ranges = list(ws.merged_cells.ranges)
         for rango in merged_ranges:
@@ -44,7 +46,12 @@ def importar_liquidaciones(archivos):
         df['Total']   = pd.to_numeric(df['Total'], errors='coerce')
         df = df.dropna(subset=['Valores']).reset_index(drop=True)
 
-        liquidaciones.append({'id_pago': id_pago, 'df': df})
+        liquidaciones.append({
+            'id_pago':            id_pago,
+            'inicio_periodo_liq': inicio_periodo_liq,
+            'fin_periodo_liq':    fin_periodo_liq,
+            'df':                 df,
+        })
     return liquidaciones
 
 
@@ -469,6 +476,13 @@ def procesar_liquidaciones(liquidaciones):
         )
         liq['falta_factura'] = falta_actual.copy().reset_index(drop=True)
 
+        # Se invierte el signo de 'Total': la liquidación lo expresa desde la
+        # perspectiva de Rappi, acá lo pasamos a la perspectiva de la empresa.
+        if not liq['match_liquidacion'].empty:
+            liq['match_liquidacion']['Total'] = -liq['match_liquidacion']['Total']
+        if not liq['falta_factura'].empty:
+            liq['falta_factura']['Total'] = -liq['falta_factura']['Total']
+
         for factura in facturas_pub + facturas_srv:
             fin_periodo   = factura.get('fin_periodo')
             fecha_factura = factura.get('fecha_factura')
@@ -487,6 +501,42 @@ def procesar_liquidaciones(liquidaciones):
         else pd.DataFrame(columns=['nro_factura', 'id_pago', 'inicio_periodo', 'fin_periodo', 'fecha_factura', 'total_factura'])
     )
     return liquidaciones, df_resumen
+
+
+# ─────────────────────────────────────────────
+# CUADRO DE CONCEPTOS (una hoja, agrupada por liquidación)
+# ─────────────────────────────────────────────
+
+def _formatear_fecha_liq(valor):
+    if not valor:
+        return ''
+    try:
+        valor = datetime.strptime(str(valor), '%Y-%m-%d')
+    except ValueError:
+        return str(valor)
+    return valor.strftime('%d/%m/%Y')
+
+
+def construir_cuadro_conceptos(liquidaciones):
+    filas = []
+    for liq in liquidaciones:
+        inicio = _formatear_fecha_liq(liq.get('inicio_periodo_liq'))
+        fin    = _formatear_fecha_liq(liq.get('fin_periodo_liq'))
+        filas.append((f'Liquidacion {inicio} a {fin}', None))
+
+        for _, row in liq['falta_factura'].iterrows():
+            filas.append((row['Valores'], row['Total']))
+
+        for factura in liq['facturas_publicidad'] + liq['facturas_servicios']:
+            filas.append((factura['nro_factura'], factura.get('total_factura')))
+
+        filas.append(None)
+        filas.append(None)
+
+    while filas and filas[-1] is None:
+        filas.pop()
+
+    return filas
 
 
 # ─────────────────────────────────────────────
@@ -529,6 +579,22 @@ def correr_rappi(archivos_liq, archivos_pdf):
                         cell.number_format = formato
         buf_res.seek(0)
         zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
+
+        cuadro_filas = construir_cuadro_conceptos(liquidaciones)
+        wb_cuadro = openpyxl.Workbook()
+        ws_cuadro = wb_cuadro.active
+        ws_cuadro.title = 'cuadro_conceptos'
+        ws_cuadro.append(['Concepto', 'Monto'])
+        for fila in cuadro_filas:
+            ws_cuadro.append(list(fila) if fila is not None else [])
+        for row in ws_cuadro.iter_rows(min_row=2, min_col=2, max_col=2):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '$ #,##0.00'
+        buf_cuadro = io.BytesIO()
+        wb_cuadro.save(buf_cuadro)
+        buf_cuadro.seek(0)
+        zf.writestr('cuadro_conceptos.xlsx', buf_cuadro.read())
 
     zip_buf.seek(0)
 
