@@ -350,18 +350,34 @@ def _cruce_servicios(df_servicios, falta_pub):
                 disponibles_srv.remove(j)
                 break
 
-    resto_liq   = falta_pub.loc[disponibles_liq].copy()
-    mask_iva    = resto_liq['Valores'].str.contains('IVA Uso y alquiler de plataforma Rappi', na=False)
-    mask_dsc    = resto_liq['Valores'].str.contains('Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler', na=False)
-    idx_iva_dsc = resto_liq[mask_iva | mask_dsc].index.tolist()
+    # Pares base + "Descuento por inversión de Rappi DAR" que Rappi factura
+    # como una única línea neta en el Detalle de Impuesto
+    # (p.ej. IVA Uso y alquiler, o Percepción IIBB por provincia).
+    PARES_DAR = [
+        ('SUM of IVA Uso y alquiler de plataforma Rappi',
+         'SUM of Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler de plataforma Rappi DAR'),
+        ('SUM of Percepcion',
+         'SUM of Descuento por inversión de Rappi a aplicar sobre la Percepción de BA DAR'),
+        ('SUM of Percepcion Cordoba',
+         'SUM of Descuento por inversión de Rappi a aplicar sobre la Percepción de Córdoba DAR'),
+        ('SUM of Percepción Tucuman',
+         'SUM of Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE TUCUMAN DAR'),
+        ('SUM of Percepción Corrientes',
+         'SUM of Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE CORRIENTES DAR'),
+    ]
 
-    if idx_iva_dsc:
-        suma_iva = resto_liq.loc[idx_iva_dsc, 'Total'].sum()
+    for base_label, dsc_label in PARES_DAR:
+        resto_liq = falta_pub.loc[disponibles_liq].copy()
+        idx_par = resto_liq[resto_liq['Valores'].isin([base_label, dsc_label])].index.tolist()
+        if not idx_par:
+            continue
+
+        suma_par = resto_liq.loc[idx_par, 'Total'].sum()
         for j in disponibles_srv:
-            if abs(abs(suma_iva) - abs(df_servicios.loc[j, 'P.Total'])) <= TOLERANCIA:
-                idx_match_liq.extend(idx_iva_dsc)
+            if abs(abs(suma_par) - abs(df_servicios.loc[j, 'P.Total'])) <= TOLERANCIA:
+                idx_match_liq.extend(idx_par)
                 idx_match_srv.append(j)
-                disponibles_liq = [i for i in disponibles_liq if i not in idx_iva_dsc]
+                disponibles_liq = [i for i in disponibles_liq if i not in idx_par]
                 disponibles_srv.remove(j)
                 break
 
