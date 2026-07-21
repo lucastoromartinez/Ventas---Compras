@@ -1,8 +1,10 @@
 import io
 import re
 import zipfile
+from datetime import datetime
 import pandas as pd
 import openpyxl
+from openpyxl.utils import get_column_letter
 import pdfplumber
 
 
@@ -188,6 +190,13 @@ def _parse_factura(file_obj):
     primera_cod = df['Cod'].iloc[0].replace(' ', '').lower()
     tipo = 'publicidad' if 'serviciosdepublicidad' in primera_cod else 'servicios'
 
+    # Total de la factura (misma fila que la etiqueta "Total", a la derecha)
+    total_words = sorted(
+        [w for w in words if abs(w['top'] - total_top) < 3 and w['x0'] > 510],
+        key=lambda w: w['x0']
+    )
+    total_factura = ' '.join(w['text'] for w in total_words) or None
+
     return {
         'nro_factura':    nro_factura,
         'pid':            pid,
@@ -195,6 +204,7 @@ def _parse_factura(file_obj):
         'fecha_factura':  fecha_factura,
         'inicio_periodo': inicio_periodo,
         'fin_periodo':    fin_periodo,
+        'total_factura':  total_factura,
         'df':             df,
     }
 
@@ -222,6 +232,19 @@ def depurar_facturas(facturas):
             )
         df = df[df['P.Total'].abs() > 0.5].reset_index(drop=True)
         factura['df'] = df
+
+        total_str = factura.get('total_factura')
+        valor = (
+            str(total_str)
+            .replace('$', '')
+            .replace('.', '')
+            .replace(',', '.')
+            .strip()
+        ) if total_str else None
+        try:
+            factura['total_factura'] = round(float(valor), 2) if valor else None
+        except ValueError:
+            factura['total_factura'] = None
     return facturas
 
 
@@ -447,18 +470,21 @@ def procesar_liquidaciones(liquidaciones):
         liq['falta_factura'] = falta_actual.copy().reset_index(drop=True)
 
         for factura in facturas_pub + facturas_srv:
+            fin_periodo   = factura.get('fin_periodo')
+            fecha_factura = factura.get('fecha_factura')
             resumen_rows.append({
                 'nro_factura':    factura['nro_factura'],
                 'id_pago':        liq['id_pago'],
                 'inicio_periodo': factura.get('inicio_periodo'),
-                'fin_periodo':    factura.get('fin_periodo'),
-                'fecha_factura':  factura.get('fecha_factura'),
+                'fin_periodo':    datetime.strptime(fin_periodo, '%Y-%m-%d').date() if fin_periodo else None,
+                'fecha_factura':  datetime.strptime(fecha_factura, '%d/%m/%Y').date() if fecha_factura else None,
+                'total_factura':  factura.get('total_factura'),
             })
 
     df_resumen = (
         pd.DataFrame(resumen_rows)
         if resumen_rows
-        else pd.DataFrame(columns=['nro_factura', 'id_pago', 'inicio_periodo', 'fin_periodo', 'fecha_factura'])
+        else pd.DataFrame(columns=['nro_factura', 'id_pago', 'inicio_periodo', 'fin_periodo', 'fecha_factura', 'total_factura'])
     )
     return liquidaciones, df_resumen
 
@@ -488,7 +514,19 @@ def correr_rappi(archivos_liq, archivos_pdf):
             zf.writestr(f"liquidacion_{liq['id_pago']}.xlsx", buf.read())
 
         buf_res = io.BytesIO()
-        df_resumen.to_excel(buf_res, index=False, engine='openpyxl')
+        with pd.ExcelWriter(buf_res, engine='openpyxl') as writer:
+            df_resumen.to_excel(writer, index=False, sheet_name='Sheet1')
+            ws = writer.sheets['Sheet1']
+            formatos_col = {
+                'fin_periodo':   'DD/MM/YYYY',
+                'fecha_factura': 'DD/MM/YYYY',
+                'total_factura': '$ #,##0.00',
+            }
+            for col_name, formato in formatos_col.items():
+                if col_name in df_resumen.columns:
+                    col_letter = get_column_letter(df_resumen.columns.get_loc(col_name) + 1)
+                    for cell in ws[col_letter][1:]:
+                        cell.number_format = formato
         buf_res.seek(0)
         zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
 
