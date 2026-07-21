@@ -46,11 +46,15 @@ def importar_liquidaciones(archivos):
         df['Total']   = pd.to_numeric(df['Total'], errors='coerce')
         df = df.dropna(subset=['Valores']).reset_index(drop=True)
 
+        fila_total = df[df['Grupo'] == 'Valor total a transferir']
+        valor_total_transferir = round(fila_total['Total'].iloc[0], 2) if not fila_total.empty else None
+
         liquidaciones.append({
-            'id_pago':            id_pago,
-            'inicio_periodo_liq': inicio_periodo_liq,
-            'fin_periodo_liq':    fin_periodo_liq,
-            'df':                 df,
+            'id_pago':                id_pago,
+            'inicio_periodo_liq':     inicio_periodo_liq,
+            'fin_periodo_liq':        fin_periodo_liq,
+            'valor_total_transferir': valor_total_transferir,
+            'df':                     df,
         })
     return liquidaciones
 
@@ -523,6 +527,7 @@ def construir_cuadro_conceptos(liquidaciones):
         inicio = _formatear_fecha_liq(liq.get('inicio_periodo_liq'))
         fin    = _formatear_fecha_liq(liq.get('fin_periodo_liq'))
         filas.append((f'Liquidacion {inicio} a {fin}', None))
+        filas.append(('Valor total a transferir', liq.get('valor_total_transferir')))
 
         for _, row in liq['falta_factura'].iterrows():
             filas.append((row['Valores'], row['Total']))
