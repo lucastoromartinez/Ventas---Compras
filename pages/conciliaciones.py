@@ -1,7 +1,7 @@
 import streamlit as st
 from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
-from logica_cupones     import correr_conciliacion_cupones
+from logica_cupones     import correr_conciliacion_cupones, correr_conciliacion_cupones_con_anterior
 
 st.set_page_config(
     page_title="Conciliaciones Bancarias",
@@ -306,21 +306,43 @@ with tab_hipotecario:
 with tab_cupones:
     st.markdown("<br>", unsafe_allow_html=True)
 
+    con_anterior = st.checkbox(
+        "También tengo el mes anterior (para resolver pendientes y diferencias)",
+        key="cupones_con_anterior",
+    )
+
     col6, col7 = st.columns(2)
     with col6:
-        st.markdown('<div class="upload-label">Extracto Banco</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Extracto Banco (mes actual)</div>', unsafe_allow_html=True)
         archivo_banco_c = st.file_uploader("banco_c", type=["xlsx","xls"],
                                             label_visibility="collapsed", key="banco_c")
     with col7:
-        st.markdown('<div class="upload-label">Reporte Nave</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Reporte Nave (mes actual)</div>', unsafe_allow_html=True)
         archivo_nave_c = st.file_uploader("nave_c", type=["xlsx","xls"],
                                            label_visibility="collapsed", key="nave_c")
 
+    archivo_banco_ant = archivo_nave_ant = None
+    if con_anterior:
+        col8, col9 = st.columns(2)
+        with col8:
+            st.markdown('<div class="upload-label">Extracto Banco (mes anterior)</div>', unsafe_allow_html=True)
+            archivo_banco_ant = st.file_uploader("banco_ant", type=["xlsx","xls"],
+                                                  label_visibility="collapsed", key="banco_ant")
+        with col9:
+            st.markdown('<div class="upload-label">Reporte Nave (mes anterior)</div>', unsafe_allow_html=True)
+            archivo_nave_ant = st.file_uploader("nave_ant", type=["xlsx","xls"],
+                                                 label_visibility="collapsed", key="nave_ant")
+
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-    todos_c = all([archivo_banco_c, archivo_nave_c])
-    if not todos_c:
-        st.info("Cargá el Extracto Banco y el Reporte Nave para habilitar la conciliación.")
+    if con_anterior:
+        todos_c = all([archivo_banco_c, archivo_nave_c, archivo_banco_ant, archivo_nave_ant])
+        if not todos_c:
+            st.info("Cargá los 4 archivos (mes actual y mes anterior) para habilitar la conciliación.")
+    else:
+        todos_c = all([archivo_banco_c, archivo_nave_c])
+        if not todos_c:
+            st.info("Cargá el Extracto Banco y el Reporte Nave para habilitar la conciliación.")
 
     boton_c = st.button("CONCILIAR CUPONES", disabled=not todos_c,
                          use_container_width=True, key="btn_cupones")
@@ -328,10 +350,18 @@ with tab_cupones:
     if boton_c and todos_c:
         with st.spinner("Procesando Cupones..."):
             try:
-                buf_c, stats_c = correr_conciliacion_cupones(
-                    archivo_banco=archivo_banco_c,
-                    archivo_nave=archivo_nave_c,
-                )
+                if con_anterior:
+                    buf_c, stats_c = correr_conciliacion_cupones_con_anterior(
+                        archivo_banco_actual=archivo_banco_c,
+                        archivo_nave_actual=archivo_nave_c,
+                        archivo_banco_anterior=archivo_banco_ant,
+                        archivo_nave_anterior=archivo_nave_ant,
+                    )
+                else:
+                    buf_c, stats_c = correr_conciliacion_cupones(
+                        archivo_banco=archivo_banco_c,
+                        archivo_nave=archivo_nave_c,
+                    )
                 st.session_state["resultado_cupones"] = {"buf": buf_c, "stats": stats_c}
             except Exception as e:
                 st.error(f"Error al procesar Cupones: {e}")
@@ -365,6 +395,20 @@ with tab_cupones:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        if "pendiente_mes_anterior" in s:
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card">
+                    <div class="metric-value">{s['acreditado_mes_anterior']}</div>
+                    <div class="metric-label">Acreditado del mes anterior</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{s['pendiente_mes_anterior']}</div>
+                    <div class="metric-label">Pendiente del mes anterior</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
