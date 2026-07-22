@@ -119,7 +119,18 @@ def depurar_nave(df: pd.DataFrame) -> pd.DataFrame:
         df["Grupo de acreditación"].isna() |
         df["Grupo de acreditación"].astype(str).str.strip().isin(["", "nan", "None", "-"])
     )
-    df.loc[mask_vacio, "Grupo de acreditación"] = df.loc[mask_vacio, col_operacion]
+    # Tipo de acreditación: si Nave nunca agrupó la operación (grupo vacío/"-", se
+    # rellena con el número de operación) vs. si vino con un código de lote real.
+    df["Tipo de acreditación"] = mask_vacio.map({True: "Individual", False: "Grupo"})
+
+    # col_operacion puede ser numérico (arrastra ".0", ej. 127585397.0) o alfanumérico
+    # (ej. "JIU213094047", formato que Nave empezó a usar en meses más recientes): si
+    # es numérico, se limpia el ".0"; si no, se usa el texto tal cual.
+    raw_str = df[col_operacion].astype(str).str.strip()
+    numeros_operacion = pd.to_numeric(df[col_operacion], errors="coerce")
+    limpio = numeros_operacion.astype("Int64").astype(str)
+    limpio = limpio.where(numeros_operacion.notna(), raw_str)
+    df.loc[mask_vacio, "Grupo de acreditación"] = limpio.loc[mask_vacio]
     df["Grupo de acreditación"] = df["Grupo de acreditación"].astype(str).str.strip()
 
     # --- Redondeo de columnas float (algunos meses no traen todas) ---
@@ -143,20 +154,23 @@ def depurar_nave(df: pd.DataFrame) -> pd.DataFrame:
 # CRUCE
 # ─────────────────────────────────────────────────────────────────────────────
 
-COLUMNAS_AJUSTE = ["Retención IIBB CABA"]  # agregar acá otras deducciones si aparecen
-
-
 def cruce_nave_banco(
     df_nave_dep: pd.DataFrame,
     df_banco_acred: pd.DataFrame,
     tolerancia: float = 1.0,
+    columnas_ajuste_candidatas: list[str] = [
+        "Retención IIBB CABA",
+        "IVA del costo",
+        "Costo del servicio",
+        "Propina",
+    ],  # agregar acá otras deducciones si aparecen
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Cruza nave vs banco por Grupo de acreditación ↔ leyenda adicional1.
 
     Primero intenta matchear cada grupo contra "Monto neto" tal cual. Si no
     cierra dentro de la tolerancia, prueba restarle -una por una, y después
-    combinadas- las columnas de COLUMNAS_AJUSTE (deducciones que a veces no
+    combinadas- las columnas de columnas_ajuste_candidatas (deducciones que a veces no
     están contempladas en "Monto neto", como la Retención IIBB CABA) hasta
     encontrar la que hace que el importe coincida con el banco. La columna
     "Diferencia Identificada" en match_nave/match_banco indica qué hubo que
@@ -167,7 +181,12 @@ def cruce_nave_banco(
     faltante.
 
     falta_banco y falta_nave incluyen columna "comentario":
-        - "Falta Cupón": el código/grupo no tiene contraparte del otro lado.
+        - "Falta Cupón" (solo en falta_banco): el grupo no tiene contraparte
+          en el banco y es "Individual" (Nave nunca lo agrupó).
+        - "Falta Grupo" (solo en falta_banco): el grupo no tiene contraparte
+          en el banco y es un lote real ("Tipo de acreditación" = "Grupo").
+        - "Falta Cupón" (en falta_nave): el código de banco no tiene
+          contraparte del lado de Nave.
         - "Diferencia de Importe": el código está en ambos lados pero ningún
           ajuste probado hizo que el monto cierre dentro de la tolerancia.
         - "Falta Cancelación" (solo en falta_nave): fila de banco duplicada
@@ -176,7 +195,7 @@ def cruce_nave_banco(
 
     Retorna: (match_nave, match_banco, falta_banco, falta_nave)
     """
-    columnas_ajuste = [c for c in COLUMNAS_AJUSTE if c in df_nave_dep.columns]
+    columnas_ajuste = [c for c in columnas_ajuste_candidatas if c in df_nave_dep.columns]
 
     # 1. Sumarizar nave por grupo: Monto neto + cada columna de ajuste disponible
     nave_sum = (
@@ -241,6 +260,12 @@ def cruce_nave_banco(
     mask_left_only  = merged["_merge"] == "left_only"
     mask_right_only = merged["_merge"] == "right_only"
 
+    # Ajuste probado (matcheado o no) para cada grupo/fila de banco: se usa tanto
+    # en los matches (qué hubo que restar para que cierre) como en "Diferencia de
+    # Importe" (qué combinación se acercó más, aunque no haya cerrado).
+    ajuste_por_grupo_todos = elegidos.set_index("Grupo de acreditación")["diferencia_identificada"].to_dict()
+    ajuste_por_idx_todos   = elegidos.set_index("_banco_idx")["diferencia_identificada"].to_dict()
+
     # 6. Asignar match_id a los matches
     matches = elegidos[mask_match].copy().reset_index(drop=True)
     matches["match_id"] = [f"MATCH-{i+1:04d}" for i in range(len(matches))]
@@ -274,9 +299,21 @@ def cruce_nave_banco(
         .copy()
         .reset_index(drop=True)
     )
-    falta_banco["comentario"] = falta_banco["Grupo de acreditación"].map(
-        lambda g: "Diferencia de Importe" if g in grupos_diferencia else "Falta Cupón"
+    def comentario_nave(row):
+        if row["Grupo de acreditación"] in grupos_diferencia:
+            return "Diferencia de Importe"
+        return "Falta Grupo" if row["Tipo de acreditación"] == "Grupo" else "Falta Cupón"
+
+    falta_banco["comentario"] = falta_banco.apply(comentario_nave, axis=1)
+    # Para "Diferencia de Importe": qué combinación de columnas se acercó más al
+    # importe del banco (aunque no haya cerrado dentro de la tolerancia).
+    falta_banco["Diferencia Identificada"] = (
+        falta_banco["Grupo de acreditación"].map(ajuste_por_grupo_todos).fillna("")
     )
+    falta_banco.loc[
+        (falta_banco["comentario"] == "Diferencia de Importe") & (falta_banco["Diferencia Identificada"] == ""),
+        "Diferencia Identificada",
+    ] = "Sin explicar (ninguna combinación de deducciones se acerca)"
 
     # 10. falta_nave: filas de banco sin match, con motivo
     idx_falta_cupon = set(merged.loc[mask_right_only, "_banco_idx"].dropna().astype(int))
@@ -292,9 +329,137 @@ def cruce_nave_banco(
     idx_sin_match = idx_falta_cupon | idx_diferencia | duplicados_idx
     falta_nave = banco[banco["_banco_idx"].isin(idx_sin_match)].copy()
     falta_nave["comentario"] = falta_nave["_banco_idx"].map(comentario_banco)
+    # Para "Diferencia de Importe": qué combinación de columnas se acercó más al
+    # importe del banco (aunque no haya cerrado dentro de la tolerancia).
+    falta_nave["Diferencia Identificada"] = (
+        falta_nave["_banco_idx"].map(ajuste_por_idx_todos).fillna("")
+    )
+    falta_nave.loc[
+        (falta_nave["comentario"] == "Diferencia de Importe") & (falta_nave["Diferencia Identificada"] == ""),
+        "Diferencia Identificada",
+    ] = "Sin explicar (ninguna combinación de deducciones se acerca)"
     falta_nave = falta_nave.drop(columns=["_banco_idx"]).reset_index(drop=True)
 
     return match_nave, match_banco, falta_banco, falta_nave
+
+
+def resolver_con_mes_anterior(
+    df_nave_actual_dep: pd.DataFrame,
+    df_banco_actual_acred: pd.DataFrame,
+    df_nave_anterior_dep: pd.DataFrame,
+    df_banco_anterior_acred: pd.DataFrame,
+    tolerancia: float = 1.0,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Cruza los pendientes del mes anterior contra los datos frescos del mes
+    actual, y reevalúa las "Diferencia de Importe" del mes actual sumando el
+    Nave completo del mes anterior. No hace falta el mes siguiente: cada mes
+    se resuelve solo con su propio par (actual, anterior).
+
+    1. Corre el cruce base del mes anterior (Nave anterior vs Banco anterior)
+       para sacar su propio falta_banco al vuelo (no hace falta que esté
+       guardado de una corrida previa).
+    2. Corre el cruce base del mes actual (Nave actual vs Banco actual), el
+       de siempre.
+    3. Resuelve el falta_banco del mes anterior contra el mes actual:
+        - "Falta Cupón" (individual): busca el código en el banco actual,
+          match exacto (tolerancia) contra Monto neto. No suma nada, es una
+          operación atómica.
+        - "Falta Grupo" (lote): suma Monto neto del mes anterior + Monto
+          neto del mes actual (mismo grupo) y compara contra el banco
+          actual, por si el lote siguió sumando ventas del mes actual antes
+          de cerrarse.
+    4. Reevalúa "Diferencia de Importe" del mes actual sumando el Monto neto
+       del mes anterior COMPLETO (no solo su pendiente) al del mes actual,
+       para el mismo grupo, contra el banco actual — el lote arrancó antes
+       del mes actual, así que la pieza que falta está del lado del Nave
+       anterior completo.
+
+    Retorna:
+        match_nave, match_banco: del cruce base del mes actual, sin tocar.
+        falta_nave: del cruce base del mes actual, sin tocar (falta_nave del
+            mes anterior tampoco se toca, no se devuelve — ver nota abajo).
+        falta_banco_actual_actualizado: falta_banco del mes actual, sacando
+            las "Diferencia de Importe" que cerraron sumando el mes
+            anterior.
+        falta_banco_anterior_pendiente: lo que quedó pendiente del mes
+            anterior después de intentar resolverlo con el mes actual (para
+            seguir arrastrando al mes que viene).
+        mes_anterior_acreditado: filas que se resolvieron en esta pasada
+            (pendientes del mes anterior que ya se acreditaron, o
+            diferencias del mes actual que cerraron sumando el mes
+            anterior), con columna "resolucion" indicando el motivo.
+
+    Nota: falta_nave del mes anterior no se cruza acá — sus "Falta Cupón" se
+    explicarían con el Nave de un mes *más* anterior todavía (dos meses
+    atrás de "actual"), fuera del alcance de esta función.
+    """
+    # 1. Cruce base del mes anterior (para sacar su propio falta_banco)
+    _, _, falta_banco_anterior, _ = cruce_nave_banco(
+        df_nave_anterior_dep, df_banco_anterior_acred, tolerancia=tolerancia
+    )
+
+    # 2. Cruce base del mes actual (el de siempre)
+    match_nave, match_banco, falta_banco_actual, falta_nave_actual = cruce_nave_banco(
+        df_nave_actual_dep, df_banco_actual_acred, tolerancia=tolerancia
+    )
+
+    banco_actual_by_leyenda  = df_banco_actual_acred.groupby("leyenda adicional1")["importe"].sum()
+    nave_actual_by_grupo     = df_nave_actual_dep.groupby("Grupo de acreditación")["Monto neto"].sum()
+    nave_anterior_by_grupo   = df_nave_anterior_dep.groupby("Grupo de acreditación")["Monto neto"].sum()
+
+    # 3. Resolver falta_banco del mes anterior contra el mes actual
+    def resolver_fila_anterior(row):
+        grupo = row["Grupo de acreditación"]
+        if row["comentario"] == "Falta Cupón":
+            monto = row["Monto neto"]
+            if grupo in banco_actual_by_leyenda.index and abs(monto - banco_actual_by_leyenda[grupo]) <= tolerancia:
+                return "Acreditado en el mes actual"
+            return None
+        if row["comentario"] == "Falta Grupo":
+            monto_total = nave_anterior_by_grupo.get(grupo, 0) + nave_actual_by_grupo.get(grupo, 0)
+            if grupo in banco_actual_by_leyenda.index and abs(monto_total - banco_actual_by_leyenda[grupo]) <= tolerancia:
+                return "Cierra sumando el mes actual"
+            return None
+        return None  # "Diferencia de Importe" del mes anterior no se toca acá
+
+    falta_banco_anterior = falta_banco_anterior.copy()
+    falta_banco_anterior["resolucion"] = falta_banco_anterior.apply(resolver_fila_anterior, axis=1)
+
+    mes_anterior_acreditado_anterior = falta_banco_anterior[falta_banco_anterior["resolucion"].notna()].copy()
+    falta_banco_anterior_pendiente = (
+        falta_banco_anterior[falta_banco_anterior["resolucion"].isna()]
+        .drop(columns=["resolucion"])
+        .reset_index(drop=True)
+    )
+
+    # 4. Reevaluar "Diferencia de Importe" del mes actual sumando el Nave
+    #    COMPLETO del mes anterior (no solo su pendiente)
+    di_mask = falta_banco_actual["comentario"] == "Diferencia de Importe"
+    grupos_di = falta_banco_actual.loc[di_mask, "Grupo de acreditación"].unique()
+
+    def reevaluar_diferencia(grupo):
+        monto_total = nave_anterior_by_grupo.get(grupo, 0) + nave_actual_by_grupo.get(grupo, 0)
+        importe_banco = banco_actual_by_leyenda.get(grupo, None)
+        if importe_banco is not None and abs(monto_total - importe_banco) <= tolerancia:
+            return "Cierra sumando el mes anterior"
+        return None
+
+    resolucion_di = {g: reevaluar_diferencia(g) for g in grupos_di}
+
+    falta_banco_actual = falta_banco_actual.copy()
+    falta_banco_actual["resolucion"] = falta_banco_actual["Grupo de acreditación"].map(resolucion_di)
+
+    mes_anterior_acreditado_actual = falta_banco_actual[falta_banco_actual["resolucion"].notna()].copy()
+    falta_banco_actual_actualizado = (
+        falta_banco_actual[falta_banco_actual["resolucion"].isna()]
+        .drop(columns=["resolucion"])
+        .reset_index(drop=True)
+    )
+
+    mes_anterior_acreditado = pd.concat([mes_anterior_acreditado_anterior, mes_anterior_acreditado_actual], ignore_index=True)
+
+    return match_nave, match_banco, falta_nave_actual, falta_banco_actual_actualizado, falta_banco_anterior_pendiente, mes_anterior_acreditado
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,4 +504,64 @@ def correr_conciliacion_cupones(archivo_banco, archivo_nave, tolerancia: float =
     }
 
     buf = generar_excel_en_memoria_cupones(match_nave, match_banco, falta_banco, falta_nave)
+    return buf, stats
+
+
+def generar_excel_en_memoria_cupones_con_anterior(
+    match_nave, match_banco, falta_nave, falta_banco,
+    falta_banco_mes_anterior, mes_anterior_acreditado,
+) -> bytes:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        match_nave.to_excel(writer,               sheet_name="Match Nave",              index=False)
+        match_banco.to_excel(writer,               sheet_name="Match Banco",             index=False)
+        falta_banco.to_excel(writer,               sheet_name="Falta Banco",             index=False)
+        falta_nave.to_excel(writer,                sheet_name="Falta Nave",              index=False)
+        falta_banco_mes_anterior.to_excel(writer,  sheet_name="Pendiente Mes Anterior",  index=False)
+        mes_anterior_acreditado.to_excel(writer,   sheet_name="Acreditado Mes Anterior", index=False)
+    return buf.getvalue()
+
+
+def correr_conciliacion_cupones_con_anterior(
+    archivo_banco_actual, archivo_nave_actual,
+    archivo_banco_anterior, archivo_nave_anterior,
+    tolerancia: float = 1.0,
+):
+    # 1. Cargar los 4 adjuntos
+    df_banco_actual    = importar_extracto_banco(archivo_banco_actual)
+    df_nave_actual     = importar_reporte_nave(archivo_nave_actual)
+    df_banco_anterior  = importar_extracto_banco(archivo_banco_anterior)
+    df_nave_anterior   = importar_reporte_nave(archivo_nave_anterior)
+
+    # 2. Depurar
+    df_banco_actual_acred    = depurar_leyenda(df_banco_actual)
+    df_nave_actual_dep       = depurar_nave(df_nave_actual)
+    df_banco_anterior_acred  = depurar_leyenda(df_banco_anterior)
+    df_nave_anterior_dep     = depurar_nave(df_nave_anterior)
+
+    # 3. Cruzar mes actual + resolver contra mes anterior
+    (
+        match_nave, match_banco, falta_nave, falta_banco,
+        falta_banco_mes_anterior, mes_anterior_acreditado,
+    ) = resolver_con_mes_anterior(
+        df_nave_actual_dep, df_banco_actual_acred,
+        df_nave_anterior_dep, df_banco_anterior_acred,
+        tolerancia=tolerancia,
+    )
+
+    match_ajustado = int((match_banco["Diferencia Identificada"].fillna("") != "").sum())
+
+    stats = {
+        "grupos_matcheados":        len(match_banco),
+        "match_ajustado":           match_ajustado,
+        "falta_banco":              len(falta_banco),
+        "falta_nave":               len(falta_nave),
+        "pendiente_mes_anterior":   len(falta_banco_mes_anterior),
+        "acreditado_mes_anterior":  len(mes_anterior_acreditado),
+    }
+
+    buf = generar_excel_en_memoria_cupones_con_anterior(
+        match_nave, match_banco, falta_nave, falta_banco,
+        falta_banco_mes_anterior, mes_anterior_acreditado,
+    )
     return buf, stats
