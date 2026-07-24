@@ -57,6 +57,7 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .btn-ventas  > div > button { background: #00aaff !important; color: #0f0f0f !important; }
 .btn-concil  > div > button { background: #ff6b35 !important; color: #0f0f0f !important; }
 .btn-pdfs    > div > button { background: #c084fc !important; color: #0f0f0f !important; }
+.btn-rappi   > div > button { background: #FF441F !important; color: #0f0f0f !important; }
 .footer {
     text-align: center;
     font-family: 'IBM Plex Mono', monospace;
@@ -95,12 +96,17 @@ st.markdown("""
         <div class="card-title">Lector PDFs</div>
         <div class="card-desc">Liquidaciones Payway a Excel</div>
     </div>
+    <div class="card">
+        <div class="card-icon">🛵</div>
+        <div class="card-title">Rappi</div>
+        <div class="card-desc">Liquidaciones y conciliación Atalaya</div>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.markdown('<div class="btn-compras">', unsafe_allow_html=True)
     if st.button("🧾 COMPRAS", use_container_width=True):
@@ -123,6 +129,12 @@ with col4:
     st.markdown('<div class="btn-pdfs">', unsafe_allow_html=True)
     if st.button("📷 LECTOR PDFs", use_container_width=True):
         st.switch_page("pages/lector_pdfs.py")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col5:
+    st.markdown('<div class="btn-rappi">', unsafe_allow_html=True)
+    if st.button("🛵 RAPPI", use_container_width=True):
+        st.switch_page("pages/rappi.py")
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("""
