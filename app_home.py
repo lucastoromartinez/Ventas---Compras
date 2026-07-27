@@ -29,42 +29,46 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 }
 
 /* --- Cards que son, a la vez, el botón --- */
-.card-btn {
+div[class*="st-key-card_"] {
     position: relative;
     margin-bottom: 1.2rem;
 }
-.card-btn .card-visual {
+div[class*="st-key-card_"] .card-visual {
     background: #1a1a1a;
     border: 1px solid #2a2a2a;
     border-radius: 10px;
     padding: 1.6rem 1rem;
     text-align: center;
-    height: 100%;
     pointer-events: none;
     transition: border-color 0.15s, transform 0.15s;
 }
-.card-btn .card-icon { font-size: 2rem; margin-bottom: 0.8rem; }
-.card-btn .card-title {
+div[class*="st-key-card_"] .card-icon { font-size: 2rem; margin-bottom: 0.8rem; }
+div[class*="st-key-card_"] .card-title {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.85rem; font-weight: 600;
     color: #ffffff; margin-bottom: 0.4rem;
 }
-.card-btn .card-desc { font-size: 0.7rem; color: #666; line-height: 1.4; }
+div[class*="st-key-card_"] .card-desc { font-size: 0.7rem; color: #666; line-height: 1.4; }
 
-.card-btn [data-testid="stButton"] {
-    position: absolute; inset: 0; margin: 0; z-index: 2;
+div[class*="st-key-card_"] [data-testid="stElementContainer"]:has(button) {
+    position: absolute !important; inset: 0 !important;
+    margin: 0 !important; padding: 0 !important;
+    width: 100% !important; height: 100% !important;
+    z-index: 2;
 }
-.card-btn [data-testid="stButton"] > button {
-    position: absolute; inset: 0;
-    width: 100%; height: 100%;
-    opacity: 0; cursor: pointer; padding: 0; border: none;
+div[class*="st-key-card_"] button {
+    position: absolute !important; inset: 0 !important;
+    width: 100% !important; height: 100% !important;
+    margin: 0 !important; padding: 0 !important;
+    opacity: 0 !important; cursor: pointer !important;
+    border: none !important; background: transparent !important;
 }
-.card-btn:hover .card-visual { transform: translateY(-3px); }
-.card-btn.acc-compras:hover .card-visual { border-color: #00ff87; }
-.card-btn.acc-ventas:hover .card-visual  { border-color: #00aaff; }
-.card-btn.acc-concil:hover .card-visual  { border-color: #ff6b35; }
-.card-btn.acc-pdfs:hover .card-visual    { border-color: #c084fc; }
-.card-btn.acc-rappi:hover .card-visual   { border-color: #FF441F; }
+div[class*="st-key-card_"]:hover .card-visual { transform: translateY(-3px); }
+.st-key-card_compras:hover .card-visual { border-color: #00ff87; }
+.st-key-card_ventas:hover .card-visual  { border-color: #00aaff; }
+.st-key-card_concil:hover .card-visual  { border-color: #ff6b35; }
+.st-key-card_pdfs:hover .card-visual    { border-color: #c084fc; }
+.st-key-card_rappi:hover .card-visual   { border-color: #FF441F; }
 
 .footer {
     text-align: center;
@@ -83,30 +87,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def card(col, key, accent, icon, title, desc, page):
+def card(col, accent, icon, title, desc, page):
     with col:
-        st.markdown(f'<div class="card-btn acc-{accent}">', unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="card-visual">
-            <div class="card-icon">{icon}</div>
-            <div class="card-title">{title}</div>
-            <div class="card-desc">{desc}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        clicked = st.button(f"{title} - {desc}", key=key)
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(key=f"card_{accent}"):
+            st.markdown(f"""
+            <div class="card-visual">
+                <div class="card-icon">{icon}</div>
+                <div class="card-title">{title}</div>
+                <div class="card-desc">{desc}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            clicked = st.button(f"{title} - {desc}", key=f"nav_{accent}")
         if clicked:
             st.switch_page(page)
 
 
 row1 = st.columns(3, gap="medium")
-card(row1[0], "nav_compras", "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "pages/compras.py")
-card(row1[1], "nav_ventas", "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
-card(row1[2], "nav_concil", "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
+card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "pages/compras.py")
+card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
+card(row1[2], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
 
 row2 = st.columns([1, 2, 2, 1], gap="medium")
-card(row2[1], "nav_pdfs", "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
-card(row2[2], "nav_rappi", "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
+card(row2[1], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
+card(row2[2], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
