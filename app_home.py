@@ -2,7 +2,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Sistema de Cruces",
-    page_icon="⚡",
+    page_icon="🧮",
     layout="centered",
 )
 
@@ -27,37 +27,45 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     margin: 0.5rem 0 0 0;
     letter-spacing: 2px; text-transform: uppercase;
 }
-.card-row {
-    display: flex; gap: 1rem;
-    margin: 2.5rem 0 1rem 0; justify-content: center;
-    flex-wrap: wrap;
+
+/* --- Cards que son, a la vez, el botón --- */
+.card-btn {
+    position: relative;
+    margin-bottom: 1.2rem;
 }
-.card {
-    flex: 1; background: #1a1a1a;
-    border: 1px solid #2a2a2a; border-radius: 10px;
-    padding: 1.5rem 1rem; text-align: center;
-    max-width: 180px; min-width: 130px;
+.card-btn .card-visual {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 1.6rem 1rem;
+    text-align: center;
+    height: 100%;
+    pointer-events: none;
+    transition: border-color 0.15s, transform 0.15s;
 }
-.card .card-icon { font-size: 2rem; margin-bottom: 0.8rem; }
-.card .card-title {
+.card-btn .card-icon { font-size: 2rem; margin-bottom: 0.8rem; }
+.card-btn .card-title {
     font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.8rem; font-weight: 600;
+    font-size: 0.85rem; font-weight: 600;
     color: #ffffff; margin-bottom: 0.4rem;
 }
-.card .card-desc { font-size: 0.7rem; color: #555; line-height: 1.4; }
-.stButton > button {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.8rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 6px !important; padding: 0.7rem 1rem !important;
-    width: 100% !important; transition: opacity 0.2s !important;
+.card-btn .card-desc { font-size: 0.7rem; color: #666; line-height: 1.4; }
+
+.card-btn [data-testid="stButton"] {
+    position: absolute; inset: 0; margin: 0; z-index: 2;
 }
-.stButton > button:hover { opacity: 0.85 !important; }
-.btn-compras > div > button { background: #00ff87 !important; color: #0f0f0f !important; }
-.btn-ventas  > div > button { background: #00aaff !important; color: #0f0f0f !important; }
-.btn-concil  > div > button { background: #ff6b35 !important; color: #0f0f0f !important; }
-.btn-pdfs    > div > button { background: #c084fc !important; color: #0f0f0f !important; }
-.btn-rappi   > div > button { background: #FF441F !important; color: #0f0f0f !important; }
+.card-btn [data-testid="stButton"] > button {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0; cursor: pointer; padding: 0; border: none;
+}
+.card-btn:hover .card-visual { transform: translateY(-3px); }
+.card-btn.acc-compras:hover .card-visual { border-color: #00ff87; }
+.card-btn.acc-ventas:hover .card-visual  { border-color: #00aaff; }
+.card-btn.acc-concil:hover .card-visual  { border-color: #ff6b35; }
+.card-btn.acc-pdfs:hover .card-visual    { border-color: #c084fc; }
+.card-btn.acc-rappi:hover .card-visual   { border-color: #FF441F; }
+
 .footer {
     text-align: center;
     font-family: 'IBM Plex Mono', monospace;
@@ -69,73 +77,36 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
 st.markdown("""
 <div class="hero">
-    <h1>⚡ Sistema de Cruces</h1>
-    <p>ARCA &nbsp;×&nbsp; Sistema Interno</p>
+    <h1>🧮 Sistema de Cruces</h1>
+    <p>Contabilidad Enter</p>
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<div class="card-row">
-    <div class="card">
-        <div class="card-icon">🧾</div>
-        <div class="card-title">Compras</div>
-        <div class="card-desc">Comprobantes recibidos vs ARCA</div>
-    </div>
-    <div class="card">
-        <div class="card-icon">📊</div>
-        <div class="card-title">Ventas</div>
-        <div class="card-desc">Comprobantes emitidos vs ARCA</div>
-    </div>
-    <div class="card">
-        <div class="card-icon">🏦</div>
-        <div class="card-title">Conciliaciones</div>
-        <div class="card-desc">Mayor vs extracto bancario</div>
-    </div>
-    <div class="card">
-        <div class="card-icon">📷</div>
-        <div class="card-title">Lector PDFs</div>
-        <div class="card-desc">Liquidaciones Payway a Excel</div>
-    </div>
-    <div class="card">
-        <div class="card-icon">🛵</div>
-        <div class="card-title">Rappi</div>
-        <div class="card-desc">Liquidaciones y conciliación Atalaya</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
+def card(col, key, accent, icon, title, desc, page):
+    with col:
+        st.markdown(f'<div class="card-btn acc-{accent}">', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="card-visual">
+            <div class="card-icon">{icon}</div>
+            <div class="card-title">{title}</div>
+            <div class="card-desc">{desc}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        clicked = st.button(f"{title} - {desc}", key=key)
+        st.markdown('</div>', unsafe_allow_html=True)
+        if clicked:
+            st.switch_page(page)
 
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.markdown('<div class="btn-compras">', unsafe_allow_html=True)
-    if st.button("🧾 COMPRAS", use_container_width=True):
-        st.switch_page("pages/compras.py")
-    st.markdown('</div>', unsafe_allow_html=True)
 
-with col2:
-    st.markdown('<div class="btn-ventas">', unsafe_allow_html=True)
-    if st.button("📊 VENTAS", use_container_width=True):
-        st.switch_page("pages/ventas.py")
-    st.markdown('</div>', unsafe_allow_html=True)
+row1 = st.columns(3, gap="medium")
+card(row1[0], "nav_compras", "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "pages/compras.py")
+card(row1[1], "nav_ventas", "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
+card(row1[2], "nav_concil", "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
 
-with col3:
-    st.markdown('<div class="btn-concil">', unsafe_allow_html=True)
-    if st.button("🏦 CONCILIACIONES", use_container_width=True):
-        st.switch_page("pages/conciliaciones.py")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with col4:
-    st.markdown('<div class="btn-pdfs">', unsafe_allow_html=True)
-    if st.button("📷 LECTOR PDFs", use_container_width=True):
-        st.switch_page("pages/lector_pdfs.py")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-with col5:
-    st.markdown('<div class="btn-rappi">', unsafe_allow_html=True)
-    if st.button("🛵 RAPPI", use_container_width=True):
-        st.switch_page("pages/rappi.py")
-    st.markdown('</div>', unsafe_allow_html=True)
+row2 = st.columns([1, 2, 2, 1], gap="medium")
+card(row2[1], "nav_pdfs", "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
+card(row2[2], "nav_rappi", "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
