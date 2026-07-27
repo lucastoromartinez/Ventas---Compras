@@ -120,8 +120,9 @@ def depurar_atalaya(df):
 # ─────────────────────────────────────────────
 
 def cruzar_rappi_atalaya(df_rappi_dep, df_atalaya_dep):
+    # Se descartan únicamente las filas de Rappi sin Fecha de creación orden.
     rappi = df_rappi_dep[
-        df_rappi_dep["Estado de la órden"].str.contains("pending_review", na=False)
+        df_rappi_dep["Fecha de creación orden"].notna()
     ].reset_index(drop=True).copy()
     atalaya = df_atalaya_dep[
         df_atalaya_dep["Medio Pago"].str.contains("RAPPI", na=False)
@@ -130,17 +131,31 @@ def cruzar_rappi_atalaya(df_rappi_dep, df_atalaya_dep):
     rappi["_id_rappi"] = rappi.index
     atalaya["_id_atalaya"] = atalaya.index
 
-    r_pool = rappi.copy()
-    a_pool = atalaya.copy()
-    r_pool["_rank"] = r_pool.groupby(["Fecha de creación orden", "Ventas Totales"]).cumcount()
-    a_pool["_rank"] = a_pool.groupby(["Fecha", "CON IVA"]).cumcount()
+    es_pending = rappi["Estado de la órden"].str.contains("pending_review", na=False)
+    rappi_pending = rappi[es_pending]
+    rappi_resto = rappi[~es_pending]
 
-    pares = r_pool.merge(
-        a_pool[["Fecha", "CON IVA", "_rank", "_id_atalaya"]],
-        left_on=["Fecha de creación orden", "Ventas Totales", "_rank"],
-        right_on=["Fecha", "CON IVA", "_rank"],
-        how="inner"
-    )[["_id_rappi", "_id_atalaya"]]
+    def emparejar(r_pool, a_pool):
+        r_pool = r_pool.copy()
+        a_pool = a_pool.copy()
+        r_pool["_rank"] = r_pool.groupby(["Fecha de creación orden", "Ventas Totales"]).cumcount()
+        a_pool["_rank"] = a_pool.groupby(["Fecha", "CON IVA"]).cumcount()
+        merged = r_pool.merge(
+            a_pool[["Fecha", "CON IVA", "_rank", "_id_atalaya"]],
+            left_on=["Fecha de creación orden", "Ventas Totales", "_rank"],
+            right_on=["Fecha", "CON IVA", "_rank"],
+            how="inner"
+        )
+        return merged[["_id_rappi", "_id_atalaya"]]
+
+    # Etapa 1: pending_review tiene prioridad para matchear.
+    pares_pending = emparejar(rappi_pending, atalaya)
+
+    # Etapa 2: lo que sobra de Atalaya se cruza contra el resto de Rappi.
+    atalaya_restante = atalaya[~atalaya["_id_atalaya"].isin(pares_pending["_id_atalaya"])]
+    pares_resto = emparejar(rappi_resto, atalaya_restante)
+
+    pares = pd.concat([pares_pending, pares_resto], ignore_index=True)
 
     match_rappi = rappi[rappi["_id_rappi"].isin(pares["_id_rappi"])].drop(columns=["_id_rappi"])
     match_atalaya = atalaya[atalaya["_id_atalaya"].isin(pares["_id_atalaya"])].drop(columns=["_id_atalaya"])
