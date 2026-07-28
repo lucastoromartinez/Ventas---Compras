@@ -577,7 +577,8 @@ def construir_cuadro_conceptos(liquidaciones):
         filas.append(('Valor total a transferir', liq.get('valor_total_transferir')))
 
         for _, row in liq['falta_factura'].iterrows():
-            filas.append((row['Valores'], row['Total']))
+            concepto = re.sub(r'^SUM of ', '', str(row['Valores']), flags=re.IGNORECASE)
+            filas.append((concepto, row['Total']))
 
         for factura in liq['facturas_publicidad'] + liq['facturas_servicios']:
             filas.append((factura['nro_factura'], factura.get('total_factura')))
