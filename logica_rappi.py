@@ -12,6 +12,30 @@ import pdfplumber
 # IMPORTAR LIQUIDACIONES (múltiples Excel)
 # ─────────────────────────────────────────────
 
+def _leer_nombre_tienda(wb):
+    """Hoja 'Detalle': encabezados en la fila 2, solo se necesita la fila 3
+    (una orden alcanza para identificar la tienda de esta liquidación)."""
+    if 'Detalle' not in wb.sheetnames:
+        return None
+    ws_det = wb['Detalle']
+    headers = [c.value for c in ws_det[2]]
+    if 'Nombre de la tienda' not in headers:
+        return None
+    idx = headers.index('Nombre de la tienda')
+    fila_datos = [c.value for c in ws_det[3]]
+    return fila_datos[idx] if idx < len(fila_datos) else None
+
+
+def _determinar_reporte(nombre_aliado, nombre_tienda):
+    aliado = (nombre_aliado or '').strip().upper()
+    tienda = (nombre_tienda or '').strip().upper()
+    if 'ENTRETENIMIENTOS AVELLANEDA' in aliado:
+        return 'Dean' if 'DEAN & DENNYS' in tienda else 'HIO'
+    if 'PASEO RONDA' in aliado:
+        return 'Atalaya' if 'ATALAYA' in tienda else 'HIO'
+    return 'HIO'
+
+
 def importar_liquidaciones(archivos):
     liquidaciones = []
     for archivo in archivos:
@@ -21,6 +45,8 @@ def importar_liquidaciones(archivos):
         id_pago            = ws.cell(row=7, column=4).value
         inicio_periodo_liq = ws.cell(row=3, column=4).value
         fin_periodo_liq    = ws.cell(row=4, column=4).value
+        nombre_aliado      = ws.cell(row=6, column=4).value
+        nombre_tienda      = _leer_nombre_tienda(wb)
 
         merged_ranges = list(ws.merged_cells.ranges)
         for rango in merged_ranges:
@@ -49,11 +75,21 @@ def importar_liquidaciones(archivos):
         fila_total = df[df['Grupo'] == 'Valor total a transferir']
         valor_total_transferir = round(fila_total['Total'].iloc[0], 2) if not fila_total.empty else None
 
+        fila_venta_bruta = df[df['Valores'] == 'SUM of Venta Bruta']
+        venta_bruta = round(fila_venta_bruta['Total'].iloc[0], 2) if not fila_venta_bruta.empty else None
+
+        fila_desc_prod = df[df['Valores'] == 'SUM of Descuento de Producto']
+        descuento_producto = round(fila_desc_prod['Total'].iloc[0], 2) if not fila_desc_prod.empty else None
+
         liquidaciones.append({
             'id_pago':                id_pago,
             'inicio_periodo_liq':     inicio_periodo_liq,
             'fin_periodo_liq':        fin_periodo_liq,
             'valor_total_transferir': valor_total_transferir,
+            'periodo_str':            f'{inicio_periodo_liq} al {fin_periodo_liq}',
+            'reporte':                _determinar_reporte(nombre_aliado, nombre_tienda),
+            'venta_bruta':            venta_bruta,
+            'descuento_producto':     descuento_producto,
             'df':                     df,
         })
     return liquidaciones
@@ -72,6 +108,19 @@ def depurar_liquidaciones(liquidaciones):
         df['Total'] = df['Total'].round(2)
         liq['df'] = df.reset_index(drop=True)
     return liquidaciones
+
+
+def construir_resumen_extracto(liquidaciones):
+    filas = [
+        {
+            'Periodo':               liq.get('periodo_str'),
+            'Reporte':               liq.get('reporte'),
+            'Venta Bruta':           liq.get('venta_bruta'),
+            'Descuento de Producto': liq.get('descuento_producto'),
+        }
+        for liq in liquidaciones
+    ]
+    return pd.DataFrame(filas, columns=['Periodo', 'Reporte', 'Venta Bruta', 'Descuento de Producto'])
 
 
 # ─────────────────────────────────────────────
@@ -600,6 +649,8 @@ def correr_rappi(archivos_liq, archivos_pdf):
     liquidaciones = importar_liquidaciones(archivos_liq)
     liquidaciones = depurar_liquidaciones(liquidaciones)
 
+    df_resumen_extracto = construir_resumen_extracto(liquidaciones)
+
     facturas = importar_facturas(archivos_pdf)
     facturas = depurar_facturas(facturas)
 
@@ -648,6 +699,17 @@ def correr_rappi(archivos_liq, archivos_pdf):
         wb_cuadro.save(buf_cuadro)
         buf_cuadro.seek(0)
         zf.writestr('cuadro_conceptos.xlsx', buf_cuadro.read())
+
+        buf_extracto = io.BytesIO()
+        with pd.ExcelWriter(buf_extracto, engine='openpyxl') as writer:
+            df_resumen_extracto.to_excel(writer, index=False, sheet_name='resumen_extracto')
+            ws_extracto = writer.sheets['resumen_extracto']
+            for col_name in ['Venta Bruta', 'Descuento de Producto']:
+                col_letter = get_column_letter(df_resumen_extracto.columns.get_loc(col_name) + 1)
+                for cell in ws_extracto[col_letter][1:]:
+                    cell.number_format = '$ #,##0.00'
+        buf_extracto.seek(0)
+        zf.writestr('resumen_extracto.xlsx', buf_extracto.read())
 
     zip_buf.seek(0)
 
