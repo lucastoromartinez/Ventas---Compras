@@ -700,39 +700,69 @@ def cruce3(
 
 
 # ─────────────────────────────────────────────
+# NETEAR FALTA_SISTEMA: comprobantes del mismo proveedor
+# que se cancelan entre sí (mismo criterio que la fórmula de Excel)
+# ─────────────────────────────────────────────
+
+def netear_falta_sistema(
+    falta_sistema: pd.DataFrame,
+    tol_pesos: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Dentro de falta_sistema, agrupa por proveedor (cuit_arca) y busca pares
+    de comprobantes cuyos Imp. Total_arca se cancelan entre sí (suma ~0,
+    tolerancia +/- tol_pesos). Esos pares se sacan del faltante: si se
+    netean, no representan una diferencia real y no hace falta buscarlos.
+
+    Resolución 1 a 1 por proveedor: cada fila se usa como máximo en un par.
+    """
+
+    df = falta_sistema.copy().reset_index(drop=True)
+    df.columns = df.columns.astype(str).str.strip()
+
+    c_cuit  = "cuit_arca"
+    c_total = "Imp. Total_arca"
+
+    df["_id"]    = df.index
+    df["_total"] = pd.to_numeric(df[c_total], errors="coerce").fillna(0.0).round(2)
+
+    usados: set[int] = set()
+
+    for _, grupo in df.groupby(c_cuit):
+        idxs    = grupo["_id"].tolist()
+        totales = grupo.set_index("_id")["_total"]
+
+        for a in range(len(idxs)):
+            id_a = idxs[a]
+            if id_a in usados:
+                continue
+            for b in range(a + 1, len(idxs)):
+                id_b = idxs[b]
+                if id_b in usados:
+                    continue
+                if abs(totales[id_a] + totales[id_b]) <= tol_pesos:
+                    usados.add(id_a)
+                    usados.add(id_b)
+                    break
+
+    falta_sistema_new = (
+        df[~df["_id"].isin(usados)]
+        .drop(columns=["_id", "_total"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    return falta_sistema_new
+
+
+# ─────────────────────────────────────────────
 # EXPORTAR A BUFFER EN MEMORIA (descargable único)
 # ─────────────────────────────────────────────
 
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
-    falta_arca: pd.DataFrame,
     falta_sistema: pd.DataFrame,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
-
-    ordered_fa = [
-        "Fecha_Sistema", "Razón Social", "cuit_sistema", "Condición",
-        "Pto. Venta_sistema", "N°Comprobante_sistema",
-        "Gravado_sistema", "No Gravado_sistema",
-        "IVA 10,5%", "IVA 21%", "IVA 27%", "Imp. Int.", "Perc. Gcias.",
-        "Perc. IVA", "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "SIRCREB",
-        "Imp. Total_sistema",
-    ]
-    rename_fa = {
-        "Fecha_Sistema":         "Fecha",
-        "cuit_sistema":          "CUIT",
-        "Pto. Venta_sistema":    "Pto. Venta",
-        "N°Comprobante_sistema": "N°Comprobante",
-        "Gravado_sistema":       "Imp. Neto Gravado",
-        "No Gravado_sistema":    "Imp. Neto No Gravado",
-        "Imp. Total_sistema":    "Total",
-    }
-    fa_out = (
-        falta_arca[[c for c in ordered_fa if c in falta_arca.columns]]
-        .copy()
-        .rename(columns=rename_fa)
-    )
-    fa_date_cols = ["Fecha"]
 
     ordered_rev = [
         "Fecha_Sistema", "Fecha_arca",
@@ -763,7 +793,6 @@ def generar_excel_en_memoria(
                 date_col_indices.append(i)
         return df, date_col_indices
 
-    fa_prep,  fa_date_idx  = _prep_df(fa_out,  fa_date_cols)
     rev_prep, rev_date_idx = _prep_df(rev_out, rev_date_cols)
     fs_prep,  fs_date_idx  = _prep_df(fs_out,  fs_date_cols)
 
@@ -793,12 +822,10 @@ def generar_excel_en_memoria(
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         rev_prep.to_excel(writer, sheet_name="revisar",       index=False)
-        fa_prep.to_excel( writer, sheet_name="falta_arca",    index=False)
         fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
 
         wb = writer.book
         _style_sheet(wb["revisar"],       rev_date_idx)
-        _style_sheet(wb["falta_arca"],    fa_date_idx)
         _style_sheet(wb["falta_sistema"], fs_date_idx)
 
     return buf.getvalue()
@@ -825,13 +852,15 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
         revisar2, falta_arca2, falta_sistema2, tol_pesos=tol_pesos
     )
 
+    falta_sistema_final = netear_falta_sistema(falta_sistema3, tol_pesos=tol_pesos)
+
     stats = {
         "match":             len(match),
         "revisar":           len(revisar3),
         "faltante_arca":     len(falta_arca3),
-        "faltante_sistema":  len(falta_sistema3),
+        "faltante_sistema":  len(falta_sistema_final),
     }
 
-    buf_reporte = generar_excel_en_memoria(revisar3, falta_arca3, falta_sistema3)
+    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final)
 
     return buf_reporte, stats
