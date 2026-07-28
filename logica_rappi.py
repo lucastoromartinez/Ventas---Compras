@@ -263,6 +263,25 @@ def depurar_facturas(facturas):
 # ASIGNACIÓN: facturas → liquidaciones
 # ─────────────────────────────────────────────
 
+def _mismo_periodo(factura, liq):
+    """True/False si se puede comparar; None si a alguno le falta el dato."""
+    f_ini, f_fin = factura.get('inicio_periodo'), factura.get('fin_periodo')
+    l_ini, l_fin = liq.get('inicio_periodo_liq'), liq.get('fin_periodo_liq')
+    if not (f_ini and f_fin and l_ini and l_fin):
+        return None
+    return f_ini == l_ini and f_fin == l_fin
+
+
+def _elegir_liquidacion(factura, candidatos):
+    """Entre liquidaciones que ya matchean por monto, desambigua por período
+    de venta. Si hay más de un candidato y no se puede confirmar cuál es por
+    período, no elige ninguno (mejor no asignar que asignar mal)."""
+    if len(candidatos) <= 1:
+        return candidatos[0] if candidatos else None
+    exactos = [liq for liq in candidatos if _mismo_periodo(factura, liq) is True]
+    return exactos[0] if len(exactos) == 1 else None
+
+
 def asignar_facturas(facturas, liquidaciones):
     TOLERANCIA = 1
     advertencias = []
@@ -272,11 +291,16 @@ def asignar_facturas(facturas, liquidaciones):
         liq['facturas_servicios']  = []
         liq['nros_factura']        = []
 
+    # Liquidaciones ya usadas para una factura de cada tipo: una vez asignada
+    # una no vuelve a ofrecerse, así facturas repetidas en monto (misma
+    # campaña, semanas distintas) no terminan todas pisando la primera.
+    ocupadas_servicios  = set()
+    ocupadas_publicidad = set()
+
     for factura in facturas:
         df_fac  = factura['df']
         tipo    = factura['tipo']
         nro_fac = factura['nro_factura']
-        asignada = False
 
         if tipo == 'servicios':
             mask_bank = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('ar-bankfeerestaurantes', na=False)
@@ -284,7 +308,10 @@ def asignar_facturas(facturas, liquidaciones):
             val_bank  = abs(df_fac.loc[mask_bank, 'P.Total'].values[0]) if mask_bank.any() else None
             val_com   = abs(df_fac.loc[mask_com,  'P.Total'].values[0]) if mask_com.any()  else None
 
+            candidatos = []
             for liq in liquidaciones:
+                if id(liq) in ocupadas_servicios:
+                    continue
                 df_liq   = liq['df']
                 mask_tar = df_liq['Valores'].str.contains('SUM of Tarifa transaccional', na=False)
                 mask_uso = df_liq['Valores'].str.contains('SUM of Uso y alquiler de plataforma Rappi', na=False)
@@ -298,28 +325,48 @@ def asignar_facturas(facturas, liquidaciones):
                     checks.append(abs(val_com - val_uso) <= TOLERANCIA)
 
                 if checks and all(checks):
-                    liq['facturas_servicios'].append(factura)
-                    liq['nros_factura'].append(nro_fac)
-                    asignada = True
-                    break
+                    candidatos.append(liq)
+
+            liq_elegida = _elegir_liquidacion(factura, candidatos)
+            if liq_elegida is not None:
+                liq_elegida['facturas_servicios'].append(factura)
+                liq_elegida['nros_factura'].append(nro_fac)
+                ocupadas_servicios.add(id(liq_elegida))
+            elif len(candidatos) > 1:
+                advertencias.append(
+                    f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
+                    "y no se pudo distinguir por período de venta"
+                )
+            else:
+                advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
 
         elif tipo == 'publicidad':
             mask_pub = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('serviciosdepublicidadindexaccionrappi', na=False)
             suma_pub = abs(df_fac.loc[mask_pub, 'P.Total'].sum()) if mask_pub.any() else None
 
+            candidatos = []
             for liq in liquidaciones:
+                if id(liq) in ocupadas_publicidad:
+                    continue
                 df_liq   = liq['df']
                 mask_ads = df_liq['Valores'].str.contains('SUM of Cuota de RappiAds', na=False)
                 val_ads  = abs(df_liq.loc[mask_ads, 'Total'].values[0]) if mask_ads.any() else None
 
                 if suma_pub is not None and val_ads is not None and abs(suma_pub - val_ads) <= TOLERANCIA:
-                    liq['facturas_publicidad'].append(factura)
-                    liq['nros_factura'].append(nro_fac)
-                    asignada = True
-                    break
+                    candidatos.append(liq)
 
-        if not asignada:
-            advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
+            liq_elegida = _elegir_liquidacion(factura, candidatos)
+            if liq_elegida is not None:
+                liq_elegida['facturas_publicidad'].append(factura)
+                liq_elegida['nros_factura'].append(nro_fac)
+                ocupadas_publicidad.add(id(liq_elegida))
+            elif len(candidatos) > 1:
+                advertencias.append(
+                    f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
+                    "y no se pudo distinguir por período de venta"
+                )
+            else:
+                advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
 
     return liquidaciones, advertencias
 
