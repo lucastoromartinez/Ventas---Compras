@@ -343,13 +343,77 @@ def cruce_nave_banco(
     return match_nave, match_banco, falta_banco, falta_nave
 
 
+def generar_tabla_resumen(falta_banco: pd.DataFrame, falta_nave: pd.DataFrame) -> pd.DataFrame:
+    """
+    Junta falta_banco y falta_nave (salida de cruce_nave_banco) en una sola
+    tabla resumen por código, al estilo de la tabla dinámica que arma el
+    equipo a mano (Grupo/N° Cupón, Importe Banco, Importe Nave, Diferencia).
+
+    - "Grupo/N°Cupón": el código — "Grupo de acreditación" de falta_banco o
+      "leyenda adicional1" de falta_nave (mismo namespace, por eso se unen).
+    - "Importe Banco": suma de "importe" (falta_nave) por código.
+    - "Importe Nave": suma de "Monto neto" (falta_banco) por código.
+    - "Diferencia": Importe Banco - Importe Nave.
+    - "Diferencia Identificada", "comentario", "Tipo de acreditación": una
+      sola columna cada una (no duplicada). Cuando el código está en ambos
+      lados coinciden; cuando está solo de un lado (Falta Cupón/Falta Grupo
+      solo en Nave, o Falta Cupón/Falta Cancelación solo en Banco), se toma
+      el valor del lado que exista. "Tipo de acreditación" solo existe del
+      lado de Nave, así que queda vacío para códigos que están solo en Banco.
+    """
+    nave_por_grupo = (
+        falta_banco
+        .groupby("Grupo de acreditación")
+        .agg(
+            **{
+                "Importe Nave": ("Monto neto", "sum"),
+                "comentario_nave": ("comentario", "first"),
+                "dif_id_nave": ("Diferencia Identificada", "first"),
+                "Tipo de acreditación": ("Tipo de acreditación", "first"),
+            }
+        )
+    )
+
+    banco_por_codigo = (
+        falta_nave
+        .groupby("leyenda adicional1")
+        .agg(
+            **{
+                "Importe Banco": ("importe", "sum"),
+                "comentario_banco": ("comentario", "first"),
+                "dif_id_banco": ("Diferencia Identificada", "first"),
+            }
+        )
+    )
+
+    tabla_resumen = nave_por_grupo.join(banco_por_codigo, how="outer")
+    tabla_resumen.index.name = "Grupo/N°Cupón"
+    tabla_resumen = tabla_resumen.reset_index()
+
+    tabla_resumen["Importe Banco"] = tabla_resumen["Importe Banco"].fillna(0.0)
+    tabla_resumen["Importe Nave"]  = tabla_resumen["Importe Nave"].fillna(0.0)
+    tabla_resumen["Diferencia"] = tabla_resumen["Importe Banco"] - tabla_resumen["Importe Nave"]
+
+    tabla_resumen["comentario"] = tabla_resumen["comentario_nave"].fillna(tabla_resumen["comentario_banco"])
+    tabla_resumen["Diferencia Identificada"] = tabla_resumen["dif_id_nave"].fillna(tabla_resumen["dif_id_banco"])
+
+    tabla_resumen = tabla_resumen.drop(columns=["comentario_nave", "comentario_banco", "dif_id_nave", "dif_id_banco"])
+    tabla_resumen = tabla_resumen[
+        ["Grupo/N°Cupón", "Importe Banco", "Importe Nave", "Diferencia",
+         "Diferencia Identificada", "comentario", "Tipo de acreditación"]
+    ]
+
+    return tabla_resumen
+
+
 def resolver_con_mes_anterior(
     df_nave_actual_dep: pd.DataFrame,
     df_banco_actual_acred: pd.DataFrame,
     df_nave_anterior_dep: pd.DataFrame,
     df_banco_anterior_acred: pd.DataFrame,
+    tabla_resumen: pd.DataFrame,
     tolerancia: float = 1.0,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Cruza los pendientes del mes anterior contra los datos frescos del mes
     actual, y reevalúa las "Diferencia de Importe" del mes actual sumando el
@@ -374,6 +438,26 @@ def resolver_con_mes_anterior(
        para el mismo grupo, contra el banco actual — el lote arrancó antes
        del mes actual, así que la pieza que falta está del lado del Nave
        anterior completo.
+    5. Recorre tabla_resumen (la del mes actual, la que ya tenías armada de
+       antes con generar_tabla_resumen — se pasa como parámetro) y agrega la
+       columna "Acreditado", mirando hacia atrás contra el Nave completo del
+       mes anterior (no contra tabla_resumen_anterior — el cruce va en el
+       sentido opuesto al del paso 3/4: acá partimos de febrero y miramos si
+       se explica con enero, no al revés):
+        - Código que está solo del lado banco en el mes actual ("Falta
+          Cupón" con "Tipo de acreditación" vacío, porque no tiene ninguna
+          fila de Nave este mes): se busca ese código en el Nave del mes
+          anterior completo (por si es una operación de un mes atrás recién
+          acreditada ahora). Si el Monto neto de esa búsqueda cierra contra
+          "Importe Banco", "Acreditado"; si no, "Por acreditar".
+        - "Diferencia de Importe" (código con datos de ambos lados este mes,
+          pero no cierra): se suma el Nave del mes anterior completo al
+          "Importe Nave" de este mes y se compara contra "Importe Banco" —
+          si cierra, "Acreditado"; si no, "Por acreditar".
+        - "Falta Cupón"/"Falta Grupo" con "Tipo de acreditación" poblado
+          (hay Nave este mes pero no banco todavía): son ventas del mes
+          actual esperando su propio crédito, no se explican mirando para
+          atrás — siempre "Por acreditar".
 
     Retorna:
         match_nave, match_banco: del cruce base del mes actual, sin tocar.
@@ -389,10 +473,14 @@ def resolver_con_mes_anterior(
             (pendientes del mes anterior que ya se acreditaron, o
             diferencias del mes actual que cerraron sumando el mes
             anterior), con columna "resolucion" indicando el motivo.
+        tabla_resumen_actualizada: tabla_resumen del mes actual (misma
+            forma que la de entrada), con la columna nueva "Acreditado"
+            ("Acreditado"/"Por acreditar").
 
-    Nota: falta_nave del mes anterior no se cruza acá — sus "Falta Cupón" se
-    explicarían con el Nave de un mes *más* anterior todavía (dos meses
-    atrás de "actual"), fuera del alcance de esta función.
+    Nota: falta_nave del mes anterior no se cruza para resolver Falta
+    Cupón/Falta Grupo (paso 3) — sus propios "Falta Cupón" se explicarían
+    con el Nave de un mes *más* anterior todavía (dos meses atrás de
+    "actual"), fuera del alcance de esta función.
     """
     # 1. Cruce base del mes anterior (para sacar su propio falta_banco)
     _, _, falta_banco_anterior, _ = cruce_nave_banco(
@@ -459,7 +547,37 @@ def resolver_con_mes_anterior(
 
     mes_anterior_acreditado = pd.concat([mes_anterior_acreditado_anterior, mes_anterior_acreditado_actual], ignore_index=True)
 
-    return match_nave, match_banco, falta_nave_actual, falta_banco_actual_actualizado, falta_banco_anterior_pendiente, mes_anterior_acreditado
+    # 5. tabla_resumen (mes actual) mirando hacia atrás contra el Nave completo
+    #    del mes anterior
+    def estado_acreditado(row):
+        codigo = row["Grupo/N°Cupón"]
+        if pd.isna(row["Tipo de acreditación"]):
+            # Falta Cupón solo del lado banco (sin Nave este mes): puede ser
+            # una operación de un mes atrás recién acreditada.
+            monto_anterior = nave_anterior_by_grupo.get(codigo, 0.0)
+            diferencia_residual = row["Importe Banco"] - monto_anterior
+        elif row["comentario"] == "Diferencia de Importe":
+            monto_total = row["Importe Nave"] + nave_anterior_by_grupo.get(codigo, 0.0)
+            diferencia_residual = row["Importe Banco"] - monto_total
+        else:
+            # Falta Cupón/Falta Grupo con Nave este mes pero sin banco todavía:
+            # venta del mes actual esperando su propio crédito, no se explica
+            # mirando para atrás.
+            return pd.Series(["Por acreditar", None])
+
+        if abs(diferencia_residual) <= tolerancia:
+            return pd.Series(["Acreditado", None])
+        return pd.Series(["Por acreditar", diferencia_residual])
+
+    tabla_resumen_actualizada = tabla_resumen.copy()
+    tabla_resumen_actualizada[["Acreditado", "Diferencia Residual"]] = (
+        tabla_resumen_actualizada.apply(estado_acreditado, axis=1)
+    )
+
+    return (
+        match_nave, match_banco, falta_nave_actual, falta_banco_actual_actualizado,
+        falta_banco_anterior_pendiente, mes_anterior_acreditado, tabla_resumen_actualizada,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,7 +627,7 @@ def correr_conciliacion_cupones(archivo_banco, archivo_nave, tolerancia: float =
 
 def generar_excel_en_memoria_cupones_con_anterior(
     match_nave, match_banco, falta_nave, falta_banco,
-    falta_banco_mes_anterior, mes_anterior_acreditado,
+    falta_banco_mes_anterior, mes_anterior_acreditado, tabla_resumen_actualizada,
 ) -> bytes:
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -519,6 +637,7 @@ def generar_excel_en_memoria_cupones_con_anterior(
         falta_nave.to_excel(writer,                sheet_name="Falta Nave",              index=False)
         falta_banco_mes_anterior.to_excel(writer,  sheet_name="Pendiente Mes Anterior",  index=False)
         mes_anterior_acreditado.to_excel(writer,   sheet_name="Acreditado Mes Anterior", index=False)
+        tabla_resumen_actualizada.to_excel(writer, sheet_name="Tabla Resumen",           index=False)
     return buf.getvalue()
 
 
@@ -539,13 +658,20 @@ def correr_conciliacion_cupones_con_anterior(
     df_banco_anterior_acred  = depurar_leyenda(df_banco_anterior)
     df_nave_anterior_dep     = depurar_nave(df_nave_anterior)
 
-    # 3. Cruzar mes actual + resolver contra mes anterior
+    # 3. tabla_resumen del mes actual (insumo de resolver_con_mes_anterior)
+    _, _, falta_banco_actual0, falta_nave_actual0 = cruce_nave_banco(
+        df_nave_actual_dep, df_banco_actual_acred, tolerancia=tolerancia
+    )
+    tabla_resumen = generar_tabla_resumen(falta_banco_actual0, falta_nave_actual0)
+
+    # 4. Cruzar mes actual + resolver contra mes anterior
     (
         match_nave, match_banco, falta_nave, falta_banco,
-        falta_banco_mes_anterior, mes_anterior_acreditado,
+        falta_banco_mes_anterior, mes_anterior_acreditado, tabla_resumen_actualizada,
     ) = resolver_con_mes_anterior(
         df_nave_actual_dep, df_banco_actual_acred,
         df_nave_anterior_dep, df_banco_anterior_acred,
+        tabla_resumen,
         tolerancia=tolerancia,
     )
 
@@ -562,6 +688,6 @@ def correr_conciliacion_cupones_con_anterior(
 
     buf = generar_excel_en_memoria_cupones_con_anterior(
         match_nave, match_banco, falta_nave, falta_banco,
-        falta_banco_mes_anterior, mes_anterior_acreditado,
+        falta_banco_mes_anterior, mes_anterior_acreditado, tabla_resumen_actualizada,
     )
     return buf, stats
