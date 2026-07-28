@@ -584,13 +584,14 @@ def resolver_con_mes_anterior(
 # EXPORTAR EN MEMORIA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generar_excel_en_memoria_cupones(match_nave, match_banco, falta_banco, falta_nave) -> bytes:
+def generar_excel_en_memoria_cupones(match_nave, match_banco, falta_banco, falta_nave, tabla_resumen) -> bytes:
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        match_nave.to_excel(writer,  sheet_name="Match Nave",   index=False)
-        match_banco.to_excel(writer, sheet_name="Match Banco",  index=False)
-        falta_banco.to_excel(writer, sheet_name="Falta Banco",  index=False)
-        falta_nave.to_excel(writer,  sheet_name="Falta Nave",   index=False)
+        match_nave.to_excel(writer,    sheet_name="Match Nave",    index=False)
+        match_banco.to_excel(writer,   sheet_name="Match Banco",   index=False)
+        falta_banco.to_excel(writer,   sheet_name="Falta Banco",   index=False)
+        falta_nave.to_excel(writer,    sheet_name="Falta Nave",    index=False)
+        tabla_resumen.to_excel(writer, sheet_name="Tabla Resumen", index=False)
     return buf.getvalue()
 
 
@@ -612,6 +613,9 @@ def correr_conciliacion_cupones(archivo_banco, archivo_nave, tolerancia: float =
         df_nave_dep, df_banco_acred, tolerancia=tolerancia
     )
 
+    # 4. Tabla resumen (por código, al estilo de la tabla dinámica del equipo)
+    tabla_resumen = generar_tabla_resumen(falta_banco, falta_nave)
+
     match_ajustado = int((match_banco["Diferencia Identificada"].fillna("") != "").sum())
 
     stats = {
@@ -621,7 +625,7 @@ def correr_conciliacion_cupones(archivo_banco, archivo_nave, tolerancia: float =
         "falta_nave":        len(falta_nave),
     }
 
-    buf = generar_excel_en_memoria_cupones(match_nave, match_banco, falta_banco, falta_nave)
+    buf = generar_excel_en_memoria_cupones(match_nave, match_banco, falta_banco, falta_nave, tabla_resumen)
     return buf, stats
 
 
