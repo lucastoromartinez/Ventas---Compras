@@ -175,7 +175,11 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
     ]
     columnas_importe = [c for c in columnas_importe if c in df.columns]
 
-    df[columnas_importe] = df[columnas_importe].apply(pd.to_numeric, errors="coerce")
+    df[columnas_importe] = (
+        df[columnas_importe]
+        .apply(pd.to_numeric, errors="coerce")
+        .astype(float)
+    )
 
     if (
         "Tipo de Comprobante" in df.columns
