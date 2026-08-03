@@ -2,6 +2,7 @@ import streamlit as st
 from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
 from logica_cupones     import correr_conciliacion_cupones, correr_conciliacion_cupones_con_anterior
+from logica_fiser       import correr_conciliacion_fiser
 
 st.set_page_config(
     page_title="Conciliaciones Bancarias",
@@ -119,8 +120,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_galicia, tab_hipotecario, tab_cupones = st.tabs(
-    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🎟️  Cupones"]
+tab_galicia, tab_hipotecario, tab_cupones, tab_fiser = st.tabs(
+    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🏦  Cupones", "🏦  Fiser"]
 )
 
 
@@ -415,6 +416,82 @@ with tab_cupones:
             label="📥 Descargar reporte Cupones",
             data=r["buf"],
             file_name="conciliacion_cupones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+
+# ═══════════════════════════════════════════════
+# TAB FISER
+# ═══════════════════════════════════════════════
+with tab_fiser:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col10, col11 = st.columns(2)
+    with col10:
+        st.markdown('<div class="upload-label">Extracto Banco</div>', unsafe_allow_html=True)
+        archivo_banco_f = st.file_uploader("banco_f", type=["xlsx","xls"],
+                                            label_visibility="collapsed", key="banco_f")
+    with col11:
+        st.markdown('<div class="upload-label">Reporte Fiser</div>', unsafe_allow_html=True)
+        archivo_fiser_f = st.file_uploader("fiser_f", type=["xlsx","xls"],
+                                            label_visibility="collapsed", key="fiser_f")
+
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+    todos_f = all([archivo_banco_f, archivo_fiser_f])
+    if not todos_f:
+        st.info("Cargá el Extracto Banco y el Reporte Fiser para habilitar la conciliación.")
+
+    boton_f = st.button("CONCILIAR FISER", disabled=not todos_f,
+                         use_container_width=True, key="btn_fiser")
+
+    if boton_f and todos_f:
+        with st.spinner("Procesando Fiser..."):
+            try:
+                buf_f, stats_f = correr_conciliacion_fiser(
+                    archivo_banco=archivo_banco_f,
+                    archivo_fiser=archivo_fiser_f,
+                )
+                st.session_state["resultado_fiser"] = {"buf": buf_f, "stats": stats_f}
+            except Exception as e:
+                st.error(f"Error al procesar Fiser: {e}")
+
+    if "resultado_fiser" in st.session_state:
+        r = st.session_state["resultado_fiser"]
+        s = r["stats"]
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        clase_fb = "error" if s["falta_banco"] > 0 else "metric-card"
+        clase_ff = "error" if s["falta_fiser"] > 0 else "metric-card"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric-card">
+                <div class="metric-value">{s['match_exacto']}</div>
+                <div class="metric-label">Match exacto</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{s['match_acumulado']}</div>
+                <div class="metric-label">Match acumulado</div>
+            </div>
+            <div class="metric-card {clase_fb}">
+                <div class="metric-value">{s['falta_banco']}</div>
+                <div class="metric-label">Falta Banco</div>
+            </div>
+            <div class="metric-card {clase_ff}">
+                <div class="metric-value">{s['falta_fiser']}</div>
+                <div class="metric-label">Falta Fiser</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Descargar reporte Fiser",
+            data=r["buf"],
+            file_name="conciliacion_fiser.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
