@@ -224,7 +224,7 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
 # CRUCE 1: por Pto. Venta + N°Comprobante + CUIT
 # ─────────────────────────────────────────────
 
-def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame):
+def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_total: float = 1.0):
     sis  = df_sistema_dep.copy().reset_index(drop=True)
     arca = df_arca_dep.copy().reset_index(drop=True)
 
@@ -234,22 +234,35 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame):
     sis["_idx_sis"]   = sis.index
     arca["_idx_arca"] = arca.index
 
-    sis["_conteo"]  = sis.groupby( ["Pto. Venta", "N°Comprobante", "CUIT_norm"       ]).cumcount() + 1
-    arca["_conteo"] = arca.groupby(["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor"]).cumcount() + 1
+    sis["_total_sis"]   = pd.to_numeric(sis["Total"],       errors="coerce")
+    arca["_total_arca"] = pd.to_numeric(arca["Imp. Total"], errors="coerce")
 
-    merge_df = pd.merge(
+    # Join many-to-many por Pto. Venta + N°Comprobante + CUIT
+    cand = pd.merge(
         sis,
         arca,
-        left_on  =["Pto. Venta", "N°Comprobante", "CUIT_norm",        "_conteo"],
-        right_on =["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor", "_conteo"],
-        how      ="outer",
-        indicator=True,
+        left_on  =["Pto. Venta", "N°Comprobante", "CUIT_norm"],
+        right_on =["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor"],
+        how      ="inner",
         suffixes =("_sis", "_arca"),
     )
 
-    match_raw         = merge_df[merge_df["_merge"] == "both"      ].copy()
-    falta_arca_raw    = merge_df[merge_df["_merge"] == "left_only" ].copy()
-    falta_sistema_raw = merge_df[merge_df["_merge"] == "right_only"].copy()
+    # Filtrar por tolerancia de importe total
+    cand["_diff_total"] = (cand["_total_sis"] - cand["_total_arca"]).abs()
+    cand_ok = cand[cand["_diff_total"] <= tolerancia_total].sort_values("_diff_total")
+
+    # Resolver 1-a-1: entre duplicados de la misma clave, tomar el par con menor diferencia de importe
+    usados_sis, usados_arca = set(), set()
+    matched_sis_idx, matched_arca_idx = [], []
+
+    for _, row in cand_ok.iterrows():
+        i_sis  = int(row["_idx_sis"])
+        i_arca = int(row["_idx_arca"])
+        if i_sis not in usados_sis and i_arca not in usados_arca:
+            usados_sis.add(i_sis)
+            usados_arca.add(i_arca)
+            matched_sis_idx.append(i_sis)
+            matched_arca_idx.append(i_arca)
 
     sis_rename = {
         "Fecha":               "Fecha_Sistema",
@@ -275,33 +288,36 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame):
 
     arca_cols_available = [c for c in arca_cols_rename if c in arca.columns]
 
-    def _from_sis(idx_series):
-        return (
-            sis.loc[idx_series.astype(int).values]
-            .drop(columns=["_conteo", "_idx_sis"], errors="ignore")
-            .rename(columns=sis_rename)
-            .reset_index(drop=True)
-        )
+    temp_cols_sis  = ["_idx_sis",  "_total_sis"]
+    temp_cols_arca = ["_idx_arca", "_total_arca"]
 
-    def _from_arca(idx_series, cols=None):
-        rows = arca.loc[idx_series.astype(int).values]
-        if cols:
-            rows = rows[cols]
-        return (
-            rows
-            .drop(columns=["_conteo", "_idx_arca"], errors="ignore")
-            .rename(columns=arca_cols_rename)
-            .reset_index(drop=True)
-        )
+    match_sis = (
+        sis.loc[matched_sis_idx]
+        .drop(columns=temp_cols_sis, errors="ignore")
+        .rename(columns=sis_rename)
+        .reset_index(drop=True)
+    )
+    match_arca = (
+        arca.loc[matched_arca_idx, arca_cols_available]
+        .drop(columns=temp_cols_arca, errors="ignore")
+        .rename(columns=arca_cols_rename)
+        .reset_index(drop=True)
+    )
+    match = pd.concat([match_sis, match_arca], axis=1)
 
-    match = pd.concat([
-        _from_sis(match_raw["_idx_sis"]),
-        _from_arca(match_raw["_idx_arca"], cols=arca_cols_available),
-    ], axis=1)
+    falta_arca = (
+        sis[~sis["_idx_sis"].isin(usados_sis)]
+        .drop(columns=temp_cols_sis, errors="ignore")
+        .rename(columns=sis_rename)
+        .reset_index(drop=True)
+    )
 
-    falta_arca = _from_sis(falta_arca_raw["_idx_sis"])
-
-    falta_sistema = _from_arca(falta_sistema_raw["_idx_arca"])
+    falta_sistema = (
+        arca[~arca["_idx_arca"].isin(usados_arca)]
+        .drop(columns=temp_cols_arca, errors="ignore")
+        .rename(columns=arca_cols_rename)
+        .reset_index(drop=True)
+    )
 
     return match, falta_sistema, falta_arca
 
@@ -846,7 +862,7 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca_dep    = depurar_arca(df_arca)
     df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, falta_sistema1, falta_arca1 = cruce1(df_arca_dep, df_sistema_dep)
+    match, falta_sistema1, falta_arca1 = cruce1(df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos)
 
     revisar1 = revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos)
 
