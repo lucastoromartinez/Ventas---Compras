@@ -159,7 +159,12 @@ def _parse_factura(file_obj, nombre_archivo=None):
     for i, w in enumerate(words):
         if w['text'] == 'N°:' and w['x0'] > 450:
             if i + 1 < len(words):
-                nro_factura = words[i + 1]['text']
+                candidato = words[i + 1]
+                # El valor debe estar en la misma línea que "N°:"; si no hay
+                # nada ahí, el siguiente word en orden de lectura es la
+                # etiqueta "Fecha:" de la línea de abajo, no un número.
+                if abs(candidato['top'] - w['top']) < 3:
+                    nro_factura = candidato['text']
             break
 
     # Cuentas al día: la factura puede no traer número (línea vacía en el PDF).
