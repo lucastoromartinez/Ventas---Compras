@@ -127,7 +127,19 @@ def construir_resumen_extracto(liquidaciones):
 # IMPORTAR FACTURAS (PDFs)
 # ─────────────────────────────────────────────
 
-def _parse_factura(file_obj):
+def _nro_factura_desde_nombre_archivo(nombre_archivo):
+    """Cuentas al día: la factura sale sin número (línea vacía / " " en el PDF).
+    En esos casos se usa el identificador que trae el nombre del archivo
+    (p.ej. 'VARACC21023015_27_al_31_07.pdf' -> 'VARACC21023015')."""
+    if not nombre_archivo:
+        return None
+    stem = re.sub(r'\.pdf$', '', nombre_archivo, flags=re.IGNORECASE)
+    stem = stem.split('_al_')[0]
+    stem = re.sub(r'_\d+$', '', stem)
+    return stem or None
+
+
+def _parse_factura(file_obj, nombre_archivo=None):
     with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
         words = pdf.pages[0].extract_words()
 
@@ -149,6 +161,11 @@ def _parse_factura(file_obj):
             if i + 1 < len(words):
                 nro_factura = words[i + 1]['text']
             break
+
+    # Cuentas al día: la factura puede no traer número (línea vacía en el PDF).
+    # En ese caso se usa el identificador del nombre del archivo.
+    if not nro_factura or not nro_factura.strip():
+        nro_factura = _nro_factura_desde_nombre_archivo(nombre_archivo)
 
     # PID
     pid = None
@@ -272,7 +289,7 @@ def _parse_factura(file_obj):
 def importar_facturas(archivos_pdf):
     facturas = []
     for f in archivos_pdf:
-        factura = _parse_factura(f)
+        factura = _parse_factura(f, getattr(f, 'name', None))
         facturas.append(factura)
     return facturas
 
