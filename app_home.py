@@ -69,6 +69,7 @@ div[class*="st-key-card_"]:hover .card-visual { transform: translateY(-3px); }
 .st-key-card_concil:hover .card-visual  { border-color: #ff6b35; }
 .st-key-card_pdfs:hover .card-visual    { border-color: #c084fc; }
 .st-key-card_rappi:hover .card-visual   { border-color: #FF441F; }
+.st-key-card_impuestos:hover .card-visual { border-color: #f5c518; }
 
 .footer {
     text-align: center;
@@ -107,9 +108,10 @@ card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "p
 card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
 card(row1[2], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
 
-row2 = st.columns([1, 2, 2, 1], gap="medium")
-card(row2[1], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
-card(row2[2], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
+row2 = st.columns(3, gap="medium")
+card(row2[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
+card(row2[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
+card(row2[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "pages/impuestos.py")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
