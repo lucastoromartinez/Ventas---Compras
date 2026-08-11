@@ -106,11 +106,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-(tab_percepciones,) = st.tabs(["🧾  Percepciones"])
+(tab_percepciones,) = st.tabs(["👮  Percepciones IIBB CABA"])
 
 
 # ═══════════════════════════════════════════════
-# TAB PERCEPCIONES
+# TAB PERCEPCIONES IIBB CABA
 # ═══════════════════════════════════════════════
 with tab_percepciones:
     st.markdown("<br>", unsafe_allow_html=True)
