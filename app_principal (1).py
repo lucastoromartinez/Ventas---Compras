@@ -7,5 +7,6 @@ pg = st.navigation([
     st.Page("pages/conciliaciones.py",  title="Conciliaciones", icon="🏦"),
     st.Page("pages/lector_pdfs.py",     title="Lector PDFs",    icon="📷"),
     st.Page("pages/rappi.py",           title="Rappi",          icon="🛵"),
+    st.Page("pages/impuestos.py",       title="Impuestos",      icon="👮"),
 ])
 pg.run()
