@@ -1,6 +1,7 @@
 import streamlit as st
 from logica_percepciones import correr_cruce_percepciones
 from logica_percepciones_pba import correr_cruce_percepciones_pba
+from logica_retenciones import correr_cruce_retenciones
 
 st.set_page_config(
     page_title="Impuestos",
@@ -108,9 +109,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_percepciones, tab_percepciones_pba = st.tabs([
+tab_percepciones, tab_percepciones_pba, tab_retenciones = st.tabs([
     "👮  Percepciones IIBB CABA",
     "👮  Percepciones IIBB PBA",
+    "👮  Retenciones IIBB CABA",
 ])
 
 
@@ -295,4 +297,96 @@ with tab_percepciones_pba:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_percepciones_pba",
+        )
+
+
+# ═══════════════════════════════════════════════
+# TAB RETENCIONES IIBB CABA
+# ═══════════════════════════════════════════════
+with tab_retenciones:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown('<div class="upload-label">Excel ARCA (retenciones)</div>', unsafe_allow_html=True)
+        archivo_arca_ret = st.file_uploader("arca_ret", type=["xlsx", "xls"],
+                                             label_visibility="collapsed", key="ret_arca")
+    with col2:
+        st.markdown('<div class="upload-label">Excel Sistema (mayor)</div>', unsafe_allow_html=True)
+        archivo_sistema_ret = st.file_uploader("sistema_ret", type=["xlsx", "xls"],
+                                                label_visibility="collapsed", key="ret_sistema")
+
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+    tol_ret = st.slider("Tolerancia de importes ($ ±)", min_value=0.0, max_value=10.0, value=1.0, step=0.5,
+                         key="ret_tol")
+
+    ambos_cargados_ret = archivo_arca_ret is not None and archivo_sistema_ret is not None
+    if not ambos_cargados_ret:
+        st.info("Cargá los dos archivos Excel para habilitar el cruce.")
+
+    boton_ret = st.button("CRUZAR RETENCIONES", disabled=not ambos_cargados_ret, use_container_width=True,
+                           key="btn_retenciones")
+
+    if boton_ret and ambos_cargados_ret:
+        with st.spinner("Procesando..."):
+            try:
+                buf_reporte_ret, stats_ret = correr_cruce_retenciones(
+                    archivo_arca=archivo_arca_ret,
+                    archivo_sistema=archivo_sistema_ret,
+                    tolerancia_importe=tol_ret,
+                )
+                st.session_state["resultado_retenciones"] = {
+                    "buf_reporte": buf_reporte_ret,
+                    "stats": stats_ret,
+                }
+            except Exception as e:
+                st.error(f"Error al procesar: {e}")
+                st.stop()
+
+    if "resultado_retenciones" in st.session_state:
+        r_ret = st.session_state["resultado_retenciones"]
+        stats_ret = r_ret["stats"]
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        clase_falt_a_ret = "error" if stats_ret["faltante_arca"] > 0 else "metric-card"
+        clase_falt_s_ret = "error" if stats_ret["faltante_sistema"] > 0 else "metric-card"
+        clase_nuevos_ret = "warn" if stats_ret["proveedores_nuevos"] > 0 else "metric-card"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric-card">
+                <div class="metric-value">{stats_ret['match']}</div>
+                <div class="metric-label">Con match</div>
+            </div>
+            <div class="metric-card {clase_falt_a_ret}">
+                <div class="metric-value">{stats_ret['faltante_arca']}</div>
+                <div class="metric-label">Faltante ARCA</div>
+            </div>
+            <div class="metric-card {clase_falt_s_ret}">
+                <div class="metric-value">{stats_ret['faltante_sistema']}</div>
+                <div class="metric-label">Faltante sistema</div>
+            </div>
+            <div class="metric-card {clase_nuevos_ret}">
+                <div class="metric-value">{stats_ret['proveedores_nuevos']}</div>
+                <div class="metric-label">Proveedores nuevos</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if stats_ret["proveedores_nuevos"] > 0:
+            st.warning(
+                "Hay proveedores que matchearon por nombre y no están en el padrón (proveedores.py). "
+                "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Descargar reporte completo",
+            data=r_ret["buf_reporte"],
+            file_name="cruce_retenciones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_retenciones",
         )
