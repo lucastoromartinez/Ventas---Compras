@@ -2,9 +2,11 @@ import re
 from io import BytesIO
 
 import pandas as pd
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
+
+from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
@@ -72,13 +74,20 @@ def _parse_nro(s: str) -> tuple[str, str]:
     return pto, comp
 
 
-def depurar_sistema_percepciones(df: pd.DataFrame) -> pd.DataFrame:
+def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -> pd.DataFrame:
     """
     Depura el reporte del sistema:
     - Calcula 'Importe' = Debe - Haber.
     - A partir de 'Su Factura' genera 'Pto. Venta' y 'N°Comprobante'.
-    - Si hay columna CUIT, la normaliza (sin guiones/espacios).
+    - Genera 'CUIT' buscando, para cada 'Tercero', qué nombre del padrón de
+      proveedores del repo (proveedores.py) coincide (comparación exacta sin
+      espacios ni mayúsculas), y le asigna el primer CUIT encontrado para
+      ese nombre (si el mismo nombre tiene más de un CUIT cargado en el
+      padrón, se queda con el primero).
     """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
 
@@ -94,6 +103,7 @@ def depurar_sistema_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     c_debe = _resolver(["Debe"])
     c_haber = _resolver(["Haber"])
     c_factura = _resolver(["Su Factura", "Su factura"])
+    c_tercero = _resolver(["Tercero"])
 
     df[c_debe] = pd.to_numeric(df[c_debe], errors="coerce").fillna(0).round(2)
     df[c_haber] = pd.to_numeric(df[c_haber], errors="coerce").fillna(0).round(2)
@@ -103,20 +113,12 @@ def depurar_sistema_percepciones(df: pd.DataFrame) -> pd.DataFrame:
         df[c_factura].apply(_parse_nro).tolist(), index=df.index
     )
 
-    col_cuit = next(
-        (c for c in df.columns if c.replace(".", "").strip().upper() == "CUIT"),
-        None
-    )
-    if col_cuit is not None:
-        if pd.api.types.is_numeric_dtype(df[col_cuit]):
-            df[col_cuit] = df[col_cuit].astype("Int64").astype(str)
-        else:
-            df[col_cuit] = df[col_cuit].astype(str)
-        df[col_cuit] = (
-            df[col_cuit]
-            .str.replace("-", "", regex=False)
-            .str.replace(" ", "", regex=False)
-        )
+    nombre_a_cuit = {}
+    for cuit, nombre in padron.items():
+        clave = str(nombre).strip().upper()
+        nombre_a_cuit.setdefault(clave, cuit)
+
+    df["CUIT"] = df[c_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
 
     return df
 
@@ -196,20 +198,33 @@ def cruce_percepciones(
     df_arca: pd.DataFrame,
     df_sistema: pd.DataFrame,
     tolerancia_importe: float = 1.0,
-    score_confirmado: int = 90,
+    score_nombre_min: int = 70,
+    padron: dict | None = None,
 ):
     """
-    Cruza percepciones de ARCA contra el sistema por Importe, y por CUIT o por
-    proveedor (fuzzy) según disponibilidad. Cuando el filtro de importe + CUIT/nombre
-    deja más de un candidato empatado, desambigua cruzando 'Pto. Venta' y
-    'N°Comprobante' (si ambos DataFrames tienen esas columnas).
+    Cruza percepciones de ARCA contra el sistema en tres fases:
+
+    PASO 1 - CUIT + Importe: candidatos con el mismo CUIT y el mismo Importe
+    (con tolerancia). Si hay más de uno, desempata por Pto. Venta / N°Comprobante.
+
+    PASO 2 - Importe + CUIT vía padrón: para lo que no matcheó por CUIT
+    literal (puede pasar si el mismo proveedor quedó cargado con más de un
+    CUIT en el padrón), busca en proveedores.py el nombre correspondiente al
+    CUIT de ARCA y lo compara contra 'Tercero' del sistema.
+
+    PASO 3 - Importe + Nombre (fuzzy), para el remanente que no matcheó ni
+    por CUIT ni por nombre vía padrón.
 
     Retorna:
         tuple de 4 pd.DataFrame:
-            - df_match_sistema, df_match_arca (ligados por 'id_match')
+            - df_match_sistema, df_match_arca (ligados por 'id_match', con
+              'match_tipo' = 'cuit' / 'cuit_padron' / 'nombre', y 'match_score')
             - df_falta_sistema (líneas de ARCA sin match)
             - df_falta_arca (líneas de sistema sin match)
     """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
     df_arca = df_arca.reset_index(drop=True).copy()
     df_sistema = df_sistema.reset_index(drop=True).copy()
 
@@ -227,15 +242,14 @@ def cruce_percepciones(
             return str(int(s)) if s else ""
         return serie.apply(limpiar)
 
+    def _normalizar_nombre(nombre):
+        return re.sub(r"\s+", "", str(nombre)).strip().upper()
+
     col_cuit_arca = _buscar_columna(df_arca, "CUIT")
     col_cuit_sistema = _buscar_columna(df_sistema, "CUIT")
 
-    usar_cuit = col_cuit_sistema is not None
-    cuit_arca_norm = cuit_sistema_norm = None
-
-    if usar_cuit:
-        cuit_arca_norm = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
-        cuit_sistema_norm = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
+    cuit_arca_norm = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
+    cuit_sistema_norm = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
 
     col_pv_arca = _buscar_columna(df_arca, "PTO VENTA")
     col_nc_arca = _buscar_columna(df_arca, "N°COMPROBANTE")
@@ -284,92 +298,100 @@ def cruce_percepciones(
                 ganadores.append(i)
         return ganadores
 
-    def buscar_candidatos(arca_idx, sistema_disponibles):
-        monto = df_arca.loc[arca_idx, "Monto Percibido"]
+    matches = []  # (a_idx, s_idx, tipo, score)
+    sistema_disponibles = set(df_sistema.index)
+
+    # PASO 1: CUIT + Importe
+    for a_idx in df_arca.index:
+        cuit_a = cuit_arca_norm.loc[a_idx]
+        monto_a = df_arca.loc[a_idx, "Monto Percibido"]
 
         candidatos_idx = [
             i for i in sistema_disponibles
-            if abs(df_sistema.loc[i, "Importe"] - monto) <= tolerancia_importe
+            if cuit_sistema_norm.loc[i] == cuit_a
+            and abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
         ]
         if not candidatos_idx:
-            return []
+            continue
 
-        if usar_cuit:
-            cuit_arca_val = cuit_arca_norm.loc[arca_idx]
-            candidatos_idx = [i for i in candidatos_idx if cuit_sistema_norm.loc[i] == cuit_arca_val]
-            if not candidatos_idx:
-                return []
+        candidatos_idx = desempatar_por_comprobante(a_idx, candidatos_idx)
+        s_idx = candidatos_idx[0]
 
-        candidatos_idx = desempatar_por_comprobante(arca_idx, candidatos_idx)
+        matches.append((a_idx, s_idx, "cuit", 100))
+        sistema_disponibles.remove(s_idx)
 
-        if usar_cuit:
-            return [(i, 100) for i in candidatos_idx]
+    # PASO 2: Importe + CUIT vía padrón (mismo proveedor, CUIT distinto por duplicados)
+    arca_matcheados = {a_idx for a_idx, s_idx, tipo, score in matches}
+    arca_pendientes = [i for i in df_arca.index if i not in arca_matcheados]
 
-        razon = str(df_arca.loc[arca_idx, "Razon Social"])
-        opciones = {i: str(df_sistema.loc[i, "Tercero"]) for i in candidatos_idx}
-        scores = process.extract(razon, opciones, scorer=fuzz.token_sort_ratio, limit=len(opciones))
-        return [(idx, score) for _, score, idx in scores]
+    for a_idx in arca_pendientes:
+        cuit_a = cuit_arca_norm.loc[a_idx]
+        nombre_padron = padron.get(cuit_a)
+        if not nombre_padron:
+            continue
 
-    def matching_greedy(arca_indices, sistema_disponibles, top_n=None):
-        pares = []
-        for a_idx in arca_indices:
-            candidatos = buscar_candidatos(a_idx, sistema_disponibles)
-            if top_n:
-                candidatos = candidatos[:top_n]
-            for s_idx, score in candidatos:
-                pares.append((a_idx, s_idx, score))
+        monto_a = df_arca.loc[a_idx, "Monto Percibido"]
+        candidatos_idx = [
+            i for i in sistema_disponibles
+            if abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
+            and _normalizar_nombre(df_sistema.loc[i, "Tercero"]) == _normalizar_nombre(nombre_padron)
+        ]
+        if not candidatos_idx:
+            continue
 
-        pares.sort(key=lambda x: x[2], reverse=True)
+        candidatos_idx = desempatar_por_comprobante(a_idx, candidatos_idx)
+        s_idx = candidatos_idx[0]
 
-        asignados_arca, asignados_sistema = set(), set()
-        matches = []
-        for a_idx, s_idx, score in pares:
-            if a_idx in asignados_arca or s_idx in asignados_sistema:
-                continue
-            asignados_arca.add(a_idx)
-            asignados_sistema.add(s_idx)
-            matches.append((a_idx, s_idx, score))
+        matches.append((a_idx, s_idx, "cuit_padron", 100))
+        sistema_disponibles.remove(s_idx)
+        arca_matcheados.add(a_idx)
 
-        return matches
+    # PASO 3: Importe + Nombre (fuzzy), para el remanente
+    arca_pendientes = [i for i in df_arca.index if i not in arca_matcheados]
 
-    sistema_disponibles = set(df_sistema.index)
-    arca_pendientes = list(df_arca.index)
+    for a_idx in arca_pendientes:
+        monto_a = df_arca.loc[a_idx, "Monto Percibido"]
+        nombre_a = str(df_arca.loc[a_idx, "Razon Social"])
 
-    matches_paso1 = matching_greedy(arca_pendientes, sistema_disponibles)
+        candidatos_idx = [
+            i for i in sistema_disponibles
+            if abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
+        ]
+        if not candidatos_idx:
+            continue
 
-    confirmados = [m for m in matches_paso1 if m[2] >= score_confirmado]
-    dudosos = [m for m in matches_paso1 if m[2] < score_confirmado]
+        puntajes = [(i, fuzz.token_sort_ratio(nombre_a, str(df_sistema.loc[i, "Tercero"])))
+                    for i in candidatos_idx]
+        mejor_score = max(p[1] for p in puntajes)
 
-    sistema_usados_confirmados = {s_idx for _, s_idx, _ in confirmados}
-    arca_dudosos = [a_idx for a_idx, s_idx, score in dudosos]
-    sistema_disponibles_paso2 = set(df_sistema.index) - sistema_usados_confirmados
+        if mejor_score < score_nombre_min:
+            continue
 
-    if arca_dudosos:
-        matches_paso2 = matching_greedy(arca_dudosos, sistema_disponibles_paso2, top_n=10)
-    else:
-        matches_paso2 = []
+        empatados = [i for i, sc in puntajes if sc == mejor_score]
+        empatados = desempatar_por_comprobante(a_idx, empatados)
+        s_idx = empatados[0]
 
-    todos_los_matches = [(a, s, sc, "confirmado") for a, s, sc in confirmados] + \
-                         [(a, s, sc, "recuperado") for a, s, sc in matches_paso2]
+        matches.append((a_idx, s_idx, "nombre", mejor_score))
+        sistema_disponibles.remove(s_idx)
 
-    arca_matcheados = {a_idx for a_idx, s_idx, sc, status in todos_los_matches}
-    sistema_matcheados = {s_idx for a_idx, s_idx, sc, status in todos_los_matches}
+    arca_matcheados = {a_idx for a_idx, s_idx, tipo, score in matches}
+    sistema_matcheados = {s_idx for a_idx, s_idx, tipo, score in matches}
 
     filas_sistema, filas_arca = [], []
-    for id_match, (a_idx, s_idx, score, status) in enumerate(todos_los_matches, start=1):
+    for id_match, (a_idx, s_idx, tipo, score) in enumerate(matches, start=1):
         fila_s = df_sistema.loc[s_idx].copy()
         fila_s["id_match"] = id_match
-        fila_s["score_match"] = score
-        fila_s["match_status"] = status
+        fila_s["match_tipo"] = tipo
+        fila_s["match_score"] = score
         filas_sistema.append(fila_s)
 
         fila_a = df_arca.loc[a_idx].copy()
         fila_a["id_match"] = id_match
-        fila_a["score_match"] = score
-        fila_a["match_status"] = status
+        fila_a["match_tipo"] = tipo
+        fila_a["match_score"] = score
         filas_arca.append(fila_a)
 
-    cols_extra = ["id_match", "score_match", "match_status"]
+    cols_extra = ["id_match", "match_tipo", "match_score"]
 
     if filas_sistema:
         df_match_sistema = pd.DataFrame(filas_sistema).reset_index(drop=True)
@@ -452,7 +474,9 @@ def generar_excel_percepciones(
 # PIPELINE COMPLETO
 # ─────────────────────────────────────────────
 
-def correr_cruce_percepciones(archivo_arca, archivo_sistema, tolerancia_importe: float = 1.0):
+def correr_cruce_percepciones(
+    archivo_arca, archivo_sistema, tolerancia_importe: float = 1.0, score_nombre_min: int = 70
+):
     df_sistema = load_excel_sistema(archivo_sistema)
     df_arca = load_excel_arca(archivo_arca)
 
@@ -460,7 +484,7 @@ def correr_cruce_percepciones(archivo_arca, archivo_sistema, tolerancia_importe:
     df_arca_dep = depurar_arca_percepciones(df_arca)
 
     df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_percepciones(
-        df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe
+        df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
     stats = {
