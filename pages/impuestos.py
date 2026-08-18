@@ -1,7 +1,7 @@
 import streamlit as st
 from logica_percepciones import correr_cruce_percepciones
 from logica_percepciones_pba import correr_cruce_percepciones_pba
-from logica_retenciones import correr_cruce_retenciones
+from logica_retenciones_iibb_caba import correr_cruce_retenciones
 
 st.set_page_config(
     page_title="Impuestos",
