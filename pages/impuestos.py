@@ -166,6 +166,7 @@ with tab_percepciones:
 
         clase_falt_a = "error" if stats["faltante_arca"] > 0 else "metric-card"
         clase_falt_s = "error" if stats["faltante_sistema"] > 0 else "metric-card"
+        clase_nuevos = "warn" if stats["proveedores_nuevos"] > 0 else "metric-card"
 
         st.markdown(f"""
         <div class="metric-row">
@@ -181,8 +182,18 @@ with tab_percepciones:
                 <div class="metric-value">{stats['faltante_sistema']}</div>
                 <div class="metric-label">Faltante sistema</div>
             </div>
+            <div class="metric-card {clase_nuevos}">
+                <div class="metric-value">{stats['proveedores_nuevos']}</div>
+                <div class="metric-label">Proveedores nuevos</div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
+
+        if stats["proveedores_nuevos"] > 0:
+            st.warning(
+                "Hay proveedores que matchearon por nombre y no están en el padrón (proveedores.py). "
+                "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
