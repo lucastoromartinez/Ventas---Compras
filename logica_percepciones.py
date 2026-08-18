@@ -415,6 +415,36 @@ def cruce_percepciones(
 
 
 # ─────────────────────────────────────────────
+# PROVEEDORES NUEVOS (matchearon por nombre, no están en el padrón)
+# ─────────────────────────────────────────────
+
+def detectar_proveedores_nuevos(
+    df_match_arca: pd.DataFrame,
+    padron: dict | None = None,
+    umbral_nombre: int = 80,
+) -> pd.DataFrame:
+    """
+    Devuelve los CUIT que matchearon por nombre (no por CUIT) con score >=
+    umbral_nombre y que todavía no están en el padrón de proveedores del repo.
+    """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
+    candidatos = df_match_arca[
+        (df_match_arca["match_tipo"] == "nombre")
+        & (df_match_arca["match_score"] >= umbral_nombre)
+    ]
+
+    nuevos = [
+        {"CUIT": fila["CUIT"], "Nombre": fila["Razon Social"], "score": fila["match_score"]}
+        for _, fila in candidatos.iterrows()
+        if fila["CUIT"] not in padron
+    ]
+
+    return pd.DataFrame(nuevos, columns=["CUIT", "Nombre", "score"])
+
+
+# ─────────────────────────────────────────────
 # EXPORTAR A BUFFER EN MEMORIA (descargable único)
 # ─────────────────────────────────────────────
 
@@ -423,6 +453,7 @@ def generar_excel_percepciones(
     df_match_arca: pd.DataFrame,
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
+    df_proveedores_nuevos: pd.DataFrame | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
@@ -457,6 +488,8 @@ def generar_excel_percepciones(
         "Falta_Sistema": df_falta_sistema,
         "Falta_Arca": df_falta_arca,
     }
+    if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
+        hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -487,14 +520,17 @@ def correr_cruce_percepciones(
         df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
+    df_proveedores_nuevos = detectar_proveedores_nuevos(df_match_arca, umbral_nombre=max(score_nombre_min, 80))
+
     stats = {
         "match": len(df_match_arca),
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
+        "proveedores_nuevos": len(df_proveedores_nuevos),
     }
 
     buf_reporte = generar_excel_percepciones(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos
     )
 
     return buf_reporte, stats
