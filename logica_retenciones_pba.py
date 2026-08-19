@@ -71,14 +71,18 @@ def cargar_txt_sirtac(file, padron: dict | None = None) -> pd.DataFrame:
 # DEPURACIÓN SISTEMA
 # ─────────────────────────────────────────────
 
-def depurar_sistema_sirtac(df: pd.DataFrame) -> pd.DataFrame:
+def depurar_sistema_sirtac(df: pd.DataFrame, padron: dict | None = None) -> pd.DataFrame:
     """
     Depura el reporte del sistema:
     - Calcula 'Importe' = Debe - Haber.
-    - Normaliza 'CUIT' (sin guiones/espacios). Requiere que la columna ya
-      venga en el archivo (a diferencia de percepciones/retenciones CABA,
-      el mayor de SIRTAC sí trae CUIT cargado).
+    - Genera 'CUIT' buscando, para cada 'Tercero', qué nombre del padrón de
+      proveedores del repo (proveedores.py) coincide (comparación exacta sin
+      espacios ni mayúsculas), y le asigna el primer CUIT encontrado para
+      ese nombre. Igual criterio que en los demás submódulos de Impuestos.
     """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
     df = df.copy()
 
     def _normalizar(nombre):
@@ -89,9 +93,9 @@ def depurar_sistema_sirtac(df: pd.DataFrame) -> pd.DataFrame:
 
     col_debe = _buscar_columna(df, "Debe")
     col_haber = _buscar_columna(df, "Haber")
-    col_cuit = _buscar_columna(df, "CUIT")
+    col_tercero = _buscar_columna(df, "Tercero")
 
-    columnas_encontradas = {"Debe": col_debe, "Haber": col_haber, "CUIT": col_cuit}
+    columnas_encontradas = {"Debe": col_debe, "Haber": col_haber, "Tercero": col_tercero}
     faltantes = {nombre for nombre, col in columnas_encontradas.items() if col is None}
     if faltantes:
         raise ValueError(f"Faltan las siguientes columnas en el sistema: {faltantes}")
@@ -100,18 +104,15 @@ def depurar_sistema_sirtac(df: pd.DataFrame) -> pd.DataFrame:
     df[col_haber] = pd.to_numeric(df[col_haber], errors="coerce").fillna(0)
     df["Importe"] = (df[col_debe] - df[col_haber]).astype("float64").round(2)
 
-    if pd.api.types.is_numeric_dtype(df[col_cuit]):
-        df[col_cuit] = df[col_cuit].astype("Int64").astype(str)
-    elif df[col_cuit].dtype != object:
-        df[col_cuit] = df[col_cuit].astype(str)
+    nombre_a_cuit = {}
+    for cuit, nombre in padron.items():
+        clave = str(nombre).strip().upper()
+        nombre_a_cuit.setdefault(clave, cuit)
 
-    df[col_cuit] = (
-        df[col_cuit]
-        .str.replace("-", "", regex=False)
-        .str.replace(" ", "", regex=False)
-    )
-    if col_cuit != "CUIT":
-        df = df.rename(columns={col_cuit: "CUIT"})
+    df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
+
+    if col_tercero != "Tercero":
+        df = df.rename(columns={col_tercero: "Tercero"})
 
     return df
 
