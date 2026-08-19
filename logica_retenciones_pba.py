@@ -75,10 +75,12 @@ def depurar_sistema_sirtac(df: pd.DataFrame, padron: dict | None = None) -> pd.D
     """
     Depura el reporte del sistema:
     - Calcula 'Importe' = Debe - Haber.
-    - Genera 'CUIT' buscando, para cada 'Tercero', qué nombre del padrón de
-      proveedores del repo (proveedores.py) coincide (comparación exacta sin
-      espacios ni mayúsculas), y le asigna el primer CUIT encontrado para
-      ese nombre. Igual criterio que en los demás submódulos de Impuestos.
+    - Si el archivo ya trae una columna CUIT (sin importar mayúsculas o
+      minúsculas), la depura como siempre (sin guiones ni espacios) y la usa
+      directamente, sin pasar por el padrón. Si no viene, genera 'CUIT'
+      buscando, para cada 'Tercero', qué nombre del padrón de proveedores
+      del repo (proveedores.py) coincide (comparación exacta sin espacios ni
+      mayúsculas), y le asigna el primer CUIT encontrado para ese nombre.
     """
     if padron is None:
         padron = PADRON_PROVEEDORES
@@ -104,12 +106,26 @@ def depurar_sistema_sirtac(df: pd.DataFrame, padron: dict | None = None) -> pd.D
     df[col_haber] = pd.to_numeric(df[col_haber], errors="coerce").fillna(0)
     df["Importe"] = (df[col_debe] - df[col_haber]).astype("float64").round(2)
 
-    nombre_a_cuit = {}
-    for cuit, nombre in padron.items():
-        clave = str(nombre).strip().upper()
-        nombre_a_cuit.setdefault(clave, cuit)
+    col_cuit = _buscar_columna(df, "CUIT")
+    if col_cuit is not None:
+        if pd.api.types.is_numeric_dtype(df[col_cuit]):
+            df[col_cuit] = df[col_cuit].astype("Int64").astype(str)
+        else:
+            df[col_cuit] = df[col_cuit].astype(str)
+        df[col_cuit] = (
+            df[col_cuit]
+            .str.replace("-", "", regex=False)
+            .str.replace(" ", "", regex=False)
+        )
+        if col_cuit != "CUIT":
+            df = df.rename(columns={col_cuit: "CUIT"})
+    else:
+        nombre_a_cuit = {}
+        for cuit, nombre in padron.items():
+            clave = str(nombre).strip().upper()
+            nombre_a_cuit.setdefault(clave, cuit)
 
-    df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
+        df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
 
     if col_tercero != "Tercero":
         df = df.rename(columns={col_tercero: "Tercero"})
