@@ -87,13 +87,39 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     margin-top: 0 !important; margin-bottom: 1rem !important;
 }
 .back-btn > button:hover { color: #f5c518 !important; border-color: #f5c518 !important; }
-div[data-testid="stTabs"] button {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; color: #555 !important;
+div[data-testid="stSelectbox"] label { display: none; }
+div[data-testid="stSelectbox"] .react-aria-ComboBox > div {
+    background: #1a1a1a !important;
+    border: 1px solid #2a2a2a !important;
+    border-radius: 6px !important;
 }
-div[data-testid="stTabs"] button[aria-selected="true"] {
+div[data-testid="stSelectbox"] .react-aria-ComboBox > div:hover,
+div[data-testid="stSelectbox"] .react-aria-ComboBox > div:focus-within {
+    border-color: #f5c518 !important;
+}
+div[data-testid="stSelectbox"] input[role="combobox"] {
+    background: transparent !important;
+    color: #e8e8e8 !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+}
+div[data-testid="stSelectbox"] button[aria-haspopup="listbox"] svg {
+    fill: #f5c518 !important;
+}
+div[role="listbox"] {
+    background: #1a1a1a !important;
+    border: 1px solid #2a2a2a !important;
+    border-radius: 6px !important;
+}
+div[role="listbox"] div[role="option"] {
+    background: #1a1a1a !important;
+    color: #e8e8e8 !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+}
+div[role="listbox"] div[role="option"]:hover,
+div[role="listbox"] div[role="option"][data-focused="true"],
+div[role="listbox"] div[role="option"][aria-selected="true"] {
+    background: #2a2a2a !important;
     color: #f5c518 !important;
-    border-bottom-color: #f5c518 !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -111,18 +137,21 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_percepciones, tab_percepciones_pba, tab_retenciones, tab_retenciones_pba = st.tabs([
+OPCIONES_SUBMODULO = [
     "👮  Percepciones IIBB CABA",
     "👮  Percepciones IIBB PBA",
     "👮  Retenciones IIBB CABA",
     "👮  Retenciones IIBB PBA",
-])
+]
+submodulo_actual = st.selectbox(
+    "Submódulo", OPCIONES_SUBMODULO, label_visibility="collapsed", key="impuestos_submodulo"
+)
 
 
 # ═══════════════════════════════════════════════
 # TAB PERCEPCIONES IIBB CABA
 # ═══════════════════════════════════════════════
-with tab_percepciones:
+if submodulo_actual == "👮  Percepciones IIBB CABA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -214,7 +243,7 @@ with tab_percepciones:
 # ═══════════════════════════════════════════════
 # TAB PERCEPCIONES IIBB PBA
 # ═══════════════════════════════════════════════
-with tab_percepciones_pba:
+elif submodulo_actual == "👮  Percepciones IIBB PBA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -306,7 +335,7 @@ with tab_percepciones_pba:
 # ═══════════════════════════════════════════════
 # TAB RETENCIONES IIBB CABA
 # ═══════════════════════════════════════════════
-with tab_retenciones:
+elif submodulo_actual == "👮  Retenciones IIBB CABA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -398,7 +427,7 @@ with tab_retenciones:
 # ═══════════════════════════════════════════════
 # TAB RETENCIONES IIBB PBA (SIRTAC o SIRCREB)
 # ═══════════════════════════════════════════════
-with tab_retenciones_pba:
+elif submodulo_actual == "👮  Retenciones IIBB PBA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     modo_ret_pba = st.radio(
