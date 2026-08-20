@@ -322,7 +322,7 @@ with tab_cupones:
         archivo_nave_c = st.file_uploader("nave_c", type=["xlsx","xls"],
                                            label_visibility="collapsed", key="nave_c")
 
-    archivo_banco_ant = archivo_nave_ant = None
+    archivo_banco_ant = archivo_nave_ant = archivo_nave_acred_mes = None
     if con_anterior:
         col8, col9 = st.columns(2)
         with col8:
@@ -333,6 +333,14 @@ with tab_cupones:
             st.markdown('<div class="upload-label">Reporte Nave (mes anterior)</div>', unsafe_allow_html=True)
             archivo_nave_ant = st.file_uploader("nave_ant", type=["xlsx","xls"],
                                                  label_visibility="collapsed", key="nave_ant")
+
+        st.markdown(
+            '<div class="upload-label">Reporte Nave por fecha de acreditación (mes actual) — opcional, '
+            'resuelve cupones individuales del mes anterior que se acreditaron dentro de un grupo nuevo</div>',
+            unsafe_allow_html=True,
+        )
+        archivo_nave_acred_mes = st.file_uploader("nave_acred_mes", type=["xlsx","xls"],
+                                                    label_visibility="collapsed", key="nave_acred_mes")
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
@@ -356,6 +364,7 @@ with tab_cupones:
                     archivo_nave_actual=archivo_nave_c,
                     archivo_banco_anterior=archivo_banco_ant,
                     archivo_nave_anterior=archivo_nave_ant,
+                    archivo_nave_acred_mes=archivo_nave_acred_mes,
                 )
                 st.session_state["resultado_cupones"] = {"buf": buf_c, "stats": stats_c}
             except Exception as e:

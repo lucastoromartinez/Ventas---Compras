@@ -290,6 +290,52 @@ def calcular_pendientes_anteriores(
     return df
 
 
+def remapear_pendientes_via_acreditacion(
+    pendientes_anteriores: pd.DataFrame,
+    df_nave_acred_mes_dep: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    Un cupón individual (sin grupo) que quedó pendiente el mes anterior a
+    veces el banco lo termina acreditando adentro de un grupo nuevo,
+    armado recién este mes — un grupo que no existía el mes anterior, así
+    que el cruce por clave no lo encuentra ahí (pendientes_anteriores lo
+    tiene bajo su viejo N° de operación individual, pero CRUCE AUTOMÁTICO
+    de este mes solo conoce la clave del grupo nuevo) y aparece una
+    "Diferencia Banco vs Nave" en el grupo que en realidad no es tal: el
+    cupón sí se cobró, solo que mezclado en un grupo que no existía antes.
+
+    Si se pasa el extracto de Nave "por fecha de acreditación" del mes
+    actual (trae, agrupado, todo lo que se acreditó este mes sin importar
+    cuándo pasó la operación), buscamos ahí, por N° de operación, a qué
+    grupo terminó perteneciendo cada pendiente individual y reasignamos su
+    "Clave" a la del grupo nuevo — así CRUCE AUTOMÁTICO lo suma dentro de
+    ese grupo en vez de dejarlo perdido bajo el número de operación viejo.
+    Si no se pasa el archivo, o un pendiente no aparece ahí, queda como
+    estaba (bajo su propio N° de operación).
+    """
+    pendientes = pendientes_anteriores.copy()
+    if df_nave_acred_mes_dep is None or pendientes.empty:
+        return pendientes
+
+    mapa_clave = (
+        df_nave_acred_mes_dep
+        .drop_duplicates(subset="N° operación")
+        .set_index("N° operación")["Clave de cruce"]
+    )
+    pendientes["Clave"] = pendientes["Clave"].map(lambda c: mapa_clave.get(c, c))
+
+    # Varios pendientes individuales pueden terminar en el mismo grupo nuevo: sumarlos.
+    pendientes = pendientes.groupby("Clave", as_index=False).agg(
+        **{
+            "Importe Nave pendiente": ("Importe Nave pendiente", "sum"),
+            "Observación manual": ("Observación manual", lambda s: "; ".join(x for x in s if x)),
+        }
+    )
+    pendientes = pendientes.assign(_orden=pendientes["Clave"].map(_clave_orden)).sort_values("_orden")
+    pendientes = pendientes.drop(columns="_orden").reset_index(drop=True)
+    return pendientes
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CRUCE AUTOMÁTICO
 # ─────────────────────────────────────────────────────────────────────────────
@@ -712,17 +758,25 @@ def generar_excel_plantilla_cupones(
     df_nave_anterior_dep: pd.DataFrame | None = None,
     mes_anterior: str | None = None,
     mes_anterior_hoja: str | None = None,
+    df_nave_acred_mes_dep: pd.DataFrame | None = None,
     tolerancia: float = 1.0,
 ) -> tuple[bytes, pd.DataFrame]:
     """
     Arma el workbook con el mismo formato, hojas, encabezados y fórmulas que
     "Plantilla_Automatizacion_Conciliacion_Nave_FINAL". Retorna (bytes del
     excel, DataFrame de CRUCE AUTOMÁTICO — para las stats de la UI).
+
+    df_nave_acred_mes_dep (opcional): el extracto de Nave "por fecha de
+    acreditación" del mes actual — se usa solo para reasignar los
+    pendientes individuales del mes anterior al grupo nuevo donde
+    terminaron acreditados (ver remapear_pendientes_via_acreditacion), y
+    se vuelca tal cual en la hoja "Nave x Acred Mes" si se pasa.
     """
     con_anterior = df_banco_anterior_acred is not None and df_nave_anterior_dep is not None
 
     if con_anterior:
         pendientes = calcular_pendientes_anteriores(df_nave_anterior_dep, df_banco_anterior_acred, tolerancia)
+        pendientes = remapear_pendientes_via_acreditacion(pendientes, df_nave_acred_mes_dep)
     else:
         pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Observación manual"])
 
@@ -752,6 +806,10 @@ def generar_excel_plantilla_cupones(
     _escribir_tabla(wb, "NAVE ACTUAL", "NAVE ACTUAL",
                      preparar_nave_reporte(df_nave_actual_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
 
+    if df_nave_acred_mes_dep is not None:
+        _escribir_tabla(wb, "Nave x Acred Mes", "NAVE POR FECHA DE ACREDITACIÓN — MES ACTUAL",
+                         preparar_nave_reporte(df_nave_acred_mes_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
+
     if con_anterior:
         _escribir_tabla(wb, "PENDIENTES ANTERIORES", "Pendientes del mes anterior",
                          pendientes, _FORMATOS_PENDIENTES, _ANCHOS_PENDIENTES)
@@ -773,8 +831,17 @@ def correr_conciliacion_cupones_plantilla(
     archivo_nave_actual,
     archivo_banco_anterior=None,
     archivo_nave_anterior=None,
+    archivo_nave_acred_mes=None,
     tolerancia: float = 1.0,
 ) -> tuple[bytes, dict]:
+    """
+    archivo_nave_acred_mes (opcional): el extracto de Nave "por fecha de
+    acreditación" del mes actual. Se usa para resolver cupones individuales
+    que quedaron pendientes el mes anterior y el banco terminó acreditando
+    adentro de un grupo nuevo (armado recién este mes) — ver
+    remapear_pendientes_via_acreditacion(). También se vuelca tal cual en
+    la hoja "Nave x Acred Mes" si se pasa.
+    """
     df_banco_actual_acred = depurar_leyenda(importar_extracto_banco(archivo_banco_actual))
     df_nave_actual_dep = depurar_nave(importar_reporte_nave(archivo_nave_actual))
     anio_act, mes_act = _mes_predominante(df_nave_actual_dep, "Fecha de operación")
@@ -790,10 +857,14 @@ def correr_conciliacion_cupones_plantilla(
         mes_anterior = _etiqueta_completa(anio_ant, mes_ant)
         mes_anterior_hoja = _etiqueta_abreviada(anio_ant, mes_ant)
 
+    df_nave_acred_mes_dep = None
+    if archivo_nave_acred_mes is not None:
+        df_nave_acred_mes_dep = depurar_nave(importar_reporte_nave(archivo_nave_acred_mes))
+
     buf, cruce = generar_excel_plantilla_cupones(
         df_banco_actual_acred, df_nave_actual_dep, mes_actual,
         df_banco_anterior_acred, df_nave_anterior_dep, mes_anterior, mes_anterior_hoja,
-        tolerancia=tolerancia,
+        df_nave_acred_mes_dep, tolerancia=tolerancia,
     )
 
     conteo = cruce["Categoría conciliación"].value_counts().to_dict()
