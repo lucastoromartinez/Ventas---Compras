@@ -462,14 +462,46 @@ def _limpiar_dfs(lista):
 # EXPORTAR EN MEMORIA
 # ─────────────────────────────────────────────
 
+COLUMNAS_IMPORTE = ["Debe", "Haber", "Saldo", "Importe", "debito en $", "credito en $", "saldo en $", "importe"]
+
+
+AMOUNT_FORMAT = "#,##0.00"
+
+
+def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> pd.DataFrame:
+    df = df.copy()
+    for col in columnas:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    return df
+
+
+def _aplicar_formato_importes(ws, df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> None:
+    col_indices = [i for i, col in enumerate(df.columns, start=1) if col in columnas]
+    for col_idx in col_indices:
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=col_idx).number_format = AMOUNT_FORMAT
+
+
 def generar_excel_en_memoria_hipotecario(falta_mayor5, falta_extracto5,
                                           match_mayor_def, match_extracto_def):
+    falta_mayor5       = _forzar_importes_float(falta_mayor5)
+    falta_extracto5    = _forzar_importes_float(falta_extracto5)
+    match_mayor_def    = _forzar_importes_float(match_mayor_def)
+    match_extracto_def = _forzar_importes_float(match_extracto_def)
+
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         falta_mayor5.to_excel(writer,       sheet_name="Faltante Mayor",    index=False)
         falta_extracto5.to_excel(writer,    sheet_name="Faltante Extracto", index=False)
         match_mayor_def.to_excel(writer,    sheet_name="Match Mayor",       index=False)
         match_extracto_def.to_excel(writer, sheet_name="Match Extracto",    index=False)
+
+        wb = writer.book
+        _aplicar_formato_importes(wb["Faltante Mayor"],    falta_mayor5)
+        _aplicar_formato_importes(wb["Faltante Extracto"], falta_extracto5)
+        _aplicar_formato_importes(wb["Match Mayor"],        match_mayor_def)
+        _aplicar_formato_importes(wb["Match Extracto"],     match_extracto_def)
     return buf.getvalue()
 
 

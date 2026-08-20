@@ -778,11 +778,31 @@ def netear_falta_sistema(
 # EXPORTAR A BUFFER EN MEMORIA (descargable único)
 # ─────────────────────────────────────────────
 
+COLUMNAS_IMPORTE = [
+    "Imp. Neto Gravado IVA 0%", "IVA 2,5%", "Imp. Neto Gravado IVA 2,5%",
+    "IVA 5%", "Imp. Neto Gravado IVA 5%", "IVA 10,5%", "Imp. Neto Gravado IVA 10,5%",
+    "IVA 21%", "Imp. Neto Gravado IVA 21%", "IVA 27%", "Imp. Neto Gravado IVA 27%",
+    "Imp. Neto Gravado Total", "Imp. Neto No Gravado", "Imp. Op. Exentas",
+    "Otros Tributos", "Total IVA", "Imp. Total",
+    "Gravado_sistema", "Gravado_arca", "No Gravado_sistema", "No gravado_arca",
+    "Otros Tributos_arca", "Exentas_arca", "Imp. Total_sistema", "Imp. Total_arca",
+]
+
+
+def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> pd.DataFrame:
+    df = df.copy()
+    for col in columnas:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    return df
+
+
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
 ) -> bytes:
-    DATE_FORMAT = "DD/MM/YYYY"
+    DATE_FORMAT   = "DD/MM/YYYY"
+    AMOUNT_FORMAT = "#,##0.00"
 
     ordered_rev = [
         "Fecha_Sistema", "Fecha_arca",
@@ -795,28 +815,30 @@ def generar_excel_en_memoria(
         "Imp. Total_sistema",    "Imp. Total_arca",
         "comentario",
     ]
-    rev_out = (
+    rev_out = _forzar_importes_float(
         revisar[[c for c in ordered_rev if c in revisar.columns]]
-        .copy()
     )
     rev_date_cols = ["Fecha_Sistema", "Fecha_arca"]
 
-    fs_out       = falta_sistema.copy()
+    fs_out       = _forzar_importes_float(falta_sistema)
     fs_date_cols = ["Fecha_arca"]
 
-    def _prep_df(df: pd.DataFrame, date_col_names: list[str]) -> tuple[pd.DataFrame, list[int]]:
+    def _prep_df(df: pd.DataFrame, date_col_names: list[str]) -> tuple[pd.DataFrame, list[int], list[int]]:
         df = df.copy()
-        date_col_indices = []
+        date_col_indices   = []
+        amount_col_indices = []
         for i, col in enumerate(df.columns, start=1):
             if col in date_col_names:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
                 date_col_indices.append(i)
-        return df, date_col_indices
+            elif col in COLUMNAS_IMPORTE:
+                amount_col_indices.append(i)
+        return df, date_col_indices, amount_col_indices
 
-    rev_prep, rev_date_idx = _prep_df(rev_out, rev_date_cols)
-    fs_prep,  fs_date_idx  = _prep_df(fs_out,  fs_date_cols)
+    rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
+    fs_prep,  fs_date_idx,  fs_amount_idx  = _prep_df(fs_out,  fs_date_cols)
 
-    def _style_sheet(ws, date_col_indices: list[int]) -> None:
+    def _style_sheet(ws, date_col_indices: list[int], amount_col_indices: list[int]) -> None:
         thin          = Side(style="thin")
         header_fill   = PatternFill(start_color="C0C0C0", end_color="C0C0C0", fill_type="solid")
         header_font   = Font(bold=True)
@@ -832,6 +854,10 @@ def generar_excel_en_memoria(
             for row in range(2, ws.max_row + 1):
                 ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
 
+        for col_idx in amount_col_indices:
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).number_format = AMOUNT_FORMAT
+
         for col in ws.columns:
             max_len = max(
                 (len(str(cell.value)) if cell.value is not None else 0 for cell in col),
@@ -845,8 +871,8 @@ def generar_excel_en_memoria(
         fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
 
         wb = writer.book
-        _style_sheet(wb["revisar"],       rev_date_idx)
-        _style_sheet(wb["falta_sistema"], fs_date_idx)
+        _style_sheet(wb["revisar"],       rev_date_idx, rev_amount_idx)
+        _style_sheet(wb["falta_sistema"], fs_date_idx, fs_amount_idx)
 
     return buf.getvalue()
 
