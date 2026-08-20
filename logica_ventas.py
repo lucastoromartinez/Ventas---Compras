@@ -220,10 +220,38 @@ def consolidar_cruce_faltante_arca(
 # EXPORTAR EN MEMORIA
 # ─────────────────────────────────────────────
 
+COLUMNAS_IMPORTE = [
+    "imp_neto_gravado", "iva_ri", "perc_iibb", "perc_iva", "perc_gcias", "imp_total",
+    "Imp. Neto Gravado Total", "Imp. Neto No Gravado", "Imp. Op. Exentas",
+    "Otros Tributos", "Total IVA", "Imp. Total",
+]
+
+
+AMOUNT_FORMAT = "#,##0.00"
+
+
+def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> pd.DataFrame:
+    df = df.copy()
+    for col in columnas:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    return df
+
+
+def _aplicar_formato_importes(ws, df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> None:
+    col_indices = [i for i, col in enumerate(df.columns, start=1) if col in columnas]
+    for col_idx in col_indices:
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=col_idx).number_format = AMOUNT_FORMAT
+
+
 def generar_excel_en_memoria(
     faltante_en_sistema_definitivo: pd.DataFrame,
     faltante_en_arca_def: pd.DataFrame,
 ) -> bytes:
+    faltante_en_sistema_definitivo = _forzar_importes_float(faltante_en_sistema_definitivo)
+    faltante_en_arca_def           = _forzar_importes_float(faltante_en_arca_def)
+
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         faltante_en_sistema_definitivo.to_excel(
@@ -232,6 +260,10 @@ def generar_excel_en_memoria(
         faltante_en_arca_def.to_excel(
             writer, sheet_name="faltante_en_arca", index=False
         )
+
+        wb = writer.book
+        _aplicar_formato_importes(wb["faltante_en_sistema"], faltante_en_sistema_definitivo)
+        _aplicar_formato_importes(wb["faltante_en_arca"],    faltante_en_arca_def)
     return buffer.getvalue()
 
 
