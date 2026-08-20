@@ -22,6 +22,7 @@ app (Streamlit pasa file-like en vez de Path).
 """
 
 from io import BytesIO
+from itertools import combinations
 
 import pandas as pd
 from openpyxl import Workbook
@@ -359,6 +360,65 @@ def calcular_cruce_automatico(
     return pd.DataFrame(filas)
 
 
+_COLUMNAS_AJUSTE_DIAGNOSTICO = ["Retención IIBB CABA", "IVA del costo", "Costo del servicio", "Propina"]
+
+
+def agregar_diagnostico_diferencia(
+    cruce: pd.DataFrame,
+    df_nave_actual_dep: pd.DataFrame,
+    tolerancia: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Agrega la columna "Diagnóstico diferencia" a CRUCE AUTOMÁTICO: para las
+    claves en "Diferencia Banco vs Nave" (Banco y Nave presentes pero no
+    cierran), prueba si restarle al Monto neto de Nave alguna combinación de
+    columnas de ajuste (Retención IIBB CABA, IVA del costo, Costo del
+    servicio, Propina — la misma lógica de ajuste que usaba el cruce viejo)
+    hace que cierre contra el banco dentro de la tolerancia.
+
+    Es solo diagnóstico manual, no cambia la Categoría conciliación: si
+    encuentra una combinación que explica la diferencia, la deja como
+    comentario (p.ej. "Retención IIBB CABA + IVA del costo"); si ninguna
+    combinación la explica, deja la celda en blanco.
+
+    No aplica lo mismo para "Cupones individuales" vs "Grupo": la búsqueda
+    de ajuste es idéntica para ambos, por clave, sin distinguir tipo.
+    """
+    cruce = cruce.copy()
+    cruce["Diagnóstico diferencia"] = ""
+
+    columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
+    if not columnas:
+        return cruce
+
+    ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
+    candidatas = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
+
+    diagnosticos = {}
+    for _, fila in candidatas.iterrows():
+        clave = fila["Clave de cruce"]
+        if clave not in ajustes_sum.index:
+            continue
+        valores_ajuste = ajustes_sum.loc[clave]
+        nave_val = fila["Nave"]
+        banco_val = fila["Banco"]
+
+        for r in range(1, len(columnas) + 1):
+            encontrado = False
+            for combo in combinations(columnas, r):
+                ajustado = nave_val - sum(valores_ajuste[c] for c in combo)
+                if abs(ajustado - banco_val) <= tolerancia:
+                    diagnosticos[clave] = " + ".join(combo)
+                    encontrado = True
+                    break
+            if encontrado:
+                break
+
+    if diagnosticos:
+        cruce["Diagnóstico diferencia"] = cruce["Clave de cruce"].map(diagnosticos).fillna("")
+    return cruce
+
+
 def _tipo_por_conteo(df_nave_dep: pd.DataFrame) -> pd.Series:
     """"Grupo" si la clave tiene más de una fila de Nave, "Individual" si tiene una sola."""
     conteo = df_nave_dep.groupby("Clave de cruce").size()
@@ -507,20 +567,23 @@ def _escribir_cruce_automatico(wb, cruce: pd.DataFrame, mes_anterior: str | None
     headers = [
         "Clave de cruce", "Banco", "Nave", "Diferencia",
         col_pendiente, col_acreditado, "Diferencia residual", "Categoría conciliación",
+        "Diagnóstico diferencia",
     ]
     _escribir_encabezado_hoja(ws, f"Cruce automático — {mes_actual}", headers)
 
+    tiene_diagnostico = "Diagnóstico diferencia" in cruce.columns
     for _, fila in cruce.iterrows():
         ws.append([
             fila["Clave de cruce"], fila["Banco"], fila["Nave"], fila["Diferencia"],
             fila["Pendiente mes anterior"], fila["mes anterior acreditado en mes actual"],
             fila["Diferencia residual"], fila["Categoría conciliación"],
+            fila["Diagnóstico diferencia"] if tiene_diagnostico else "",
         ])
 
     n = len(cruce)
     fila_inicio, fila_fin = 4, 3 + n
     for fila_idx in range(fila_inicio, fila_fin + 1):
-        for col_idx in range(1, 9):
+        for col_idx in range(1, 10):
             celda = ws.cell(row=fila_idx, column=col_idx)
             celda.border = _BORDE_FINO
             celda.font = _FUENTE_DATO
@@ -534,13 +597,13 @@ def _escribir_cruce_automatico(wb, cruce: pd.DataFrame, mes_anterior: str | None
         celda = ws.cell(row=fila_total, column=col_idx, value=f"=SUBTOTAL(109,{letra}{fila_inicio}:{letra}{fila_fin})")
         celda.number_format = "#,##0.00"
     ws.cell(row=fila_total, column=8, value="Se actualiza al filtrar")
-    for col_idx in range(1, 9):
+    for col_idx in range(1, 10):
         celda = ws.cell(row=fila_total, column=col_idx)
         celda.font = _FUENTE_TOTAL
         celda.border = _BORDE_FINO
 
     if n:
-        rango_cf = f"A{fila_inicio}:H{fila_fin}"
+        rango_cf = f"A{fila_inicio}:I{fila_fin}"
         columna_cat = f"$H{fila_inicio}"
         reglas = [
             ("mes anterior acreditado", "FFD9EAF7"),
@@ -553,7 +616,7 @@ def _escribir_cruce_automatico(wb, cruce: pd.DataFrame, mes_anterior: str | None
             formula = f'ISNUMBER(SEARCH("{texto}",{columna_cat}))'
             ws.conditional_formatting.add(rango_cf, FormulaRule(formula=[formula], fill=relleno))
 
-    anchos = {1: 20, 2: 18, 3: 18, 4: 18, 5: 22, 6: 26, 7: 20, 8: 46}
+    anchos = {1: 20, 2: 18, 3: 18, 4: 18, 5: 22, 6: 26, 7: 20, 8: 46, 9: 40}
     for col_idx, ancho in anchos.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = ancho
 
@@ -664,6 +727,7 @@ def generar_excel_plantilla_cupones(
         pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Observación manual"])
 
     cruce = calcular_cruce_automatico(df_nave_actual_dep, df_banco_actual_acred, pendientes, tolerancia)
+    cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia)
     datos_conciliacion = calcular_conciliacion_diferencia(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
         mes_anterior, mes_actual,
