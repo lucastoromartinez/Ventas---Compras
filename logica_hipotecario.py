@@ -102,13 +102,17 @@ def normalize_extracto_hipotecario(df: pd.DataFrame) -> pd.DataFrame:
 # HELPERS
 # ─────────────────────────────────────────────
 
-def _limpiar(texto: str) -> str:
+def _limpiar(texto: str, lower: bool = True) -> str:
     if not isinstance(texto, str): return ""
-    texto = texto.lower()
+    if lower:
+        texto = texto.lower()
     texto = re.sub(r"[.\-\s,:;]", "", texto)
     texto = re.sub(r"[^\x20-\x7EáéíóúñüÁÉÍÓÚÑÜ]", "", texto)
-    return (texto.replace("á","a").replace("é","e").replace("í","i")
-                 .replace("ó","o").replace("ú","u").replace("ñ","n").replace("ü","u"))
+    reemplazos = {"á":"a","é":"e","í":"i","ó":"o","ú":"u","ñ":"n","ü":"u",
+                  "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U","Ñ":"N","Ü":"U"}
+    for a, b in reemplazos.items():
+        texto = texto.replace(a, b)
+    return texto
 
 def _contiene(texto_limpio: str, *palabras: str) -> bool:
     return any(_limpiar(p) in texto_limpio for p in palabras)
@@ -130,7 +134,8 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     if col_desc is None:    raise ValueError(f"Columna 'descripcion' no encontrada. Disponibles: {list(df.columns)}")
     if col_importe is None: raise ValueError(f"Columna 'importe' no encontrada. Disponibles: {list(df.columns)}")
 
-    desc = df[col_desc].apply(_limpiar)
+    desc      = df[col_desc].apply(_limpiar)
+    desc_case = df[col_desc].apply(lambda t: _limpiar(t, lower=False))
 
     def es_redondo_1000(importe) -> bool:
         try:    return float(importe) % 1000 == 0
@@ -148,22 +153,26 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     es_keyword_sena = desc.apply(lambda d: _contiene(d, "cashout", "recibisteuna transferencia", "transfenv"))
 
     condiciones = [
+        # Señas: keyword match SIN cuit propio (se define primero para que no se la
+        # "roben" otras categorías por falsos positivos en el nombre del cliente)
+        es_keyword_sena & ~es_cuit_propio,
+        # Transf. entre cuentas: keyword match CON cuit propio, o palabras exclusivas
+        (es_keyword_sena & es_cuit_propio) |
+        desc.apply(lambda d: _contiene(d, "tefdatanetmt", "ctaprop")),
         desc.apply(lambda d: _contiene(d, "prisma")),
         desc.apply(lambda d: _contiene(d, "debin")) & df[col_importe].apply(es_redondo_1000),
         desc.apply(lambda d: _contiene(d, "debin")),
         desc.apply(lambda d: _contiene(d, "comerciosfirstdata")),
         desc.apply(lambda d: _contiene(d, "cabal")),
-        desc.apply(lambda d: _contiene(d, "impuesto","iva","comision","paquete","n/dinteradelccs/acuerd","sircreb")),
+        # "IVA" solo cuenta en mayúsculas (evita falsos positivos con nombres
+        # como "Paiva", "Rivas", "Ivan", que en minúscula contienen "iva")
+        desc.apply(lambda d: _contiene(d, "impuesto","comision","paquete","n/dinteradelccs/acuerd","sircreb")) |
+        desc_case.str.contains("IVA", regex=False, na=False),
         desc.apply(lambda d: "cuota" in d and "prestamo" in d),
         desc.apply(lambda d: _contiene(d, "sancor","swiss","berkley","laholando")),
-        # Señas: keyword match SIN cuit propio (va antes que Transf. entre cuentas)
-        es_keyword_sena & ~es_cuit_propio,
-        # Transf. entre cuentas: keyword match CON cuit propio, o palabras exclusivas
-        (es_keyword_sena & es_cuit_propio) |
-        desc.apply(lambda d: _contiene(d, "tefdatanetmt", "ctaprop")),
     ]
-    categorias = ["Prisma","Transf. entre cuentas","Acred. Debin","Acred. TC","Cabal",
-                  "Gastos Bancarios","Prestamo","Seguros","Señas","Transf. entre cuentas"]
+    categorias = ["Señas","Transf. entre cuentas","Prisma","Transf. entre cuentas","Acred. Debin","Acred. TC","Cabal",
+                  "Gastos Bancarios","Prestamo","Seguros"]
 
     df["conciliacion"] = "0"
     for cond, cat in zip(condiciones, categorias):
