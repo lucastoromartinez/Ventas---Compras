@@ -1,7 +1,7 @@
 import streamlit as st
 from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
-from logica_cupones     import correr_conciliacion_cupones, correr_conciliacion_cupones_con_anterior
+from logica_cupones     import correr_conciliacion_cupones_plantilla
 from logica_fiser       import correr_conciliacion_fiser
 
 st.set_page_config(
@@ -351,18 +351,12 @@ with tab_cupones:
     if boton_c and todos_c:
         with st.spinner("Procesando Cupones..."):
             try:
-                if con_anterior:
-                    buf_c, stats_c = correr_conciliacion_cupones_con_anterior(
-                        archivo_banco_actual=archivo_banco_c,
-                        archivo_nave_actual=archivo_nave_c,
-                        archivo_banco_anterior=archivo_banco_ant,
-                        archivo_nave_anterior=archivo_nave_ant,
-                    )
-                else:
-                    buf_c, stats_c = correr_conciliacion_cupones(
-                        archivo_banco=archivo_banco_c,
-                        archivo_nave=archivo_nave_c,
-                    )
+                buf_c, stats_c = correr_conciliacion_cupones_plantilla(
+                    archivo_banco_actual=archivo_banco_c,
+                    archivo_nave_actual=archivo_nave_c,
+                    archivo_banco_anterior=archivo_banco_ant,
+                    archivo_nave_anterior=archivo_nave_ant,
+                )
                 st.session_state["resultado_cupones"] = {"buf": buf_c, "stats": stats_c}
             except Exception as e:
                 st.error(f"Error al procesar Cupones: {e}")
@@ -373,43 +367,38 @@ with tab_cupones:
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-        clase_fb = "error" if s["falta_banco"] > 0 else "metric-card"
-        clase_fn = "error" if s["falta_nave"]  > 0 else "metric-card"
+        clase_bsn = "error" if s["banco_sin_nave"] > 0 else "metric-card"
+        clase_dif = "error" if s["diferencia_banco_vs_nave"] > 0 else "metric-card"
+
+        titulo_meses = s["mes_actual"]
+        if s["mes_anterior"]:
+            titulo_meses += f" (con pendientes de {s['mes_anterior']})"
+        st.caption(titulo_meses)
 
         st.markdown(f"""
         <div class="metric-row">
             <div class="metric-card">
-                <div class="metric-value">{s['grupos_matcheados']}</div>
-                <div class="metric-label">Grupos matcheados</div>
+                <div class="metric-value">{s['conciliado']}</div>
+                <div class="metric-label">Conciliado</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">{s['match_ajustado']}</div>
-                <div class="metric-label">Match con ajuste</div>
+                <div class="metric-value">{s['mes_anterior_acreditado']}</div>
+                <div class="metric-label">Mes anterior acreditado</div>
             </div>
-            <div class="metric-card {clase_fb}">
-                <div class="metric-value">{s['falta_banco']}</div>
-                <div class="metric-label">Falta Banco</div>
+            <div class="metric-card">
+                <div class="metric-value">{s['pendiente_actual']}</div>
+                <div class="metric-label">Pendiente por acreditar</div>
             </div>
-            <div class="metric-card {clase_fn}">
-                <div class="metric-value">{s['falta_nave']}</div>
-                <div class="metric-label">Falta Nave</div>
+            <div class="metric-card {clase_dif}">
+                <div class="metric-value">{s['diferencia_banco_vs_nave']}</div>
+                <div class="metric-label">Diferencia Banco vs Nave</div>
+            </div>
+            <div class="metric-card {clase_bsn}">
+                <div class="metric-value">{s['banco_sin_nave']}</div>
+                <div class="metric-label">Banco sin Nave / revisar</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-
-        if "pendiente_mes_anterior" in s:
-            st.markdown(f"""
-            <div class="metric-row">
-                <div class="metric-card">
-                    <div class="metric-value">{s['acreditado_mes_anterior']}</div>
-                    <div class="metric-label">Acreditado del mes anterior</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-value">{s['pendiente_mes_anterior']}</div>
-                    <div class="metric-label">Pendiente del mes anterior</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
