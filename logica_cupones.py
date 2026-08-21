@@ -290,6 +290,107 @@ def calcular_pendientes_anteriores(
     return df
 
 
+def remapear_pendientes_via_acreditacion(
+    pendientes_anteriores: pd.DataFrame,
+    df_nave_acred_mes_dep: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    Un cupón individual (sin grupo) que quedó pendiente el mes anterior a
+    veces el banco lo termina acreditando adentro de un grupo nuevo,
+    armado recién este mes — un grupo que no existía el mes anterior, así
+    que el cruce por clave no lo encuentra ahí (pendientes_anteriores lo
+    tiene bajo su viejo N° de operación individual, pero CRUCE AUTOMÁTICO
+    de este mes solo conoce la clave del grupo nuevo) y aparece una
+    "Diferencia Banco vs Nave" en el grupo que en realidad no es tal: el
+    cupón sí se cobró, solo que mezclado en un grupo que no existía antes.
+
+    Si se pasa el extracto de Nave "por fecha de acreditación" del mes
+    actual (trae, agrupado, todo lo que se acreditó este mes sin importar
+    cuándo pasó la operación), buscamos ahí, por N° de operación, a qué
+    grupo terminó perteneciendo cada pendiente individual y reasignamos su
+    "Clave" a la del grupo nuevo — así CRUCE AUTOMÁTICO lo suma dentro de
+    ese grupo en vez de dejarlo perdido bajo el número de operación viejo.
+    Si no se pasa el archivo, o un pendiente no aparece ahí, queda como
+    estaba (bajo su propio N° de operación).
+    """
+    pendientes = pendientes_anteriores.copy()
+    if df_nave_acred_mes_dep is None or pendientes.empty:
+        return pendientes
+
+    mapa_clave = (
+        df_nave_acred_mes_dep
+        .drop_duplicates(subset="N° operación")
+        .set_index("N° operación")["Clave de cruce"]
+    )
+    pendientes["Clave"] = pendientes["Clave"].map(lambda c: mapa_clave.get(c, c))
+
+    # Varios pendientes individuales pueden terminar en el mismo grupo nuevo: sumarlos.
+    pendientes = pendientes.groupby("Clave", as_index=False).agg(
+        **{
+            "Importe Nave pendiente": ("Importe Nave pendiente", "sum"),
+            "Observación manual": ("Observación manual", lambda s: "; ".join(x for x in s if x)),
+        }
+    )
+    pendientes = pendientes.assign(_orden=pendientes["Clave"].map(_clave_orden)).sort_values("_orden")
+    pendientes = pendientes.drop(columns="_orden").reset_index(drop=True)
+    return pendientes
+
+
+def completar_pendientes_via_acreditacion(
+    pendientes_anteriores: pd.DataFrame,
+    df_nave_acred_mes_dep: pd.DataFrame | None,
+    anio_anterior: int | None,
+    mes_anterior_num: int | None,
+) -> pd.DataFrame:
+    """
+    Cupones que salieron el mes anterior, sin grupo (individuales), y el
+    banco los termina acreditando dentro de un grupo armado recién este
+    mes — un grupo que el mes anterior ni siquiera existía. Nave tampoco
+    llegó a marcarles una Fecha de acreditación en el mes anterior (el
+    grupo no estaba cerrado todavía), así que ningún extracto de Nave del
+    mes anterior — ni "por fecha de cobro" ni "por fecha de acreditación"
+    — los puede mostrar como pendientes: simplemente no existen ahí. No
+    son diferencias reales, son cupones que cambiaron de clave.
+
+    La única forma de encontrarlos es mirando el extracto de Nave "por
+    fecha de acreditación" DE ESTE MES: como trae agrupado todo lo que se
+    acreditó este mes sin importar cuándo pasó la operación, filtrando
+    las filas cuya Fecha de operación cae en el mes anterior se obtiene,
+    directamente y ya resuelta a la clave del grupo nuevo, la plata que
+    el mes anterior dejó pendiente sin que ese pendiente hubiera podido
+    detectarse en su momento.
+
+    Primero remapea (remapear_pendientes_via_acreditacion) los pendientes
+    que ya se habían detectado el mes anterior y el banco terminó
+    acreditando en un grupo nuevo; después agrega, como pendientes
+    nuevos, las claves que salgan de ese filtro y todavía no estén
+    contempladas (para no duplicar plata ya explicada por otro lado).
+    """
+    pendientes = remapear_pendientes_via_acreditacion(pendientes_anteriores, df_nave_acred_mes_dep)
+    if df_nave_acred_mes_dep is None or anio_anterior is None or mes_anterior_num is None:
+        return pendientes
+
+    mask_mes_anterior = (
+        (df_nave_acred_mes_dep["Fecha de operación"].dt.year == anio_anterior) &
+        (df_nave_acred_mes_dep["Fecha de operación"].dt.month == mes_anterior_num)
+    )
+    derivadas = df_nave_acred_mes_dep[mask_mes_anterior].groupby("Clave de cruce")["Monto neto"].sum()
+
+    claves_existentes = set(pendientes["Clave"])
+    nuevas = derivadas[~derivadas.index.isin(claves_existentes)]
+    if len(nuevas):
+        extra = pd.DataFrame({
+            "Clave": nuevas.index,
+            "Importe Nave pendiente": nuevas.values.round(2),
+            "Observación manual": "Detectado vía Nave por fecha de acreditación",
+        })
+        pendientes = pd.concat([pendientes, extra], ignore_index=True)
+
+    pendientes = pendientes.assign(_orden=pendientes["Clave"].map(_clave_orden)).sort_values("_orden")
+    pendientes = pendientes.drop(columns="_orden").reset_index(drop=True)
+    return pendientes
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CRUCE AUTOMÁTICO
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,52 +468,69 @@ def agregar_diagnostico_diferencia(
     cruce: pd.DataFrame,
     df_nave_actual_dep: pd.DataFrame,
     tolerancia: float = 1.0,
+    df_nave_acred_mes_dep: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Agrega la columna "Diagnóstico diferencia" a CRUCE AUTOMÁTICO: para las
     claves en "Diferencia Banco vs Nave" (Banco y Nave presentes pero no
-    cierran), prueba si restarle al Monto neto de Nave alguna combinación de
-    columnas de ajuste (Retención IIBB CABA, IVA del costo, Costo del
-    servicio, Propina — la misma lógica de ajuste que usaba el cruce viejo)
-    hace que cierre contra el banco dentro de la tolerancia.
+    cierran), prueba dos cosas, en orden:
+
+    1. Si restarle al Monto neto de Nave alguna combinación de columnas de
+       ajuste (Retención IIBB CABA, IVA del costo, Costo del servicio,
+       Propina — la misma lógica de ajuste que usaba el cruce viejo) hace
+       que cierre contra el banco dentro de la tolerancia.
+    2. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
+       mes actual: si la clave ahí (que puede traer otra composición de
+       operaciones — p.ej. un grupo que después de bajar los extractos
+       terminó absorbiendo operaciones que a la fecha de cobro todavía no
+       estaban asignadas) suma un monto que sí cierra contra el banco.
 
     Es solo diagnóstico manual, no cambia la Categoría conciliación: si
-    encuentra una combinación que explica la diferencia, la deja como
-    comentario (p.ej. "Retención IIBB CABA + IVA del costo"); si ninguna
-    combinación la explica, deja la celda en blanco.
+    alguna de las dos explica la diferencia, la deja como comentario; si
+    ninguna la explica, deja la celda en blanco.
 
     No aplica lo mismo para "Cupones individuales" vs "Grupo": la búsqueda
-    de ajuste es idéntica para ambos, por clave, sin distinguir tipo.
+    es idéntica para ambos, por clave, sin distinguir tipo.
     """
     cruce = cruce.copy()
     cruce["Diagnóstico diferencia"] = ""
 
-    columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
-    if not columnas:
+    candidatas = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
+    if candidatas.empty:
         return cruce
 
-    ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
-    candidatas = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
-
     diagnosticos = {}
-    for _, fila in candidatas.iterrows():
-        clave = fila["Clave de cruce"]
-        if clave not in ajustes_sum.index:
-            continue
-        valores_ajuste = ajustes_sum.loc[clave]
-        nave_val = fila["Nave"]
-        banco_val = fila["Banco"]
 
-        for r in range(1, len(columnas) + 1):
-            encontrado = False
-            for combo in combinations(columnas, r):
-                ajustado = nave_val - sum(valores_ajuste[c] for c in combo)
-                if abs(ajustado - banco_val) <= tolerancia:
-                    diagnosticos[clave] = " + ".join(combo)
-                    encontrado = True
+    columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
+    if columnas:
+        ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave not in ajustes_sum.index:
+                continue
+            valores_ajuste = ajustes_sum.loc[clave]
+            nave_val = fila["Nave"]
+            banco_val = fila["Banco"]
+
+            for r in range(1, len(columnas) + 1):
+                encontrado = False
+                for combo in combinations(columnas, r):
+                    ajustado = nave_val - sum(valores_ajuste[c] for c in combo)
+                    if abs(ajustado - banco_val) <= tolerancia:
+                        diagnosticos[clave] = " + ".join(combo)
+                        encontrado = True
+                        break
+                if encontrado:
                     break
-            if encontrado:
-                break
+
+    if df_nave_acred_mes_dep is not None:
+        acred_sum = df_nave_acred_mes_dep.groupby("Clave de cruce")["Monto neto"].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave in diagnosticos or clave not in acred_sum.index:
+                continue
+            if abs(acred_sum[clave] - fila["Banco"]) <= tolerancia:
+                diagnosticos[clave] = "Cierra con Nave por fecha de acreditación"
 
     if diagnosticos:
         cruce["Diagnóstico diferencia"] = cruce["Clave de cruce"].map(diagnosticos).fillna("")
@@ -435,11 +553,19 @@ def calcular_conciliacion_diferencia(
     df_nave_anterior_dep: pd.DataFrame | None,
     mes_anterior: str | None,
     mes_actual: str,
+    df_nave_acred_mes_dep: pd.DataFrame | None = None,
 ) -> dict:
     """
     Importes de la cascada "CONCILIACIÓN DIFERENCIA": parte de la
     diferencia total Banco - Nave y la va explicando categoría por
     categoría (de CRUCE AUTOMÁTICO) hasta llegar a $0.
+
+    df_nave_acred_mes_dep (opcional): el extracto de Nave "por fecha de
+    acreditación" del mes actual. Un grupo que se formó recién este mes
+    (ver completar_pendientes_via_acreditacion) no tiene ninguna fila en
+    df_nave_anterior_dep, así que el conteo Grupo/Individual para el
+    texto "$X grupos + $Y individuales" no lo puede clasificar ahí — se
+    usa este extracto como respaldo para esos casos.
     """
     banco_total = cruce["Banco"].sum()
     nave_total = cruce["Nave"].sum()
@@ -455,7 +581,11 @@ def calcular_conciliacion_diferencia(
 
     if df_nave_anterior_dep is not None and len(cat_mes_anterior):
         tipo_anterior = _tipo_por_conteo(df_nave_anterior_dep)
-        tipo_por_clave = cat_mes_anterior["Clave de cruce"].map(tipo_anterior).fillna("Individual")
+        tipo_por_clave = cat_mes_anterior["Clave de cruce"].map(tipo_anterior)
+        if df_nave_acred_mes_dep is not None:
+            tipo_acred_mes = _tipo_por_conteo(df_nave_acred_mes_dep)
+            tipo_por_clave = tipo_por_clave.fillna(cat_mes_anterior["Clave de cruce"].map(tipo_acred_mes))
+        tipo_por_clave = tipo_por_clave.fillna("Individual")
     else:
         tipo_por_clave = pd.Series("Individual", index=cat_mes_anterior.index)
     monto_grupos_acreditados = cat_mes_anterior.loc[
@@ -712,25 +842,36 @@ def generar_excel_plantilla_cupones(
     df_nave_anterior_dep: pd.DataFrame | None = None,
     mes_anterior: str | None = None,
     mes_anterior_hoja: str | None = None,
+    df_nave_acred_mes_dep: pd.DataFrame | None = None,
     tolerancia: float = 1.0,
 ) -> tuple[bytes, pd.DataFrame]:
     """
     Arma el workbook con el mismo formato, hojas, encabezados y fórmulas que
     "Plantilla_Automatizacion_Conciliacion_Nave_FINAL". Retorna (bytes del
     excel, DataFrame de CRUCE AUTOMÁTICO — para las stats de la UI).
+
+    df_nave_acred_mes_dep (opcional): el extracto de Nave "por fecha de
+    acreditación" del mes actual — se usa para completar los pendientes
+    del mes anterior con cupones que el banco terminó acreditando dentro
+    de un grupo nuevo (ver completar_pendientes_via_acreditacion), y se
+    vuelca tal cual en la hoja "Nave x Acred Mes" si se pasa.
     """
     con_anterior = df_banco_anterior_acred is not None and df_nave_anterior_dep is not None
 
     if con_anterior:
         pendientes = calcular_pendientes_anteriores(df_nave_anterior_dep, df_banco_anterior_acred, tolerancia)
+        anio_ant, mes_ant = _mes_predominante(df_nave_anterior_dep, "Fecha de operación")
+        pendientes = completar_pendientes_via_acreditacion(
+            pendientes, df_nave_acred_mes_dep, anio_ant, mes_ant,
+        )
     else:
         pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Observación manual"])
 
     cruce = calcular_cruce_automatico(df_nave_actual_dep, df_banco_actual_acred, pendientes, tolerancia)
-    cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia)
+    cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia, df_nave_acred_mes_dep)
     datos_conciliacion = calcular_conciliacion_diferencia(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
-        mes_anterior, mes_actual,
+        mes_anterior, mes_actual, df_nave_acred_mes_dep,
     )
 
     wb = Workbook()
@@ -751,6 +892,10 @@ def generar_excel_plantilla_cupones(
                      preparar_banco_reporte(df_banco_actual_acred), _FORMATOS_BANCO, _ANCHOS_BANCO)
     _escribir_tabla(wb, "NAVE ACTUAL", "NAVE ACTUAL",
                      preparar_nave_reporte(df_nave_actual_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
+
+    if df_nave_acred_mes_dep is not None:
+        _escribir_tabla(wb, "Nave x Acred Mes", "NAVE POR FECHA DE ACREDITACIÓN — MES ACTUAL",
+                         preparar_nave_reporte(df_nave_acred_mes_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
 
     if con_anterior:
         _escribir_tabla(wb, "PENDIENTES ANTERIORES", "Pendientes del mes anterior",
@@ -773,8 +918,17 @@ def correr_conciliacion_cupones_plantilla(
     archivo_nave_actual,
     archivo_banco_anterior=None,
     archivo_nave_anterior=None,
+    archivo_nave_acred_mes=None,
     tolerancia: float = 1.0,
 ) -> tuple[bytes, dict]:
+    """
+    archivo_nave_acred_mes (opcional): el extracto de Nave "por fecha de
+    acreditación" del mes actual. Se usa para resolver cupones individuales
+    que quedaron pendientes el mes anterior y el banco terminó acreditando
+    adentro de un grupo nuevo (armado recién este mes) — ver
+    remapear_pendientes_via_acreditacion(). También se vuelca tal cual en
+    la hoja "Nave x Acred Mes" si se pasa.
+    """
     df_banco_actual_acred = depurar_leyenda(importar_extracto_banco(archivo_banco_actual))
     df_nave_actual_dep = depurar_nave(importar_reporte_nave(archivo_nave_actual))
     anio_act, mes_act = _mes_predominante(df_nave_actual_dep, "Fecha de operación")
@@ -790,10 +944,14 @@ def correr_conciliacion_cupones_plantilla(
         mes_anterior = _etiqueta_completa(anio_ant, mes_ant)
         mes_anterior_hoja = _etiqueta_abreviada(anio_ant, mes_ant)
 
+    df_nave_acred_mes_dep = None
+    if archivo_nave_acred_mes is not None:
+        df_nave_acred_mes_dep = depurar_nave(importar_reporte_nave(archivo_nave_acred_mes))
+
     buf, cruce = generar_excel_plantilla_cupones(
         df_banco_actual_acred, df_nave_actual_dep, mes_actual,
         df_banco_anterior_acred, df_nave_anterior_dep, mes_anterior, mes_anterior_hoja,
-        tolerancia=tolerancia,
+        df_nave_acred_mes_dep, tolerancia=tolerancia,
     )
 
     conteo = cruce["Categoría conciliación"].value_counts().to_dict()
