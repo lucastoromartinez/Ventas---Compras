@@ -334,20 +334,28 @@ with tab_cupones:
             archivo_nave_ant = st.file_uploader("nave_ant", type=["xlsx","xls"],
                                                  label_visibility="collapsed", key="nave_ant")
 
-        st.markdown(
-            '<div class="upload-label">Reporte Nave por fecha de acreditación (mes actual) — opcional, '
-            'resuelve cupones individuales del mes anterior que se acreditaron dentro de un grupo nuevo</div>',
-            unsafe_allow_html=True,
+        con_acred_mes = st.checkbox(
+            "También tengo el reporte Nave por fecha de acreditación del mes actual "
+            "(resuelve cupones pendientes del mes anterior que se acreditaron dentro de un grupo nuevo)",
+            key="cupones_con_acred_mes",
         )
-        archivo_nave_acred_mes = st.file_uploader("nave_acred_mes", type=["xlsx","xls"],
-                                                    label_visibility="collapsed", key="nave_acred_mes")
+        if con_acred_mes:
+            st.markdown('<div class="upload-label">Reporte Nave por fecha de acreditación (mes actual)</div>',
+                        unsafe_allow_html=True)
+            archivo_nave_acred_mes = st.file_uploader("nave_acred_mes", type=["xlsx","xls"],
+                                                        label_visibility="collapsed", key="nave_acred_mes")
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
     if con_anterior:
-        todos_c = all([archivo_banco_c, archivo_nave_c, archivo_banco_ant, archivo_nave_ant])
+        requeridos = [archivo_banco_c, archivo_nave_c, archivo_banco_ant, archivo_nave_ant]
+        if con_acred_mes:
+            requeridos.append(archivo_nave_acred_mes)
+        todos_c = all(requeridos)
         if not todos_c:
-            st.info("Cargá los 4 archivos (mes actual y mes anterior) para habilitar la conciliación.")
+            st.info("Cargá los archivos requeridos (mes actual, mes anterior"
+                    + (" y Nave por fecha de acreditación" if con_acred_mes else "")
+                    + ") para habilitar la conciliación.")
     else:
         todos_c = all([archivo_banco_c, archivo_nave_c])
         if not todos_c:
