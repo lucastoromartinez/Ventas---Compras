@@ -468,52 +468,69 @@ def agregar_diagnostico_diferencia(
     cruce: pd.DataFrame,
     df_nave_actual_dep: pd.DataFrame,
     tolerancia: float = 1.0,
+    df_nave_acred_mes_dep: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Agrega la columna "Diagnóstico diferencia" a CRUCE AUTOMÁTICO: para las
     claves en "Diferencia Banco vs Nave" (Banco y Nave presentes pero no
-    cierran), prueba si restarle al Monto neto de Nave alguna combinación de
-    columnas de ajuste (Retención IIBB CABA, IVA del costo, Costo del
-    servicio, Propina — la misma lógica de ajuste que usaba el cruce viejo)
-    hace que cierre contra el banco dentro de la tolerancia.
+    cierran), prueba dos cosas, en orden:
+
+    1. Si restarle al Monto neto de Nave alguna combinación de columnas de
+       ajuste (Retención IIBB CABA, IVA del costo, Costo del servicio,
+       Propina — la misma lógica de ajuste que usaba el cruce viejo) hace
+       que cierre contra el banco dentro de la tolerancia.
+    2. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
+       mes actual: si la clave ahí (que puede traer otra composición de
+       operaciones — p.ej. un grupo que después de bajar los extractos
+       terminó absorbiendo operaciones que a la fecha de cobro todavía no
+       estaban asignadas) suma un monto que sí cierra contra el banco.
 
     Es solo diagnóstico manual, no cambia la Categoría conciliación: si
-    encuentra una combinación que explica la diferencia, la deja como
-    comentario (p.ej. "Retención IIBB CABA + IVA del costo"); si ninguna
-    combinación la explica, deja la celda en blanco.
+    alguna de las dos explica la diferencia, la deja como comentario; si
+    ninguna la explica, deja la celda en blanco.
 
     No aplica lo mismo para "Cupones individuales" vs "Grupo": la búsqueda
-    de ajuste es idéntica para ambos, por clave, sin distinguir tipo.
+    es idéntica para ambos, por clave, sin distinguir tipo.
     """
     cruce = cruce.copy()
     cruce["Diagnóstico diferencia"] = ""
 
-    columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
-    if not columnas:
+    candidatas = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
+    if candidatas.empty:
         return cruce
 
-    ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
-    candidatas = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
-
     diagnosticos = {}
-    for _, fila in candidatas.iterrows():
-        clave = fila["Clave de cruce"]
-        if clave not in ajustes_sum.index:
-            continue
-        valores_ajuste = ajustes_sum.loc[clave]
-        nave_val = fila["Nave"]
-        banco_val = fila["Banco"]
 
-        for r in range(1, len(columnas) + 1):
-            encontrado = False
-            for combo in combinations(columnas, r):
-                ajustado = nave_val - sum(valores_ajuste[c] for c in combo)
-                if abs(ajustado - banco_val) <= tolerancia:
-                    diagnosticos[clave] = " + ".join(combo)
-                    encontrado = True
+    columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
+    if columnas:
+        ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave not in ajustes_sum.index:
+                continue
+            valores_ajuste = ajustes_sum.loc[clave]
+            nave_val = fila["Nave"]
+            banco_val = fila["Banco"]
+
+            for r in range(1, len(columnas) + 1):
+                encontrado = False
+                for combo in combinations(columnas, r):
+                    ajustado = nave_val - sum(valores_ajuste[c] for c in combo)
+                    if abs(ajustado - banco_val) <= tolerancia:
+                        diagnosticos[clave] = " + ".join(combo)
+                        encontrado = True
+                        break
+                if encontrado:
                     break
-            if encontrado:
-                break
+
+    if df_nave_acred_mes_dep is not None:
+        acred_sum = df_nave_acred_mes_dep.groupby("Clave de cruce")["Monto neto"].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave in diagnosticos or clave not in acred_sum.index:
+                continue
+            if abs(acred_sum[clave] - fila["Banco"]) <= tolerancia:
+                diagnosticos[clave] = "Cierra con Nave por fecha de acreditación"
 
     if diagnosticos:
         cruce["Diagnóstico diferencia"] = cruce["Clave de cruce"].map(diagnosticos).fillna("")
@@ -851,7 +868,7 @@ def generar_excel_plantilla_cupones(
         pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Observación manual"])
 
     cruce = calcular_cruce_automatico(df_nave_actual_dep, df_banco_actual_acred, pendientes, tolerancia)
-    cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia)
+    cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia, df_nave_acred_mes_dep)
     datos_conciliacion = calcular_conciliacion_diferencia(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
         mes_anterior, mes_actual, df_nave_acred_mes_dep,
