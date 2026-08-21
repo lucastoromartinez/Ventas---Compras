@@ -283,6 +283,7 @@ def calcular_pendientes_anteriores(
     df = pd.DataFrame({
         "Clave": pendientes.index.astype(str),
         "Importe Nave pendiente": pendientes.values.round(2),
+        "Grupo asignado": "",
         "Observación manual": "",
     })
     df = df.assign(_orden=df["Clave"].map(_clave_orden)).sort_values("_orden")
@@ -307,13 +308,17 @@ def remapear_pendientes_via_acreditacion(
     Si se pasa el extracto de Nave "por fecha de acreditación" del mes
     actual (trae, agrupado, todo lo que se acreditó este mes sin importar
     cuándo pasó la operación), buscamos ahí, por N° de operación, a qué
-    grupo terminó perteneciendo cada pendiente individual y reasignamos su
-    "Clave" a la del grupo nuevo — así CRUCE AUTOMÁTICO lo suma dentro de
-    ese grupo en vez de dejarlo perdido bajo el número de operación viejo.
-    Si no se pasa el archivo, o un pendiente no aparece ahí, queda como
-    estaba (bajo su propio N° de operación).
+    grupo terminó perteneciendo cada pendiente individual y lo dejamos en
+    la columna "Grupo asignado" — sin tocar "Clave" ni fusionar filas, así
+    la hoja PENDIENTES ANTERIORES sigue mostrando cada cupón individual
+    por separado, con el grupo donde terminó al lado. Quien arma
+    CRUCE AUTOMÁTICO (calcular_cruce_automatico) es el que después suma
+    por "Grupo asignado" cuando está presente. Si no se pasa el archivo,
+    o un pendiente no aparece ahí, "Grupo asignado" queda vacío.
     """
     pendientes = pendientes_anteriores.copy()
+    if "Grupo asignado" not in pendientes.columns:
+        pendientes["Grupo asignado"] = ""
     if df_nave_acred_mes_dep is None or pendientes.empty:
         return pendientes
 
@@ -322,17 +327,12 @@ def remapear_pendientes_via_acreditacion(
         .drop_duplicates(subset="N° operación")
         .set_index("N° operación")["Clave de cruce"]
     )
-    pendientes["Clave"] = pendientes["Clave"].map(lambda c: mapa_clave.get(c, c))
 
-    # Varios pendientes individuales pueden terminar en el mismo grupo nuevo: sumarlos.
-    pendientes = pendientes.groupby("Clave", as_index=False).agg(
-        **{
-            "Importe Nave pendiente": ("Importe Nave pendiente", "sum"),
-            "Observación manual": ("Observación manual", lambda s: "; ".join(x for x in s if x)),
-        }
-    )
-    pendientes = pendientes.assign(_orden=pendientes["Clave"].map(_clave_orden)).sort_values("_orden")
-    pendientes = pendientes.drop(columns="_orden").reset_index(drop=True)
+    def _grupo_si_distinto(clave):
+        grupo = mapa_clave.get(clave)
+        return grupo if grupo is not None and grupo != clave else ""
+
+    pendientes["Grupo asignado"] = pendientes["Clave"].map(_grupo_si_distinto)
     return pendientes
 
 
@@ -376,12 +376,15 @@ def completar_pendientes_via_acreditacion(
     )
     derivadas = df_nave_acred_mes_dep[mask_mes_anterior].groupby("Clave de cruce")["Monto neto"].sum()
 
-    claves_existentes = set(pendientes["Clave"])
-    nuevas = derivadas[~derivadas.index.isin(claves_existentes)]
+    # Ya cubiertas: las propias claves de pendientes y los grupos donde ya
+    # remapeamos algún individual (para no duplicar esa plata).
+    claves_cubiertas = set(pendientes["Clave"]) | set(g for g in pendientes["Grupo asignado"] if g)
+    nuevas = derivadas[~derivadas.index.isin(claves_cubiertas)]
     if len(nuevas):
         extra = pd.DataFrame({
             "Clave": nuevas.index,
             "Importe Nave pendiente": nuevas.values.round(2),
+            "Grupo asignado": "",
             "Observación manual": "Detectado vía Nave por fecha de acreditación",
         })
         pendientes = pd.concat([pendientes, extra], ignore_index=True)
@@ -394,6 +397,24 @@ def completar_pendientes_via_acreditacion(
 # ─────────────────────────────────────────────────────────────────────────────
 # CRUCE AUTOMÁTICO
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _pendientes_map_efectivo(pendientes: pd.DataFrame) -> dict:
+    """
+    Clave -> Importe Nave pendiente, sumando por "Grupo asignado" cuando
+    está presente (el pendiente se cruza contra el mes actual por el
+    grupo nuevo donde terminó, no por su viejo N° de operación individual
+    — ver remapear_pendientes_via_acreditacion) y por "Clave" si no.
+    """
+    if pendientes.empty:
+        return {}
+    if "Grupo asignado" in pendientes.columns:
+        clave_efectiva = pendientes["Grupo asignado"].where(
+            pendientes["Grupo asignado"] != "", pendientes["Clave"]
+        )
+    else:
+        clave_efectiva = pendientes["Clave"]
+    return pendientes.groupby(clave_efectiva)["Importe Nave pendiente"].sum().to_dict()
+
 
 def calcular_cruce_automatico(
     df_nave_actual_dep: pd.DataFrame,
@@ -417,10 +438,7 @@ def calcular_cruce_automatico(
     nave_sum = df_nave_actual_dep.groupby("Clave de cruce")["Monto neto"].sum()
     banco_sum = df_banco_actual_acred.groupby("leyenda adicional1")["importe"].sum()
 
-    pendientes_map = dict(zip(
-        pendientes_anteriores["Clave"].astype(str),
-        pendientes_anteriores["Importe Nave pendiente"],
-    ))
+    pendientes_map = _pendientes_map_efectivo(pendientes_anteriores)
 
     claves = sorted(set(nave_sum.index) | set(banco_sum.index), key=_clave_orden)
 
@@ -831,7 +849,9 @@ _ANCHOS_NAVE = {
 }
 
 _FORMATOS_PENDIENTES = {"Importe Nave pendiente": "#,##0.00"}
-_ANCHOS_PENDIENTES = {"Clave": 20, "Importe Nave pendiente": 22, "Observación manual": 48}
+_ANCHOS_PENDIENTES = {
+    "Clave": 20, "Importe Nave pendiente": 22, "Grupo asignado": 20, "Observación manual": 48,
+}
 
 
 def generar_excel_plantilla_cupones(
@@ -865,7 +885,7 @@ def generar_excel_plantilla_cupones(
             pendientes, df_nave_acred_mes_dep, anio_ant, mes_ant,
         )
     else:
-        pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Observación manual"])
+        pendientes = pd.DataFrame(columns=["Clave", "Importe Nave pendiente", "Grupo asignado", "Observación manual"])
 
     cruce = calcular_cruce_automatico(df_nave_actual_dep, df_banco_actual_acred, pendientes, tolerancia)
     cruce = agregar_diagnostico_diferencia(cruce, df_nave_actual_dep, tolerancia, df_nave_acred_mes_dep)
