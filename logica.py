@@ -208,7 +208,7 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
         errors="coerce"
     )
 
-    mask_nc = df["Tipo de Comprobante"].isin([3, 8, 13])
+    mask_nc = df["Tipo de Comprobante"].isin([3, 8, 13, 53, 58, 63])
     df.loc[mask_nc, columnas_importe] *= -1
 
     if "Imp. Neto Gravado IVA 0%" in df.columns:
