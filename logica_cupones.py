@@ -562,111 +562,108 @@ def agregar_diagnostico_diferencia(
 def identificar_cupones_residual(
     cruce: pd.DataFrame,
     df_nave_actual_dep: pd.DataFrame,
+    df_nave_anterior_dep: pd.DataFrame | None,
     df_nave_acred_mes_dep: pd.DataFrame | None,
     pendientes: pd.DataFrame,
     tolerancia: float = 1.0,
 ) -> pd.DataFrame:
     """
     Para las claves de "Cupón mes anterior acreditado en banco actual" con
-    Diferencia residual != 0 (el pendiente del mes anterior no explicó
-    del todo la Diferencia del grupo), identifica el/los cupón(es)
-    puntuales que la explican, comparando la composición completa del
-    grupo según el extracto de Nave "por fecha de acreditación" del mes
-    actual contra lo que ya teníamos contemplado (el Nave de este mes
-    "por fecha de cobro" + los pendientes individuales ya remapeados a
-    ese grupo — ver remapear_pendientes_via_acreditacion).
+    Diferencia residual != 0, arma — operación por operación — lo que hoy
+    tenemos contemplado para esa clave (Nave de este mes "por fecha de
+    cobro", más los pendientes individuales ya remapeados ahí, más, si la
+    clave es un pendiente "directo" del mes anterior sin remapeo, sus
+    propias operaciones en el Nave del mes anterior) y lo compara contra
+    lo que dice el extracto de Nave "por fecha de acreditación" de este
+    mes para esa misma clave. Encuentra así tres tipos de discrepancia
+    por operación:
+      - "Cupón que falta en Nave": está en el extracto por acreditación
+        pero no en lo contemplado — plata que el banco pagó y no
+        teníamos anotada.
+      - "Cupón que sobra en Nave": lo dábamos por parte del grupo pero no
+        aparece en el extracto por acreditación — plata que contemplamos
+        de más.
+      - "Cupón con Monto neto distinto": la misma operación aparece en
+        ambos lados pero con un importe diferente — pasa cuando Nave
+        recalcula o ajusta el monto entre que se generó el reporte viejo
+        (el pendiente del mes anterior) y la acreditación real de este
+        mes. Es la causa más común de residual, más que un cupón
+        faltante o sobrante.
 
-    - Si el residual es positivo (el banco pagó de más respecto a lo que
-      teníamos contemplado): busca, entre las operaciones del grupo en el
-      extracto por acreditación, las que NO están en lo ya contemplado —
-      son cupones que faltan en nuestra cuenta.
-    - Si es negativo (contemplamos de más): busca, entre las operaciones
-      que SÍ dábamos por parte del grupo, las que NO aparecen en el
-      extracto por acreditación de este mes — son cupones que sobran
-      (probablemente terminaron en otro grupo, o no se acreditaron).
-
-    Si no se pasó el extracto por acreditación, o ninguna combinación de
-    operaciones sueltas explica el residual dentro de la tolerancia, se
-    deja una fila con "Diagnóstico" pidiendo revisión manual (sin
-    N° de operación puntual).
-
-    Retorna una fila por cupón identificado (o una fila de "revisar a
-    mano" por clave sin identificar), lista para la hoja "Diferencia
-    Residual".
+    Si la suma de esas discrepancias no cierra el residual dentro de la
+    tolerancia (o no se pasó el extracto por acreditación), se deja una
+    fila para revisión manual sin cupón puntual.
     """
     columnas = [
-        "Clave de cruce", "N° operación", "Fecha de operación", "Monto neto",
+        "Clave de cruce", "N° operación", "Monto según Nave", "Monto según acreditación",
         "Diferencia residual del grupo", "Diagnóstico",
     ]
     candidatas = cruce[
         (cruce["Categoría conciliación"] == "Cupón mes anterior acreditado en banco actual")
         & (cruce["Diferencia residual"].abs() > tolerancia)
     ]
-    if candidatas.empty:
+    if candidatas.empty or df_nave_acred_mes_dep is None:
         return pd.DataFrame(columns=columnas)
 
     remapeadas_por_grupo: dict = {}
+    claves_directas: set = set()
     if "Grupo asignado" in pendientes.columns:
-        remapeadas_por_grupo = (
-            pendientes[pendientes["Grupo asignado"] != ""]
-            .groupby("Grupo asignado")["Clave"]
-            .apply(set)
-            .to_dict()
-        )
+        remapeadas = pendientes[pendientes["Grupo asignado"] != ""]
+        for grupo, sub in remapeadas.groupby("Grupo asignado"):
+            remapeadas_por_grupo[grupo] = dict(zip(sub["Clave"], sub["Importe Nave pendiente"]))
+        claves_directas = set(pendientes.loc[pendientes["Grupo asignado"] == "", "Clave"])
+    else:
+        claves_directas = set(pendientes["Clave"])
 
     filas = []
     for _, fila in candidatas.iterrows():
         clave = fila["Clave de cruce"]
         residual = fila["Diferencia residual"]
 
-        ops_actual = set(df_nave_actual_dep.loc[df_nave_actual_dep["Clave de cruce"] == clave, "N° operación"])
-        ops_conocidas = ops_actual | remapeadas_por_grupo.get(clave, set())
+        conocido: dict = {}
+        for _, r in df_nave_actual_dep[df_nave_actual_dep["Clave de cruce"] == clave].iterrows():
+            conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+        for op, monto in remapeadas_por_grupo.get(clave, {}).items():
+            conocido[op] = conocido.get(op, 0.0) + monto
+        if clave in claves_directas and df_nave_anterior_dep is not None:
+            for _, r in df_nave_anterior_dep[df_nave_anterior_dep["Clave de cruce"] == clave].iterrows():
+                conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
 
-        identificado = False
-        if df_nave_acred_mes_dep is not None:
-            detalle_grupo = df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave]
+        acred: dict = {}
+        for _, r in df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave].iterrows():
+            acred[r["N° operación"]] = acred.get(r["N° operación"], 0.0) + r["Monto neto"]
 
-            if residual > 0:
-                # Banco pagó de más: buscamos cupones del grupo que no teníamos contemplados.
-                faltantes = detalle_grupo[~detalle_grupo["N° operación"].isin(ops_conocidas)]
-                if len(faltantes) and abs(faltantes["Monto neto"].sum() - residual) <= tolerancia:
-                    for _, op in faltantes.iterrows():
-                        filas.append({
-                            "Clave de cruce": clave,
-                            "N° operación": op["N° operación"],
-                            "Fecha de operación": op["Fecha de operación"].strftime("%d/%m/%Y %H:%M") if pd.notna(op["Fecha de operación"]) else "",
-                            "Monto neto": op["Monto neto"],
-                            "Diferencia residual del grupo": residual,
-                            "Diagnóstico": "Cupón que falta en Nave — explica el residual",
-                        })
-                    identificado = True
-            else:
-                # Contemplamos de más: buscamos, entre lo que dábamos por parte del grupo,
-                # lo que no aparece en el extracto por acreditación de este mes.
-                ops_en_acred = set(detalle_grupo["N° operación"])
-                sobrantes_op = ops_conocidas - ops_en_acred
-                sobrantes = df_nave_actual_dep[
-                    (df_nave_actual_dep["Clave de cruce"] == clave)
-                    & (df_nave_actual_dep["N° operación"].isin(sobrantes_op))
-                ]
-                if len(sobrantes) and abs(sobrantes["Monto neto"].sum() - abs(residual)) <= tolerancia:
-                    for _, op in sobrantes.iterrows():
-                        filas.append({
-                            "Clave de cruce": clave,
-                            "N° operación": op["N° operación"],
-                            "Fecha de operación": op["Fecha de operación"].strftime("%d/%m/%Y %H:%M") if pd.notna(op["Fecha de operación"]) else "",
-                            "Monto neto": op["Monto neto"],
-                            "Diferencia residual del grupo": residual,
-                            "Diagnóstico": "Cupón que sobra en Nave — explica el residual",
-                        })
-                    identificado = True
+        discrepancias = []
+        total_ajuste = 0.0
+        for op in set(conocido) | set(acred):
+            m_conocido = conocido.get(op)
+            m_acred = acred.get(op)
+            if m_acred is None:
+                discrepancias.append((op, m_conocido, None, "Cupón que sobra en Nave"))
+                total_ajuste -= m_conocido
+            elif m_conocido is None:
+                discrepancias.append((op, None, m_acred, "Cupón que falta en Nave"))
+                total_ajuste += m_acred
+            elif abs(m_acred - m_conocido) > tolerancia:
+                discrepancias.append((op, m_conocido, m_acred, "Cupón con Monto neto distinto"))
+                total_ajuste += (m_acred - m_conocido)
 
-        if not identificado:
+        if discrepancias and abs(total_ajuste - residual) <= tolerancia:
+            for op, m_conocido, m_acred, diagnostico in discrepancias:
+                filas.append({
+                    "Clave de cruce": clave,
+                    "N° operación": op,
+                    "Monto según Nave": round(m_conocido, 2) if m_conocido is not None else None,
+                    "Monto según acreditación": round(m_acred, 2) if m_acred is not None else None,
+                    "Diferencia residual del grupo": residual,
+                    "Diagnóstico": diagnostico,
+                })
+        else:
             filas.append({
                 "Clave de cruce": clave,
                 "N° operación": "",
-                "Fecha de operación": None,
-                "Monto neto": None,
+                "Monto según Nave": None,
+                "Monto según acreditación": None,
                 "Diferencia residual del grupo": residual,
                 "Diagnóstico": "No se pudo identificar el cupón puntual — revisar a mano",
             })
@@ -972,10 +969,13 @@ _ANCHOS_PENDIENTES = {
     "Clave": 20, "Importe Nave pendiente": 22, "Grupo asignado": 20, "Observación manual": 48,
 }
 
-_FORMATOS_DIFERENCIA_RESIDUAL = {"Monto neto": "#,##0.00", "Diferencia residual del grupo": "#,##0.00"}
+_FORMATOS_DIFERENCIA_RESIDUAL = {
+    "Monto según Nave": "#,##0.00", "Monto según acreditación": "#,##0.00",
+    "Diferencia residual del grupo": "#,##0.00",
+}
 _ANCHOS_DIFERENCIA_RESIDUAL = {
-    "Clave de cruce": 20, "N° operación": 16, "Fecha de operación": 21,
-    "Monto neto": 18, "Diferencia residual del grupo": 24, "Diagnóstico": 46,
+    "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
+    "Monto según acreditación": 22, "Diferencia residual del grupo": 24, "Diagnóstico": 42,
 }
 
 
@@ -1019,7 +1019,8 @@ def generar_excel_plantilla_cupones(
         mes_anterior, mes_actual, df_nave_acred_mes_dep,
     )
     diferencia_residual = identificar_cupones_residual(
-        cruce, df_nave_actual_dep, df_nave_acred_mes_dep, pendientes, tolerancia,
+        cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
+        df_nave_acred_mes_dep, pendientes, tolerancia,
     )
 
     wb = Workbook()
