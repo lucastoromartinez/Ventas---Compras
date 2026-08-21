@@ -596,7 +596,7 @@ def identificar_cupones_residual(
     """
     columnas = [
         "Clave de cruce", "N° operación", "Monto según Nave", "Monto según acreditación",
-        "Diferencia residual del grupo", "Diagnóstico",
+        "Diferencia del cupón", "Diferencia residual del grupo", "Diagnóstico",
     ]
     candidatas = cruce[
         (cruce["Categoría conciliación"] == "Cupón mes anterior acreditado en banco actual")
@@ -639,22 +639,26 @@ def identificar_cupones_residual(
             m_conocido = conocido.get(op)
             m_acred = acred.get(op)
             if m_acred is None:
-                discrepancias.append((op, m_conocido, None, "Cupón que sobra en Nave"))
-                total_ajuste -= m_conocido
+                delta = -m_conocido
+                discrepancias.append((op, m_conocido, None, delta, "Cupón que sobra en Nave"))
             elif m_conocido is None:
-                discrepancias.append((op, None, m_acred, "Cupón que falta en Nave"))
-                total_ajuste += m_acred
+                delta = m_acred
+                discrepancias.append((op, None, m_acred, delta, "Cupón que falta en Nave"))
             elif abs(m_acred - m_conocido) > tolerancia:
-                discrepancias.append((op, m_conocido, m_acred, "Cupón con Monto neto distinto"))
-                total_ajuste += (m_acred - m_conocido)
+                delta = m_acred - m_conocido
+                discrepancias.append((op, m_conocido, m_acred, delta, "Cupón con Monto neto distinto"))
+            else:
+                continue
+            total_ajuste += delta
 
         if discrepancias and abs(total_ajuste - residual) <= tolerancia:
-            for op, m_conocido, m_acred, diagnostico in discrepancias:
+            for op, m_conocido, m_acred, delta, diagnostico in discrepancias:
                 filas.append({
                     "Clave de cruce": clave,
                     "N° operación": op,
                     "Monto según Nave": round(m_conocido, 2) if m_conocido is not None else None,
                     "Monto según acreditación": round(m_acred, 2) if m_acred is not None else None,
+                    "Diferencia del cupón": round(delta, 2),
                     "Diferencia residual del grupo": residual,
                     "Diagnóstico": diagnostico,
                 })
@@ -664,6 +668,7 @@ def identificar_cupones_residual(
                 "N° operación": "",
                 "Monto según Nave": None,
                 "Monto según acreditación": None,
+                "Diferencia del cupón": None,
                 "Diferencia residual del grupo": residual,
                 "Diagnóstico": "No se pudo identificar el cupón puntual — revisar a mano",
             })
@@ -971,11 +976,12 @@ _ANCHOS_PENDIENTES = {
 
 _FORMATOS_DIFERENCIA_RESIDUAL = {
     "Monto según Nave": "#,##0.00", "Monto según acreditación": "#,##0.00",
-    "Diferencia residual del grupo": "#,##0.00",
+    "Diferencia del cupón": "#,##0.00", "Diferencia residual del grupo": "#,##0.00",
 }
 _ANCHOS_DIFERENCIA_RESIDUAL = {
     "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
-    "Monto según acreditación": 22, "Diferencia residual del grupo": 24, "Diagnóstico": 42,
+    "Monto según acreditación": 22, "Diferencia del cupón": 20,
+    "Diferencia residual del grupo": 24, "Diagnóstico": 42,
 }
 
 
