@@ -786,6 +786,30 @@ def diagnosticar_diferencia_residual(
         df_nave_actual_dep, df_nave_anterior_dep, pendientes,
     )
 
+    # Retención IIBB CABA "por fecha de cobro" (estimada), por N° operación,
+    # buscada en todo el archivo de Nave del mes actual y del mes anterior
+    # — NO filtrada por clave: un pendiente individual remapeado (ver
+    # remapear_pendientes_via_acreditacion) tenía el mes anterior su propia
+    # clave (su propio N° operación, porque todavía no estaba agrupado), no
+    # la clave del grupo nuevo donde terminó, así que filtrar por la clave
+    # del grupo nunca lo iba a encontrar ahí.
+    ret_cobro_actual = (
+        df_nave_actual_dep.groupby("N° operación")["Retención IIBB CABA"].sum()
+        if "Retención IIBB CABA" in df_nave_actual_dep.columns else None
+    )
+    ret_cobro_anterior = (
+        df_nave_anterior_dep.groupby("N° operación")["Retención IIBB CABA"].sum()
+        if df_nave_anterior_dep is not None and "Retención IIBB CABA" in df_nave_anterior_dep.columns
+        else None
+    )
+
+    def _ret_cobro(op):
+        if ret_cobro_actual is not None and op in ret_cobro_actual.index:
+            return ret_cobro_actual[op]
+        if ret_cobro_anterior is not None and op in ret_cobro_anterior.index:
+            return ret_cobro_anterior[op]
+        return None
+
     filas = []
     explicado_por_retencion: dict = {}
     for _, fila in candidatas.iterrows():
