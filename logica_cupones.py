@@ -712,13 +712,18 @@ def identificar_cupones_residual(
         categoria_origen = fila["Categoría conciliación"]
 
         conocido: dict = {}
+        ret_cobro: dict = {}
         for _, r in df_nave_actual_dep[df_nave_actual_dep["Clave de cruce"] == clave].iterrows():
             conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+            if "Retención IIBB CABA" in r:
+                ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
         for op, monto in remapeadas_por_grupo.get(clave, {}).items():
             conocido[op] = conocido.get(op, 0.0) + monto
         if clave in claves_directas and df_nave_anterior_dep is not None:
             for _, r in df_nave_anterior_dep[df_nave_anterior_dep["Clave de cruce"] == clave].iterrows():
                 conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+                if "Retención IIBB CABA" in r:
+                    ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
 
         detalle_acred = df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave]
         acred: dict = {}

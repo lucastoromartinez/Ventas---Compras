@@ -102,13 +102,17 @@ def normalize_extracto_hipotecario(df: pd.DataFrame) -> pd.DataFrame:
 # HELPERS
 # ─────────────────────────────────────────────
 
-def _limpiar(texto: str) -> str:
+def _limpiar(texto: str, lower: bool = True) -> str:
     if not isinstance(texto, str): return ""
-    texto = texto.lower()
+    if lower:
+        texto = texto.lower()
     texto = re.sub(r"[.\-\s,:;]", "", texto)
     texto = re.sub(r"[^\x20-\x7EáéíóúñüÁÉÍÓÚÑÜ]", "", texto)
-    return (texto.replace("á","a").replace("é","e").replace("í","i")
-                 .replace("ó","o").replace("ú","u").replace("ñ","n").replace("ü","u"))
+    reemplazos = {"á":"a","é":"e","í":"i","ó":"o","ú":"u","ñ":"n","ü":"u",
+                  "Á":"A","É":"E","Í":"I","Ó":"O","Ú":"U","Ñ":"N","Ü":"U"}
+    for a, b in reemplazos.items():
+        texto = texto.replace(a, b)
+    return texto
 
 def _contiene(texto_limpio: str, *palabras: str) -> bool:
     return any(_limpiar(p) in texto_limpio for p in palabras)
@@ -130,7 +134,8 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     if col_desc is None:    raise ValueError(f"Columna 'descripcion' no encontrada. Disponibles: {list(df.columns)}")
     if col_importe is None: raise ValueError(f"Columna 'importe' no encontrada. Disponibles: {list(df.columns)}")
 
-    desc = df[col_desc].apply(_limpiar)
+    desc      = df[col_desc].apply(_limpiar)
+    desc_case = df[col_desc].apply(lambda t: _limpiar(t, lower=False))
 
     def es_redondo_1000(importe) -> bool:
         try:    return float(importe) % 1000 == 0
@@ -148,22 +153,26 @@ def categorizar_extracto_v1(df: pd.DataFrame) -> pd.DataFrame:
     es_keyword_sena = desc.apply(lambda d: _contiene(d, "cashout", "recibisteuna transferencia", "transfenv"))
 
     condiciones = [
+        # Señas: keyword match SIN cuit propio (se define primero para que no se la
+        # "roben" otras categorías por falsos positivos en el nombre del cliente)
+        es_keyword_sena & ~es_cuit_propio,
+        # Transf. entre cuentas: keyword match CON cuit propio, o palabras exclusivas
+        (es_keyword_sena & es_cuit_propio) |
+        desc.apply(lambda d: _contiene(d, "tefdatanetmt", "ctaprop")),
         desc.apply(lambda d: _contiene(d, "prisma")),
         desc.apply(lambda d: _contiene(d, "debin")) & df[col_importe].apply(es_redondo_1000),
         desc.apply(lambda d: _contiene(d, "debin")),
         desc.apply(lambda d: _contiene(d, "comerciosfirstdata")),
         desc.apply(lambda d: _contiene(d, "cabal")),
-        desc.apply(lambda d: _contiene(d, "impuesto","iva","comision","paquete","n/dinteradelccs/acuerd","sircreb")),
+        # "IVA" solo cuenta en mayúsculas (evita falsos positivos con nombres
+        # como "Paiva", "Rivas", "Ivan", que en minúscula contienen "iva")
+        desc.apply(lambda d: _contiene(d, "impuesto","comision","paquete","n/dinteradelccs/acuerd","sircreb")) |
+        desc_case.str.contains("IVA", regex=False, na=False),
         desc.apply(lambda d: "cuota" in d and "prestamo" in d),
         desc.apply(lambda d: _contiene(d, "sancor","swiss","berkley","laholando")),
-        # Señas: keyword match SIN cuit propio (va antes que Transf. entre cuentas)
-        es_keyword_sena & ~es_cuit_propio,
-        # Transf. entre cuentas: keyword match CON cuit propio, o palabras exclusivas
-        (es_keyword_sena & es_cuit_propio) |
-        desc.apply(lambda d: _contiene(d, "tefdatanetmt", "ctaprop")),
     ]
-    categorias = ["Prisma","Transf. entre cuentas","Acred. Debin","Acred. TC","Cabal",
-                  "Gastos Bancarios","Prestamo","Seguros","Señas","Transf. entre cuentas"]
+    categorias = ["Señas","Transf. entre cuentas","Prisma","Transf. entre cuentas","Acred. Debin","Acred. TC","Cabal",
+                  "Gastos Bancarios","Prestamo","Seguros"]
 
     df["conciliacion"] = "0"
     for cond, cat in zip(condiciones, categorias):
@@ -462,14 +471,46 @@ def _limpiar_dfs(lista):
 # EXPORTAR EN MEMORIA
 # ─────────────────────────────────────────────
 
+COLUMNAS_IMPORTE = ["Debe", "Haber", "Saldo", "Importe", "debito en $", "credito en $", "saldo en $", "importe"]
+
+
+AMOUNT_FORMAT = "#,##0.00"
+
+
+def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> pd.DataFrame:
+    df = df.copy()
+    for col in columnas:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+    return df
+
+
+def _aplicar_formato_importes(ws, df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPORTE) -> None:
+    col_indices = [i for i, col in enumerate(df.columns, start=1) if col in columnas]
+    for col_idx in col_indices:
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=col_idx).number_format = AMOUNT_FORMAT
+
+
 def generar_excel_en_memoria_hipotecario(falta_mayor5, falta_extracto5,
                                           match_mayor_def, match_extracto_def):
+    falta_mayor5       = _forzar_importes_float(falta_mayor5)
+    falta_extracto5    = _forzar_importes_float(falta_extracto5)
+    match_mayor_def    = _forzar_importes_float(match_mayor_def)
+    match_extracto_def = _forzar_importes_float(match_extracto_def)
+
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         falta_mayor5.to_excel(writer,       sheet_name="Faltante Mayor",    index=False)
         falta_extracto5.to_excel(writer,    sheet_name="Faltante Extracto", index=False)
         match_mayor_def.to_excel(writer,    sheet_name="Match Mayor",       index=False)
         match_extracto_def.to_excel(writer, sheet_name="Match Extracto",    index=False)
+
+        wb = writer.book
+        _aplicar_formato_importes(wb["Faltante Mayor"],    falta_mayor5)
+        _aplicar_formato_importes(wb["Faltante Extracto"], falta_extracto5)
+        _aplicar_formato_importes(wb["Match Mayor"],        match_mayor_def)
+        _aplicar_formato_importes(wb["Match Extracto"],     match_extracto_def)
     return buf.getvalue()
 
 
