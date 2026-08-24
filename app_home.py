@@ -66,6 +66,7 @@ div[class*="st-key-card_"] button {
 div[class*="st-key-card_"]:hover .card-visual { transform: translateY(-3px); }
 .st-key-card_compras:hover .card-visual { border-color: #00ff87; }
 .st-key-card_ventas:hover .card-visual  { border-color: #00aaff; }
+.st-key-card_tesoreria:hover .card-visual { border-color: #ffb020; }
 .st-key-card_concil:hover .card-visual  { border-color: #ff6b35; }
 .st-key-card_pdfs:hover .card-visual    { border-color: #c084fc; }
 .st-key-card_rappi:hover .card-visual   { border-color: #FF441F; }
@@ -106,12 +107,15 @@ def card(col, accent, icon, title, desc, page):
 row1 = st.columns(3, gap="medium")
 card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "pages/compras.py")
 card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
-card(row1[2], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
+card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "pages/tesoreria.py")
 
 row2 = st.columns(3, gap="medium")
-card(row2[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
-card(row2[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
-card(row2[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "pages/impuestos.py")
+card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
+
+row3 = st.columns(3, gap="medium")
+card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
+card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
+card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "pages/impuestos.py")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
