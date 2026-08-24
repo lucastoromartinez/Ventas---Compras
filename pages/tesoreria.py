@@ -122,7 +122,7 @@ st.markdown("""
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-st.markdown('<div class="upload-label">Caja Central (un Excel por mes — una hoja por día)</div>', unsafe_allow_html=True)
+st.markdown('<div class="upload-label">Caja Tesorería</div>', unsafe_allow_html=True)
 archivos_caja_central = st.file_uploader(
     "caja_central", type=["xlsx", "xls"],
     accept_multiple_files=True,
@@ -139,7 +139,7 @@ if archivos_caja_central:
     """, unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
-st.markdown('<div class="upload-label">Caja Unificada (sistema — puede traer varios meses)</div>', unsafe_allow_html=True)
+st.markdown('<div class="upload-label">Caja Sistema Unificada</div>', unsafe_allow_html=True)
 archivo_caja_unificada = st.file_uploader("caja_unificada", type=["xlsx", "xls"],
                                            label_visibility="collapsed", key="caja_unificada")
 
