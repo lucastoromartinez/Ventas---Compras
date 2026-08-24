@@ -245,19 +245,34 @@ def preparar_banco_reporte(df_banco_acred: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def preparar_nave_reporte(df_nave_dep: pd.DataFrame) -> pd.DataFrame:
-    """Reduce el reporte de Nave depurado a las columnas de la plantilla."""
+def preparar_nave_reporte(df_nave_dep: pd.DataFrame, incluir_columnas_ajuste: bool = False) -> pd.DataFrame:
+    """
+    Reduce el reporte de Nave depurado a las columnas de la plantilla.
+
+    incluir_columnas_ajuste: si es True, agrega Retención IIBB CABA / IVA
+    del costo / Costo del servicio / Propina (las mismas que usa
+    agregar_diagnostico_diferencia e identificar_cupones_residual para
+    buscar si una diferencia se explica por algún ajuste) — para poder
+    chequearlas a mano en la hoja. Se usa en NAVE ACTUAL y Nave x Acred
+    Mes; se deja afuera en NAVE <mes anterior> para no alejarse de los
+    encabezados de la Plantilla ahí.
+    """
     fecha_op = df_nave_dep["Fecha de operación"].dt.strftime("%d/%m/%Y %H:%M").fillna("")
     fecha_acred = df_nave_dep["Fecha de acreditación"].dt.strftime("%d/%m/%Y").fillna("")
-    return pd.DataFrame({
+    datos = {
         "Fecha de operación": fecha_op,
         "Fecha de acreditación": fecha_acred,
         "N° operación": df_nave_dep["N° operación"],
         "Grupo acreditación": df_nave_dep["Grupo de acreditación"],
         "Clave de cruce": df_nave_dep["Clave de cruce"],
         "Monto neto": df_nave_dep["Monto neto"],
-        "Estado Nave": df_nave_dep["Estado"].fillna("").astype(str).str.strip(),
-    })
+    }
+    if incluir_columnas_ajuste:
+        for col in _COLUMNAS_AJUSTE_DIAGNOSTICO:
+            if col in df_nave_dep.columns:
+                datos[col] = df_nave_dep[col]
+    datos["Estado Nave"] = df_nave_dep["Estado"].fillna("").astype(str).str.strip()
+    return pd.DataFrame(datos)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -463,7 +478,14 @@ def calcular_cruce_automatico(
             residual = 0.0
         else:
             categoria = "Diferencia Banco vs Nave"
-            residual = 0.0
+            # Acá no hay pendiente que restar (la clave es 100% de este mes),
+            # así que toda la Diferencia es, en los mismos términos que la
+            # categoría anterior, "residual": es la misma pregunta ("qué
+            # cupón puntual explica lo que no cierra") aplicada a un grupo
+            # que no viene de un pendiente sino que ya nació con Banco y
+            # Nave sin coincidir. identificar_cupones_residual la toma
+            # igual que la otra categoría para buscar el cupón puntual.
+            residual = diferencia
 
         filas.append({
             "Clave de cruce": clave,
@@ -491,20 +513,27 @@ def agregar_diagnostico_diferencia(
     """
     Agrega la columna "Diagnóstico diferencia" a CRUCE AUTOMÁTICO: para las
     claves en "Diferencia Banco vs Nave" (Banco y Nave presentes pero no
-    cierran), prueba dos cosas, en orden:
+    cierran), prueba tres cosas, en orden:
 
-    1. Si restarle al Monto neto de Nave alguna combinación de columnas de
-       ajuste (Retención IIBB CABA, IVA del costo, Costo del servicio,
-       Propina — la misma lógica de ajuste que usaba el cruce viejo) hace
-       que cierre contra el banco dentro de la tolerancia.
-    2. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
+    1. Si la diferencia se explica por la Retención IIBB CABA que Nave
+       estima al momento del cobro contra la que termina siendo real al
+       acreditar (Retención IIBB CABA sumada de este mes "por fecha de
+       cobro", menos la misma columna sumada del extracto "por fecha de
+       acreditación" para esa clave) — esta es la causa más común:
+       Nave recalcula la retención real recién al acreditar, y hasta
+       entonces el Monto neto "por cobro" usa una estimación.
+    2. Si no, si restarle al Monto neto de Nave alguna combinación de
+       columnas de ajuste (Retención IIBB CABA, IVA del costo, Costo del
+       servicio, Propina — la misma lógica de ajuste que usaba el cruce
+       viejo) hace que cierre contra el banco dentro de la tolerancia.
+    3. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
        mes actual: si la clave ahí (que puede traer otra composición de
        operaciones — p.ej. un grupo que después de bajar los extractos
        terminó absorbiendo operaciones que a la fecha de cobro todavía no
        estaban asignadas) suma un monto que sí cierra contra el banco.
 
     Es solo diagnóstico manual, no cambia la Categoría conciliación: si
-    alguna de las dos explica la diferencia, la deja como comentario; si
+    alguna de las tres explica la diferencia, la deja como comentario; si
     ninguna la explica, deja la celda en blanco.
 
     No aplica lo mismo para "Cupones individuales" vs "Grupo": la búsqueda
@@ -519,12 +548,24 @@ def agregar_diagnostico_diferencia(
 
     diagnosticos = {}
 
+    if df_nave_acred_mes_dep is not None and "Retención IIBB CABA" in df_nave_actual_dep.columns \
+            and "Retención IIBB CABA" in df_nave_acred_mes_dep.columns:
+        ret_cobro_sum = df_nave_actual_dep.groupby("Clave de cruce")["Retención IIBB CABA"].sum()
+        ret_acred_sum = df_nave_acred_mes_dep.groupby("Clave de cruce")["Retención IIBB CABA"].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave not in ret_cobro_sum.index or clave not in ret_acred_sum.index:
+                continue
+            explicado = ret_cobro_sum[clave] - ret_acred_sum[clave]
+            if abs(fila["Diferencia"] - explicado) <= tolerancia:
+                diagnosticos[clave] = "Diferencia Ret Cobro vs Acreditación"
+
     columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
     if columnas:
         ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
         for _, fila in candidatas.iterrows():
             clave = fila["Clave de cruce"]
-            if clave not in ajustes_sum.index:
+            if clave in diagnosticos or clave not in ajustes_sum.index:
                 continue
             valores_ajuste = ajustes_sum.loc[clave]
             nave_val = fila["Nave"]
@@ -568,15 +609,18 @@ def identificar_cupones_residual(
     tolerancia: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Para las claves de "Cupón mes anterior acreditado en banco actual" con
-    Diferencia residual != 0, arma — operación por operación — lo que hoy
-    tenemos contemplado para esa clave (Nave de este mes "por fecha de
-    cobro", más los pendientes individuales ya remapeados ahí, más, si la
-    clave es un pendiente "directo" del mes anterior sin remapeo, sus
-    propias operaciones en el Nave del mes anterior) y lo compara contra
-    lo que dice el extracto de Nave "por fecha de acreditación" de este
-    mes para esa misma clave. Encuentra así tres tipos de discrepancia
-    por operación:
+    Para las claves con Diferencia residual != 0 — tanto "Cupón mes
+    anterior acreditado en banco actual" como "Diferencia Banco vs Nave"
+    (son la misma pregunta: qué cupón puntual explica lo que no cierra;
+    a la segunda categoría simplemente no le resta ningún pendiente
+    porque es 100% de este mes, ver calcular_cruce_automatico) — arma,
+    operación por operación, lo que hoy tenemos contemplado para esa
+    clave (Nave de este mes "por fecha de cobro", más los pendientes
+    individuales ya remapeados ahí, más, si la clave es un pendiente
+    "directo" del mes anterior sin remapeo, sus propias operaciones en
+    el Nave del mes anterior) y lo compara contra lo que dice el
+    extracto de Nave "por fecha de acreditación" de este mes para esa
+    misma clave. Encuentra así tres tipos de discrepancia por operación:
       - "Cupón que falta en Nave": está en el extracto por acreditación
         pero no en lo contemplado — plata que el banco pagó y no
         teníamos anotada.
@@ -586,20 +630,42 @@ def identificar_cupones_residual(
       - "Cupón con Monto neto distinto": la misma operación aparece en
         ambos lados pero con un importe diferente — pasa cuando Nave
         recalcula o ajusta el monto entre que se generó el reporte viejo
-        (el pendiente del mes anterior) y la acreditación real de este
-        mes. Es la causa más común de residual, más que un cupón
-        faltante o sobrante.
+        y la acreditación real de este mes. Es la causa más común de
+        residual, más que un cupón faltante o sobrante. Para este caso
+        prueba, en orden:
+          1. Si la diferencia puntual se explica por la Retención IIBB
+             CABA que Nave estimó al momento del cobro contra la que
+             terminó siendo real al acreditar (misma lógica que el
+             chequeo 1 de agregar_diagnostico_diferencia, pero cupón por
+             cupón en vez de por grupo) — diagnóstico "Diferencia Ret
+             Cobro vs Acreditación". Solo se puede calcular cuando el
+             cupón viene de Nave de este mes o del mes anterior (no de un
+             pendiente remapeado, que no trae desglose de retención).
+          2. Si no, si se explica por alguna combinación de las columnas
+             de ajuste del cupón en el extracto por acreditación
+             (Retención IIBB CABA, IVA del costo, Costo del servicio,
+             Propina) y, si la encuentra, la nombra en el diagnóstico.
+        También calcula, siempre que hay monto de los dos lados, "%
+        Diferencia (1 - Nave/Acreditado)" — cuánto representa la
+        diferencia puntual sobre el monto de acreditación, útil para
+        detectar un ajuste porcentual (una tasa/comisión distinta) en
+        vez de una resta de columnas conocidas.
 
     Si la suma de esas discrepancias no cierra el residual dentro de la
     tolerancia (o no se pasó el extracto por acreditación), se deja una
     fila para revisión manual sin cupón puntual.
     """
     columnas = [
-        "Clave de cruce", "N° operación", "Monto según Nave", "Monto según acreditación",
-        "Diferencia del cupón", "Diferencia residual del grupo", "Diagnóstico",
+        "Categoría origen", "Clave de cruce", "N° operación", "Monto según Nave",
+        "Monto según acreditación", "Diferencia del cupón", "% Diferencia (1 - Nave/Acreditado)",
+        "Diferencia residual del grupo", "Diagnóstico",
     ]
+    categorias_con_residual = {
+        "Cupón mes anterior acreditado en banco actual",
+        "Diferencia Banco vs Nave",
+    }
     candidatas = cruce[
-        (cruce["Categoría conciliación"] == "Cupón mes anterior acreditado en banco actual")
+        cruce["Categoría conciliación"].isin(categorias_con_residual)
         & (cruce["Diferencia residual"].abs() > tolerancia)
     ]
     if candidatas.empty or df_nave_acred_mes_dep is None:
@@ -619,19 +685,32 @@ def identificar_cupones_residual(
     for _, fila in candidatas.iterrows():
         clave = fila["Clave de cruce"]
         residual = fila["Diferencia residual"]
+        categoria_origen = fila["Categoría conciliación"]
 
         conocido: dict = {}
+        ret_cobro: dict = {}
         for _, r in df_nave_actual_dep[df_nave_actual_dep["Clave de cruce"] == clave].iterrows():
             conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+            if "Retención IIBB CABA" in r:
+                ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
         for op, monto in remapeadas_por_grupo.get(clave, {}).items():
             conocido[op] = conocido.get(op, 0.0) + monto
         if clave in claves_directas and df_nave_anterior_dep is not None:
             for _, r in df_nave_anterior_dep[df_nave_anterior_dep["Clave de cruce"] == clave].iterrows():
                 conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+                if "Retención IIBB CABA" in r:
+                    ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
 
+        detalle_acred = df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave]
         acred: dict = {}
-        for _, r in df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave].iterrows():
+        for _, r in detalle_acred.iterrows():
             acred[r["N° operación"]] = acred.get(r["N° operación"], 0.0) + r["Monto neto"]
+
+        columnas_ajuste_disp = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in detalle_acred.columns]
+        ajustes_por_op = (
+            detalle_acred.groupby("N° operación")[columnas_ajuste_disp].sum()
+            if columnas_ajuste_disp else None
+        )
 
         discrepancias = []
         total_ajuste = 0.0
@@ -646,29 +725,57 @@ def identificar_cupones_residual(
                 discrepancias.append((op, None, m_acred, delta, "Cupón que falta en Nave"))
             elif abs(m_acred - m_conocido) > tolerancia:
                 delta = m_acred - m_conocido
-                discrepancias.append((op, m_conocido, m_acred, delta, "Cupón con Monto neto distinto"))
+                diagnostico = "Cupón con Monto neto distinto"
+                ret_acred_op = (
+                    ajustes_por_op.loc[op, "Retención IIBB CABA"]
+                    if ajustes_por_op is not None and op in ajustes_por_op.index
+                    and "Retención IIBB CABA" in columnas_ajuste_disp
+                    else None
+                )
+                if op in ret_cobro and ret_acred_op is not None \
+                        and abs(delta - (ret_cobro[op] - ret_acred_op)) <= tolerancia:
+                    diagnostico = "Diferencia Ret Cobro vs Acreditación"
+                elif ajustes_por_op is not None and op in ajustes_por_op.index:
+                    valores = ajustes_por_op.loc[op]
+                    for r in range(1, len(columnas_ajuste_disp) + 1):
+                        combo_encontrado = None
+                        for combo in combinations(columnas_ajuste_disp, r):
+                            if abs(abs(delta) - sum(valores[c] for c in combo)) <= tolerancia:
+                                combo_encontrado = combo
+                                break
+                        if combo_encontrado:
+                            diagnostico = f"Cupón con Monto neto distinto (explica: {' + '.join(combo_encontrado)})"
+                            break
+                discrepancias.append((op, m_conocido, m_acred, delta, diagnostico))
             else:
                 continue
             total_ajuste += delta
 
         if discrepancias and abs(total_ajuste - residual) <= tolerancia:
             for op, m_conocido, m_acred, delta, diagnostico in discrepancias:
+                pct_diferencia = None
+                if m_conocido is not None and m_acred:
+                    pct_diferencia = round(1 - (m_conocido / m_acred), 4)
                 filas.append({
+                    "Categoría origen": categoria_origen,
                     "Clave de cruce": clave,
                     "N° operación": op,
                     "Monto según Nave": round(m_conocido, 2) if m_conocido is not None else None,
                     "Monto según acreditación": round(m_acred, 2) if m_acred is not None else None,
                     "Diferencia del cupón": round(delta, 2),
+                    "% Diferencia (1 - Nave/Acreditado)": pct_diferencia,
                     "Diferencia residual del grupo": residual,
                     "Diagnóstico": diagnostico,
                 })
         else:
             filas.append({
+                "Categoría origen": categoria_origen,
                 "Clave de cruce": clave,
                 "N° operación": "",
                 "Monto según Nave": None,
                 "Monto según acreditación": None,
                 "Diferencia del cupón": None,
+                "% Diferencia (1 - Nave/Acreditado)": None,
                 "Diferencia residual del grupo": residual,
                 "Diagnóstico": "No se pudo identificar el cupón puntual — revisar a mano",
             })
@@ -963,10 +1070,15 @@ def _escribir_conciliacion_diferencia(wb, datos: dict, mes_anterior: str | None,
 _FORMATOS_BANCO = {"Importe neto": "#,##0.00"}
 _ANCHOS_BANCO = {"Fecha": 14, "Descripción": 34, "Conciliación": 20, "Clave de cruce": 16, "Importe neto": 18}
 
-_FORMATOS_NAVE = {"Monto neto": "#,##0.00"}
+_FORMATOS_NAVE = {
+    "Monto neto": "#,##0.00", "Retención IIBB CABA": "#,##0.00",
+    "IVA del costo": "#,##0.00", "Costo del servicio": "#,##0.00", "Propina": "#,##0.00",
+}
 _ANCHOS_NAVE = {
     "Fecha de operación": 21, "Fecha de acreditación": 18, "N° operación": 16,
-    "Grupo acreditación": 20, "Clave de cruce": 16, "Monto neto": 18, "Estado Nave": 16,
+    "Grupo acreditación": 20, "Clave de cruce": 16, "Monto neto": 18,
+    "Retención IIBB CABA": 18, "IVA del costo": 16, "Costo del servicio": 18, "Propina": 14,
+    "Estado Nave": 16,
 }
 
 _FORMATOS_PENDIENTES = {"Importe Nave pendiente": "#,##0.00"}
@@ -976,12 +1088,14 @@ _ANCHOS_PENDIENTES = {
 
 _FORMATOS_DIFERENCIA_RESIDUAL = {
     "Monto según Nave": "#,##0.00", "Monto según acreditación": "#,##0.00",
-    "Diferencia del cupón": "#,##0.00", "Diferencia residual del grupo": "#,##0.00",
+    "Diferencia del cupón": "#,##0.00", "% Diferencia (1 - Nave/Acreditado)": "0.00%",
+    "Diferencia residual del grupo": "#,##0.00",
 }
 _ANCHOS_DIFERENCIA_RESIDUAL = {
-    "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
+    "Categoría origen": 40, "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
     "Monto según acreditación": 22, "Diferencia del cupón": 20,
-    "Diferencia residual del grupo": 24, "Diagnóstico": 42,
+    "% Diferencia (1 - Nave/Acreditado)": 26,
+    "Diferencia residual del grupo": 24, "Diagnóstico": 62,
 }
 
 
@@ -1046,11 +1160,13 @@ def generar_excel_plantilla_cupones(
     _escribir_tabla(wb, "BANCO ACTUAL", "BANCO ACTUAL",
                      preparar_banco_reporte(df_banco_actual_acred), _FORMATOS_BANCO, _ANCHOS_BANCO)
     _escribir_tabla(wb, "NAVE ACTUAL", "NAVE ACTUAL",
-                     preparar_nave_reporte(df_nave_actual_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
+                     preparar_nave_reporte(df_nave_actual_dep, incluir_columnas_ajuste=True),
+                     _FORMATOS_NAVE, _ANCHOS_NAVE)
 
     if df_nave_acred_mes_dep is not None:
         _escribir_tabla(wb, "Nave x Acred Mes", "NAVE POR FECHA DE ACREDITACIÓN — MES ACTUAL",
-                         preparar_nave_reporte(df_nave_acred_mes_dep), _FORMATOS_NAVE, _ANCHOS_NAVE)
+                         preparar_nave_reporte(df_nave_acred_mes_dep, incluir_columnas_ajuste=True),
+                         _FORMATOS_NAVE, _ANCHOS_NAVE)
 
     if con_anterior:
         _escribir_tabla(wb, "PENDIENTES ANTERIORES", "Pendientes del mes anterior",
