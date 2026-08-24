@@ -110,6 +110,16 @@ def depurar_nave(df: pd.DataFrame) -> pd.DataFrame:
         cuando Nave nunca agrupó la operación).
       - "Clave de cruce": la clave para matchear contra el banco — Grupo de
         acreditación si existe, si no N° operación.
+
+    Algunos meses Nave cambia el formato del reporte: a partir de julio
+    2026 el de "por cupón individual" directamente no trae la columna
+    "Grupo de acreditación" (antes, cuando no agrupaba, la traía vacía/
+    con un "-"; ahora ni existe) — se tolera igual que el caso vacío: sin
+    esa columna, todas las operaciones quedan "Individual" y la Clave de
+    cruce coincide con el N° operación. Ese mismo formato nuevo también
+    renombra "Costo del servicio" → "Comisión" e "IVA del costo" → "IVA
+    comisión" (mismo concepto, otro nombre) — se las alias acá para que
+    _COLUMNAS_AJUSTE_DIAGNOSTICO las siga encontrando.
     """
     df = df.copy()
 
@@ -120,6 +130,12 @@ def depurar_nave(df: pd.DataFrame) -> pd.DataFrame:
         col_operacion = "Código de operación"
     else:
         raise ValueError("No se encontró 'Número de operación' ni 'Código de operación' en el DataFrame.")
+
+    # --- Alias de columnas que Nave renombró en el reporte "por cupón individual" ---
+    if "Costo del servicio" not in df.columns and "Comisión" in df.columns:
+        df["Costo del servicio"] = df["Comisión"]
+    if "IVA del costo" not in df.columns and "IVA comisión" in df.columns:
+        df["IVA del costo"] = df["IVA comisión"]
 
     # --- Fecha de operación ---
     df["Fecha de operación"] = pd.to_datetime(
@@ -136,7 +152,10 @@ def depurar_nave(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # --- Grupo de acreditación / N° operación / Clave de cruce ---
-    grupo_original = df["Grupo de acreditación"]
+    if "Grupo de acreditación" in df.columns:
+        grupo_original = df["Grupo de acreditación"]
+    else:
+        grupo_original = pd.Series([None] * len(df), index=df.index)
     mask_vacio = (
         grupo_original.isna() |
         grupo_original.astype(str).str.strip().isin(["", "nan", "None", "-"])
