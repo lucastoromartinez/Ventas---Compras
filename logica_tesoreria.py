@@ -132,6 +132,21 @@ def cargar_caja_central(archivo) -> pd.DataFrame:
     return df
 
 
+def cargar_caja_central_multiple(archivos) -> pd.DataFrame:
+    """
+    Igual que cargar_caja_central pero acepta varios archivos (uno por
+    mes) y devuelve un único DataFrame con todos los meses juntos,
+    ordenado por Fecha.
+    """
+    if not isinstance(archivos, (list, tuple)):
+        archivos = [archivos]
+
+    dfs = [cargar_caja_central(archivo) for archivo in archivos]
+    df = pd.concat(dfs, ignore_index=True)
+    df = df.sort_values("Fecha", kind="stable").reset_index(drop=True)
+    return df
+
+
 def load_excel_file(archivo) -> pd.DataFrame:
     return pd.read_excel(archivo)
 
@@ -529,14 +544,19 @@ def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
 # ─────────────────────────────────────────────
 
 def correr_conciliacion_tesoreria(
-    archivo_caja_central,
+    archivos_caja_central,
     archivo_caja_unificada,
     col_detalle_unificada="Comentario",
     tolerancia_pesos=5,
     tolerancia_pct=0.001,
     tolerancia_dias=3,
 ):
-    df_caja_michu = cargar_caja_central(archivo_caja_central)
+    """
+    archivos_caja_central: uno o varios archivos de Caja Central (uno por
+    mes, cada uno con una hoja por día). archivo_caja_unificada: un único
+    archivo del sistema que ya puede traer varios meses juntos.
+    """
+    df_caja_michu = cargar_caja_central_multiple(archivos_caja_central)
 
     df_caja_unificada = load_excel_file(archivo_caja_unificada)
     df_caja_unificada = depurar_caja_unificada(df_caja_unificada)

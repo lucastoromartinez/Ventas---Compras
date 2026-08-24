@@ -53,6 +53,22 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stButton > button:hover { opacity: 0.85 !important; }
 .stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
 
+.counter-box {
+    background: #1a1a1a; border: 1px solid #2a2a2a;
+    border-radius: 6px; padding: 1.2rem;
+    text-align: center; margin: 1rem 0;
+}
+.counter-box .counter-num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 2.5rem; font-weight: 600;
+    color: #ffb020; line-height: 1;
+}
+.counter-box .counter-label {
+    font-size: 0.75rem; color: #555;
+    text-transform: uppercase; letter-spacing: 1px;
+    margin-top: 0.4rem; font-family: 'IBM Plex Mono', monospace;
+}
+
 .metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }
 .metric-card {
     flex: 1; min-width: 120px; background: #1a1a1a; border: 1px solid #2a2a2a;
@@ -106,21 +122,34 @@ st.markdown("""
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown('<div class="upload-label">Caja Central (una hoja por día)</div>', unsafe_allow_html=True)
-    archivo_caja_central = st.file_uploader("caja_central", type=["xlsx", "xls"],
-                                             label_visibility="collapsed", key="caja_central")
-with col2:
-    st.markdown('<div class="upload-label">Caja Unificada (sistema)</div>', unsafe_allow_html=True)
-    archivo_caja_unificada = st.file_uploader("caja_unificada", type=["xlsx", "xls"],
-                                               label_visibility="collapsed", key="caja_unificada")
+st.markdown('<div class="upload-label">Caja Central (un Excel por mes — una hoja por día)</div>', unsafe_allow_html=True)
+archivos_caja_central = st.file_uploader(
+    "caja_central", type=["xlsx", "xls"],
+    accept_multiple_files=True,
+    label_visibility="collapsed", key="caja_central",
+)
+
+if archivos_caja_central:
+    n = len(archivos_caja_central)
+    st.markdown(f"""
+    <div class="counter-box">
+        <div class="counter-num">{n}</div>
+        <div class="counter-label">mes{"es" if n != 1 else ""} de Caja Central cargado{"s" if n != 1 else ""}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown('<div class="upload-label">Caja Unificada (sistema — puede traer varios meses)</div>', unsafe_allow_html=True)
+archivo_caja_unificada = st.file_uploader("caja_unificada", type=["xlsx", "xls"],
+                                           label_visibility="collapsed", key="caja_unificada")
 
 st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-todo_ok = all([archivo_caja_central, archivo_caja_unificada])
-if not todo_ok:
-    st.info("Cargá la Caja Central y la Caja Unificada para habilitar el cruce.")
+todo_ok = bool(archivos_caja_central and archivo_caja_unificada)
+if not archivos_caja_central:
+    st.info("Cargá al menos un Excel de Caja Central.")
+elif not archivo_caja_unificada:
+    st.info("Cargá el Excel de Caja Unificada del sistema.")
 
 boton_tesoreria = st.button("CRUZAR TESORERÍA", disabled=not todo_ok,
                              use_container_width=True, key="btn_tesoreria")
@@ -129,7 +158,7 @@ if boton_tesoreria and todo_ok:
     with st.spinner("Procesando Tesorería..."):
         try:
             buf, stats = correr_conciliacion_tesoreria(
-                archivo_caja_central=archivo_caja_central,
+                archivos_caja_central=archivos_caja_central,
                 archivo_caja_unificada=archivo_caja_unificada,
             )
             st.session_state["resultado_tesoreria"] = {"buf": buf, "stats": stats}
