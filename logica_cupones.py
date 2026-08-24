@@ -478,7 +478,14 @@ def calcular_cruce_automatico(
             residual = 0.0
         else:
             categoria = "Diferencia Banco vs Nave"
-            residual = 0.0
+            # Acá no hay pendiente que restar (la clave es 100% de este mes),
+            # así que toda la Diferencia es, en los mismos términos que la
+            # categoría anterior, "residual": es la misma pregunta ("qué
+            # cupón puntual explica lo que no cierra") aplicada a un grupo
+            # que no viene de un pendiente sino que ya nació con Banco y
+            # Nave sin coincidir. identificar_cupones_residual la toma
+            # igual que la otra categoría para buscar el cupón puntual.
+            residual = diferencia
 
         filas.append({
             "Clave de cruce": clave,
@@ -583,15 +590,18 @@ def identificar_cupones_residual(
     tolerancia: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Para las claves de "Cupón mes anterior acreditado en banco actual" con
-    Diferencia residual != 0, arma — operación por operación — lo que hoy
-    tenemos contemplado para esa clave (Nave de este mes "por fecha de
-    cobro", más los pendientes individuales ya remapeados ahí, más, si la
-    clave es un pendiente "directo" del mes anterior sin remapeo, sus
-    propias operaciones en el Nave del mes anterior) y lo compara contra
-    lo que dice el extracto de Nave "por fecha de acreditación" de este
-    mes para esa misma clave. Encuentra así tres tipos de discrepancia
-    por operación:
+    Para las claves con Diferencia residual != 0 — tanto "Cupón mes
+    anterior acreditado en banco actual" como "Diferencia Banco vs Nave"
+    (son la misma pregunta: qué cupón puntual explica lo que no cierra;
+    a la segunda categoría simplemente no le resta ningún pendiente
+    porque es 100% de este mes, ver calcular_cruce_automatico) — arma,
+    operación por operación, lo que hoy tenemos contemplado para esa
+    clave (Nave de este mes "por fecha de cobro", más los pendientes
+    individuales ya remapeados ahí, más, si la clave es un pendiente
+    "directo" del mes anterior sin remapeo, sus propias operaciones en
+    el Nave del mes anterior) y lo compara contra lo que dice el
+    extracto de Nave "por fecha de acreditación" de este mes para esa
+    misma clave. Encuentra así tres tipos de discrepancia por operación:
       - "Cupón que falta en Nave": está en el extracto por acreditación
         pero no en lo contemplado — plata que el banco pagó y no
         teníamos anotada.
@@ -601,25 +611,34 @@ def identificar_cupones_residual(
       - "Cupón con Monto neto distinto": la misma operación aparece en
         ambos lados pero con un importe diferente — pasa cuando Nave
         recalcula o ajusta el monto entre que se generó el reporte viejo
-        (el pendiente del mes anterior) y la acreditación real de este
-        mes. Es la causa más común de residual, más que un cupón
-        faltante o sobrante. Para este caso, además, prueba si esa
-        diferencia puntual se explica por alguna combinación de las
-        columnas de ajuste del cupón en el extracto por acreditación
-        (Retención IIBB CABA, IVA del costo, Costo del servicio,
-        Propina — la misma lógica que agregar_diagnostico_diferencia) y,
-        si la encuentra, la nombra en el diagnóstico.
+        y la acreditación real de este mes. Es la causa más común de
+        residual, más que un cupón faltante o sobrante. Para este caso,
+        además, prueba si esa diferencia puntual se explica por alguna
+        combinación de las columnas de ajuste del cupón en el extracto
+        por acreditación (Retención IIBB CABA, IVA del costo, Costo del
+        servicio, Propina — la misma lógica que
+        agregar_diagnostico_diferencia) y, si la encuentra, la nombra en
+        el diagnóstico. También calcula, siempre que hay monto de los
+        dos lados, "% Diferencia (1 - Nave/Acreditado)" — cuánto
+        representa la diferencia puntual sobre el monto de acreditación,
+        útil para detectar un ajuste porcentual (una tasa/comisión
+        distinta) en vez de una resta de columnas conocidas.
 
     Si la suma de esas discrepancias no cierra el residual dentro de la
     tolerancia (o no se pasó el extracto por acreditación), se deja una
     fila para revisión manual sin cupón puntual.
     """
     columnas = [
-        "Clave de cruce", "N° operación", "Monto según Nave", "Monto según acreditación",
-        "Diferencia del cupón", "Diferencia residual del grupo", "Diagnóstico",
+        "Categoría origen", "Clave de cruce", "N° operación", "Monto según Nave",
+        "Monto según acreditación", "Diferencia del cupón", "% Diferencia (1 - Nave/Acreditado)",
+        "Diferencia residual del grupo", "Diagnóstico",
     ]
+    categorias_con_residual = {
+        "Cupón mes anterior acreditado en banco actual",
+        "Diferencia Banco vs Nave",
+    }
     candidatas = cruce[
-        (cruce["Categoría conciliación"] == "Cupón mes anterior acreditado en banco actual")
+        cruce["Categoría conciliación"].isin(categorias_con_residual)
         & (cruce["Diferencia residual"].abs() > tolerancia)
     ]
     if candidatas.empty or df_nave_acred_mes_dep is None:
@@ -639,6 +658,7 @@ def identificar_cupones_residual(
     for _, fila in candidatas.iterrows():
         clave = fila["Clave de cruce"]
         residual = fila["Diferencia residual"]
+        categoria_origen = fila["Categoría conciliación"]
 
         conocido: dict = {}
         for _, r in df_nave_actual_dep[df_nave_actual_dep["Clave de cruce"] == clave].iterrows():
@@ -692,22 +712,29 @@ def identificar_cupones_residual(
 
         if discrepancias and abs(total_ajuste - residual) <= tolerancia:
             for op, m_conocido, m_acred, delta, diagnostico in discrepancias:
+                pct_diferencia = None
+                if m_conocido is not None and m_acred:
+                    pct_diferencia = round(1 - (m_conocido / m_acred), 4)
                 filas.append({
+                    "Categoría origen": categoria_origen,
                     "Clave de cruce": clave,
                     "N° operación": op,
                     "Monto según Nave": round(m_conocido, 2) if m_conocido is not None else None,
                     "Monto según acreditación": round(m_acred, 2) if m_acred is not None else None,
                     "Diferencia del cupón": round(delta, 2),
+                    "% Diferencia (1 - Nave/Acreditado)": pct_diferencia,
                     "Diferencia residual del grupo": residual,
                     "Diagnóstico": diagnostico,
                 })
         else:
             filas.append({
+                "Categoría origen": categoria_origen,
                 "Clave de cruce": clave,
                 "N° operación": "",
                 "Monto según Nave": None,
                 "Monto según acreditación": None,
                 "Diferencia del cupón": None,
+                "% Diferencia (1 - Nave/Acreditado)": None,
                 "Diferencia residual del grupo": residual,
                 "Diagnóstico": "No se pudo identificar el cupón puntual — revisar a mano",
             })
@@ -1020,11 +1047,13 @@ _ANCHOS_PENDIENTES = {
 
 _FORMATOS_DIFERENCIA_RESIDUAL = {
     "Monto según Nave": "#,##0.00", "Monto según acreditación": "#,##0.00",
-    "Diferencia del cupón": "#,##0.00", "Diferencia residual del grupo": "#,##0.00",
+    "Diferencia del cupón": "#,##0.00", "% Diferencia (1 - Nave/Acreditado)": "0.00%",
+    "Diferencia residual del grupo": "#,##0.00",
 }
 _ANCHOS_DIFERENCIA_RESIDUAL = {
-    "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
+    "Categoría origen": 40, "Clave de cruce": 20, "N° operación": 16, "Monto según Nave": 20,
     "Monto según acreditación": 22, "Diferencia del cupón": 20,
+    "% Diferencia (1 - Nave/Acreditado)": 26,
     "Diferencia residual del grupo": 24, "Diagnóstico": 62,
 }
 
