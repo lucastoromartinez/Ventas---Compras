@@ -513,20 +513,27 @@ def agregar_diagnostico_diferencia(
     """
     Agrega la columna "Diagnóstico diferencia" a CRUCE AUTOMÁTICO: para las
     claves en "Diferencia Banco vs Nave" (Banco y Nave presentes pero no
-    cierran), prueba dos cosas, en orden:
+    cierran), prueba tres cosas, en orden:
 
-    1. Si restarle al Monto neto de Nave alguna combinación de columnas de
-       ajuste (Retención IIBB CABA, IVA del costo, Costo del servicio,
-       Propina — la misma lógica de ajuste que usaba el cruce viejo) hace
-       que cierre contra el banco dentro de la tolerancia.
-    2. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
+    1. Si la diferencia se explica por la Retención IIBB CABA que Nave
+       estima al momento del cobro contra la que termina siendo real al
+       acreditar (Retención IIBB CABA sumada de este mes "por fecha de
+       cobro", menos la misma columna sumada del extracto "por fecha de
+       acreditación" para esa clave) — esta es la causa más común:
+       Nave recalcula la retención real recién al acreditar, y hasta
+       entonces el Monto neto "por cobro" usa una estimación.
+    2. Si no, si restarle al Monto neto de Nave alguna combinación de
+       columnas de ajuste (Retención IIBB CABA, IVA del costo, Costo del
+       servicio, Propina — la misma lógica de ajuste que usaba el cruce
+       viejo) hace que cierre contra el banco dentro de la tolerancia.
+    3. Si no, y se pasó el extracto de Nave "por fecha de acreditación" del
        mes actual: si la clave ahí (que puede traer otra composición de
        operaciones — p.ej. un grupo que después de bajar los extractos
        terminó absorbiendo operaciones que a la fecha de cobro todavía no
        estaban asignadas) suma un monto que sí cierra contra el banco.
 
     Es solo diagnóstico manual, no cambia la Categoría conciliación: si
-    alguna de las dos explica la diferencia, la deja como comentario; si
+    alguna de las tres explica la diferencia, la deja como comentario; si
     ninguna la explica, deja la celda en blanco.
 
     No aplica lo mismo para "Cupones individuales" vs "Grupo": la búsqueda
@@ -541,12 +548,24 @@ def agregar_diagnostico_diferencia(
 
     diagnosticos = {}
 
+    if df_nave_acred_mes_dep is not None and "Retención IIBB CABA" in df_nave_actual_dep.columns \
+            and "Retención IIBB CABA" in df_nave_acred_mes_dep.columns:
+        ret_cobro_sum = df_nave_actual_dep.groupby("Clave de cruce")["Retención IIBB CABA"].sum()
+        ret_acred_sum = df_nave_acred_mes_dep.groupby("Clave de cruce")["Retención IIBB CABA"].sum()
+        for _, fila in candidatas.iterrows():
+            clave = fila["Clave de cruce"]
+            if clave not in ret_cobro_sum.index or clave not in ret_acred_sum.index:
+                continue
+            explicado = ret_cobro_sum[clave] - ret_acred_sum[clave]
+            if abs(fila["Diferencia"] - explicado) <= tolerancia:
+                diagnosticos[clave] = "Diferencia Ret Cobro vs Acreditación"
+
     columnas = [c for c in _COLUMNAS_AJUSTE_DIAGNOSTICO if c in df_nave_actual_dep.columns]
     if columnas:
         ajustes_sum = df_nave_actual_dep.groupby("Clave de cruce")[columnas].sum()
         for _, fila in candidatas.iterrows():
             clave = fila["Clave de cruce"]
-            if clave not in ajustes_sum.index:
+            if clave in diagnosticos or clave not in ajustes_sum.index:
                 continue
             valores_ajuste = ajustes_sum.loc[clave]
             nave_val = fila["Nave"]
@@ -612,17 +631,25 @@ def identificar_cupones_residual(
         ambos lados pero con un importe diferente — pasa cuando Nave
         recalcula o ajusta el monto entre que se generó el reporte viejo
         y la acreditación real de este mes. Es la causa más común de
-        residual, más que un cupón faltante o sobrante. Para este caso,
-        además, prueba si esa diferencia puntual se explica por alguna
-        combinación de las columnas de ajuste del cupón en el extracto
-        por acreditación (Retención IIBB CABA, IVA del costo, Costo del
-        servicio, Propina — la misma lógica que
-        agregar_diagnostico_diferencia) y, si la encuentra, la nombra en
-        el diagnóstico. También calcula, siempre que hay monto de los
-        dos lados, "% Diferencia (1 - Nave/Acreditado)" — cuánto
-        representa la diferencia puntual sobre el monto de acreditación,
-        útil para detectar un ajuste porcentual (una tasa/comisión
-        distinta) en vez de una resta de columnas conocidas.
+        residual, más que un cupón faltante o sobrante. Para este caso
+        prueba, en orden:
+          1. Si la diferencia puntual se explica por la Retención IIBB
+             CABA que Nave estimó al momento del cobro contra la que
+             terminó siendo real al acreditar (misma lógica que el
+             chequeo 1 de agregar_diagnostico_diferencia, pero cupón por
+             cupón en vez de por grupo) — diagnóstico "Diferencia Ret
+             Cobro vs Acreditación". Solo se puede calcular cuando el
+             cupón viene de Nave de este mes o del mes anterior (no de un
+             pendiente remapeado, que no trae desglose de retención).
+          2. Si no, si se explica por alguna combinación de las columnas
+             de ajuste del cupón en el extracto por acreditación
+             (Retención IIBB CABA, IVA del costo, Costo del servicio,
+             Propina) y, si la encuentra, la nombra en el diagnóstico.
+        También calcula, siempre que hay monto de los dos lados, "%
+        Diferencia (1 - Nave/Acreditado)" — cuánto representa la
+        diferencia puntual sobre el monto de acreditación, útil para
+        detectar un ajuste porcentual (una tasa/comisión distinta) en
+        vez de una resta de columnas conocidas.
 
     Si la suma de esas discrepancias no cierra el residual dentro de la
     tolerancia (o no se pasó el extracto por acreditación), se deja una
@@ -661,13 +688,18 @@ def identificar_cupones_residual(
         categoria_origen = fila["Categoría conciliación"]
 
         conocido: dict = {}
+        ret_cobro: dict = {}
         for _, r in df_nave_actual_dep[df_nave_actual_dep["Clave de cruce"] == clave].iterrows():
             conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+            if "Retención IIBB CABA" in r:
+                ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
         for op, monto in remapeadas_por_grupo.get(clave, {}).items():
             conocido[op] = conocido.get(op, 0.0) + monto
         if clave in claves_directas and df_nave_anterior_dep is not None:
             for _, r in df_nave_anterior_dep[df_nave_anterior_dep["Clave de cruce"] == clave].iterrows():
                 conocido[r["N° operación"]] = conocido.get(r["N° operación"], 0.0) + r["Monto neto"]
+                if "Retención IIBB CABA" in r:
+                    ret_cobro[r["N° operación"]] = ret_cobro.get(r["N° operación"], 0.0) + r["Retención IIBB CABA"]
 
         detalle_acred = df_nave_acred_mes_dep[df_nave_acred_mes_dep["Clave de cruce"] == clave]
         acred: dict = {}
@@ -694,7 +726,16 @@ def identificar_cupones_residual(
             elif abs(m_acred - m_conocido) > tolerancia:
                 delta = m_acred - m_conocido
                 diagnostico = "Cupón con Monto neto distinto"
-                if ajustes_por_op is not None and op in ajustes_por_op.index:
+                ret_acred_op = (
+                    ajustes_por_op.loc[op, "Retención IIBB CABA"]
+                    if ajustes_por_op is not None and op in ajustes_por_op.index
+                    and "Retención IIBB CABA" in columnas_ajuste_disp
+                    else None
+                )
+                if op in ret_cobro and ret_acred_op is not None \
+                        and abs(delta - (ret_cobro[op] - ret_acred_op)) <= tolerancia:
+                    diagnostico = "Diferencia Ret Cobro vs Acreditación"
+                elif ajustes_por_op is not None and op in ajustes_por_op.index:
                     valores = ajustes_por_op.loc[op]
                     for r in range(1, len(columnas_ajuste_disp) + 1):
                         combo_encontrado = None
