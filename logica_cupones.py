@@ -886,6 +886,80 @@ def diagnosticar_diferencia_residual(
     return cruce, pd.DataFrame(filas, columns=columnas), explicado_por_retencion
 
 
+def explicar_por_dia_acreditacion(
+    cruce: pd.DataFrame,
+    df_nave_actual_dep: pd.DataFrame,
+    tolerancia: float = 1.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Cuando Nave no agrupa (reporte "por cupón individual", sin columna
+    Grupo de acreditación — ver depurar_nave), el banco puede seguir
+    acreditando varias operaciones juntas en un solo movimiento, bajo la
+    leyenda de una sola de ellas (la que el banco elige como
+    "representante" del lote). Esa operación puntual queda entonces con
+    una Diferencia Banco vs Nave enorme — todo el lote — aunque el mes,
+    en conjunto, cierre perfecto. No hay forma de reconstruir qué
+    operaciones integran cada lote (Nave dejó de informarlo), pero si el
+    total que el banco acreditó ESE DÍA coincide con el total que Nave
+    marca acreditado ese mismo día (agrupando por "Fecha de
+    acreditación"), no es una diferencia real: es solo que el banco
+    resume varios cupones bajo una sola leyenda.
+
+    Para las claves de "Diferencia Banco vs Nave" que sigan con
+    Diferencia residual != 0 (después de agregar_diagnostico_diferencia
+    y diagnosticar_diferencia_residual) cuyo día cierra así: deja la
+    Diferencia residual en $0 y el Diagnóstico diferencia en "Cierra por
+    día de acreditación...". No hace falta compensar la cascada de
+    CONCILIACIÓN DIFERENCIA por esto — esa categoría usa la columna
+    Diferencia (no Diferencia residual), que no se toca acá.
+
+    Devuelve (cruce actualizado, dict clave -> monto que quedó
+    explicado) — el segundo se usa para sacar esas claves de la hoja
+    DIFERENCIA RESIDUAL.
+    """
+    candidatas = cruce[
+        (cruce["Categoría conciliación"] == "Diferencia Banco vs Nave")
+        & (cruce["Diferencia residual"].abs() > tolerancia)
+    ]
+    if candidatas.empty:
+        return cruce, {}
+
+    fecha_por_clave = (
+        df_nave_actual_dep
+        .drop_duplicates(subset="N° operación")
+        .set_index("N° operación")["Fecha de acreditación"]
+    )
+    dia_por_candidata = candidatas["Clave de cruce"].map(fecha_por_clave)
+    if dia_por_candidata.dropna().empty:
+        return cruce, {}
+
+    dia_por_clave = cruce["Clave de cruce"].map(fecha_por_clave)
+
+    cruce = cruce.copy()
+    if "Diagnóstico diferencia" not in cruce.columns:
+        cruce["Diagnóstico diferencia"] = ""
+
+    explicado: dict = {}
+    for dia in dia_por_candidata.dropna().unique():
+        mascara_dia = dia_por_clave == dia
+        banco_dia = cruce.loc[mascara_dia, "Banco"].sum()
+        nave_dia = cruce.loc[mascara_dia, "Nave"].sum()
+        if abs(banco_dia - nave_dia) > tolerancia:
+            continue
+        claves_dia = candidatas.loc[dia_por_candidata == dia, "Clave de cruce"]
+        for clave in claves_dia:
+            explicado[clave] = cruce.loc[cruce["Clave de cruce"] == clave, "Diferencia residual"].iloc[0]
+
+    if explicado:
+        mascara = cruce["Clave de cruce"].isin(explicado)
+        cruce.loc[mascara, "Diferencia residual"] = 0.0
+        cruce.loc[mascara, "Diagnóstico diferencia"] = (
+            "Cierra por día de acreditación (banco agrupó varios cupones bajo una sola leyenda)"
+        )
+
+    return cruce, explicado
+
+
 def _tipo_por_conteo(df_nave_dep: pd.DataFrame) -> pd.Series:
     """"Grupo" si la clave tiene más de una fila de Nave, "Individual" si tiene una sola."""
     conteo = df_nave_dep.groupby("Clave de cruce").size()
@@ -1259,6 +1333,11 @@ def generar_excel_plantilla_cupones(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
         df_nave_acred_mes_dep, pendientes, tolerancia,
     )
+    cruce, explicado_dia = explicar_por_dia_acreditacion(cruce, df_nave_actual_dep, tolerancia)
+    if explicado_dia:
+        diferencia_residual = diferencia_residual[
+            ~diferencia_residual["Clave de cruce"].isin(explicado_dia)
+        ]
     datos_conciliacion = calcular_conciliacion_diferencia(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
         mes_anterior, mes_actual, df_nave_acred_mes_dep, explicado_retencion,
