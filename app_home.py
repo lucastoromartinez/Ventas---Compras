@@ -89,7 +89,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def card(col, accent, icon, title, desc, page):
+def card(col, accent, icon, title, desc, page_key):
     with col:
         with st.container(key=f"card_{accent}"):
             st.markdown(f"""
@@ -101,21 +101,21 @@ def card(col, accent, icon, title, desc, page):
             """, unsafe_allow_html=True)
             clicked = st.button(f"{title} - {desc}", key=f"nav_{accent}")
         if clicked:
-            st.switch_page(page)
+            st.switch_page(st.session_state["_pages"][page_key])
 
 
 row1 = st.columns(3, gap="medium")
-card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "pages/compras.py")
-card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "pages/ventas.py")
-card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "pages/tesoreria.py")
+card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "compras")
+card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "ventas")
+card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "tesoreria")
 
 row2 = st.columns(3, gap="medium")
-card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "pages/conciliaciones.py")
+card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "conciliaciones")
 
 row3 = st.columns(3, gap="medium")
-card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py")
-card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "pages/rappi.py")
-card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "pages/impuestos.py")
+card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs")
+card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "rappi")
+card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "impuestos")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
