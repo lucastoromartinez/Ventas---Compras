@@ -888,44 +888,71 @@ def diagnosticar_diferencia_residual(
 
 def explicar_por_dia_acreditacion(
     cruce: pd.DataFrame,
-    df_nave_actual_dep: pd.DataFrame,
+    df_nave_acred_mes_dep: pd.DataFrame | None,
     tolerancia: float = 1.0,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Cuando Nave no agrupa (reporte "por cupón individual", sin columna
     Grupo de acreditación — ver depurar_nave), el banco puede seguir
     acreditando varias operaciones juntas en un solo movimiento, bajo la
-    leyenda de una sola de ellas (la que el banco elige como
-    "representante" del lote). Esa operación puntual queda entonces con
-    una Diferencia Banco vs Nave enorme — todo el lote — aunque el mes,
-    en conjunto, cierre perfecto. No hay forma de reconstruir qué
-    operaciones integran cada lote (Nave dejó de informarlo), pero si el
-    total que el banco acreditó ESE DÍA coincide con el total que Nave
-    marca acreditado ese mismo día (agrupando por "Fecha de
-    acreditación"), no es una diferencia real: es solo que el banco
-    resume varios cupones bajo una sola leyenda.
+    leyenda de una sola de ellas — la operación cronológicamente más
+    antigua del lote, según lo verificado con datos reales. Esa
+    operación puntual queda entonces con una Diferencia residual enorme
+    — todo el lote, no solo lo suyo — aunque el mes, en conjunto, cierre
+    perfecto. Le puede pasar tanto a una clave de "Diferencia Banco vs
+    Nave" (lote 100% de este mes) como a una de "Cupón mes anterior
+    acreditado en banco actual" (cuando la operación líder del lote
+    resulta ser, casualmente, un pendiente del mes anterior que recién
+    se acredita ahora) — en los dos casos el síntoma es el mismo. No hay
+    forma de reconstruir qué operaciones integran cada lote (Nave dejó
+    de informarlo), pero si el total que el banco acreditó bajo todas
+    las leyendas de ESE DÍA coincide con el total que Nave marca
+    acreditado ese mismo día, no es una diferencia real: es solo que el
+    banco resume varios cupones bajo una sola leyenda.
 
-    Para las claves de "Diferencia Banco vs Nave" que sigan con
-    Diferencia residual != 0 (después de agregar_diagnostico_diferencia
-    y diagnosticar_diferencia_residual) cuyo día cierra así: deja la
-    Diferencia residual en $0 y el Diagnóstico diferencia en "Cierra por
-    día de acreditación...". No hace falta compensar la cascada de
-    CONCILIACIÓN DIFERENCIA por esto — esa categoría usa la columna
-    Diferencia (no Diferencia residual), que no se toca acá.
+    El "día" se define por la Fecha de acreditación que Nave le asigna a
+    cada leyenda/clave (columna Banco de `cruce`, agrupada por esa
+    fecha) — NO por la fecha en la que el banco efectivamente
+    contabilizó el movimiento en su propio extracto: se comprobó con
+    datos reales que esas dos fechas pueden diferir 1 a 3 días (demora
+    real de acreditación vs. la fecha "de libro" que anota Nave), y usar
+    la fecha cruda del extracto de banco terminaba mezclando en un mismo
+    día montos de lotes de otras leyendas sin relación.
+
+    Se usa el extracto de Nave "por fecha de acreditación" del mes
+    actual (df_nave_acred_mes_dep) para ubicar el día de cada clave y
+    para el total de Nave de ese día — hace falta específicamente ese
+    extracto (no el de "por fecha de cobro" del mes actual) porque es el
+    único que también trae los pendientes del mes anterior que se
+    terminan acreditando ahora. Si no se pasó, no hay con qué chequear
+    esto y no se hace nada.
+
+    Para las claves candidatas cuyo día cierra así: deja la Diferencia
+    residual en $0 y el Diagnóstico diferencia en "Cierra por día de
+    acreditación...". Para "Diferencia Banco vs Nave" no hace falta
+    compensar la cascada de CONCILIACIÓN DIFERENCIA (esa categoría usa
+    la columna Diferencia, no Diferencia residual); para "Cupón mes
+    anterior acreditado en banco actual" sí (ver calcular_conciliacion_
+    diferencia, parámetro explicado_dia) porque esa cascada sí depende
+    de Diferencia residual.
 
     Devuelve (cruce actualizado, dict clave -> monto que quedó
     explicado) — el segundo se usa para sacar esas claves de la hoja
-    DIFERENCIA RESIDUAL.
+    DIFERENCIA RESIDUAL y para compensar la cascada.
     """
+    categorias_con_residual = {
+        "Cupón mes anterior acreditado en banco actual",
+        "Diferencia Banco vs Nave",
+    }
     candidatas = cruce[
-        (cruce["Categoría conciliación"] == "Diferencia Banco vs Nave")
+        cruce["Categoría conciliación"].isin(categorias_con_residual)
         & (cruce["Diferencia residual"].abs() > tolerancia)
     ]
-    if candidatas.empty:
+    if candidatas.empty or df_nave_acred_mes_dep is None:
         return cruce, {}
 
     fecha_por_clave = (
-        df_nave_actual_dep
+        df_nave_acred_mes_dep
         .drop_duplicates(subset="N° operación")
         .set_index("N° operación")["Fecha de acreditación"]
     )
@@ -933,7 +960,17 @@ def explicar_por_dia_acreditacion(
     if dia_por_candidata.dropna().empty:
         return cruce, {}
 
-    dia_por_clave = cruce["Clave de cruce"].map(fecha_por_clave)
+    # OJO: el día se define por la Fecha de acreditación que Nave le
+    # asigna a cada leyenda (clave) — NO por la fecha en la que el banco
+    # efectivamente contabilizó el movimiento en su extracto. Se
+    # comprobó con datos reales que esas dos fechas pueden diferir 1 a 3
+    # días (demora de acreditación real vs. la fecha "de libro" que
+    # anota Nave); usar la fecha cruda del extracto de banco mezclaba en
+    # un mismo día montos de lotes de otras leyendas sin relación, y
+    # rompía chequeos que con el criterio de Nave sí cerraban.
+    dia_por_clave_todas = cruce["Clave de cruce"].map(fecha_por_clave)
+    banco_por_dia = cruce.groupby(dia_por_clave_todas)["Banco"].sum()
+    nave_por_dia = df_nave_acred_mes_dep.groupby("Fecha de acreditación")["Monto neto"].sum()
 
     cruce = cruce.copy()
     if "Diagnóstico diferencia" not in cruce.columns:
@@ -941,9 +978,8 @@ def explicar_por_dia_acreditacion(
 
     explicado: dict = {}
     for dia in dia_por_candidata.dropna().unique():
-        mascara_dia = dia_por_clave == dia
-        banco_dia = cruce.loc[mascara_dia, "Banco"].sum()
-        nave_dia = cruce.loc[mascara_dia, "Nave"].sum()
+        banco_dia = banco_por_dia.get(dia, 0.0)
+        nave_dia = nave_por_dia.get(dia, 0.0)
         if abs(banco_dia - nave_dia) > tolerancia:
             continue
         claves_dia = candidatas.loc[dia_por_candidata == dia, "Clave de cruce"]
@@ -978,6 +1014,7 @@ def calcular_conciliacion_diferencia(
     mes_actual: str,
     df_nave_acred_mes_dep: pd.DataFrame | None = None,
     explicado_retencion: dict | None = None,
+    explicado_dia: dict | None = None,
 ) -> dict:
     """
     Importes de la cascada "CONCILIACIÓN DIFERENCIA": parte de la
@@ -991,14 +1028,16 @@ def calcular_conciliacion_diferencia(
     texto "$X grupos + $Y individuales" no lo puede clasificar ahí — se
     usa este extracto como respaldo para esos casos.
 
-    explicado_retencion (opcional): dict clave -> monto que
-    diagnosticar_diferencia_residual() dejó en $0 en la columna
-    Diferencia residual de `cruce` por explicarse enteramente con
-    Retención Cobro vs Acreditación. Como esa función ya restó ese monto
-    de "Diferencia residual" en `cruce` (así llega correcto a esta
-    cascada y a la hoja CRUCE AUTOMÁTICO), acá se separa en su propia
-    línea — "Residual de grupos mixtos" + esta línea nueva siguen
-    sumando lo mismo que antes, la cascada no se descuadra.
+    explicado_retencion / explicado_dia (opcionales): dict clave ->
+    monto que diagnosticar_diferencia_residual() / explicar_por_dia_
+    acreditacion() dejaron en $0 en la columna Diferencia residual de
+    `cruce` (por Retención Cobro vs Acreditación, o porque el banco
+    agrupó varios cupones bajo una sola leyenda). Como esas funciones ya
+    restaron ese monto de "Diferencia residual" en `cruce` (así llega
+    correcto a esta cascada y a la hoja CRUCE AUTOMÁTICO), acá se
+    separan en sus propias líneas — "Residual de grupos mixtos" + estas
+    líneas nuevas siguen sumando lo mismo que antes, la cascada no se
+    descuadra.
     """
     banco_total = cruce["Banco"].sum()
     nave_total = cruce["Nave"].sum()
@@ -1009,11 +1048,16 @@ def calcular_conciliacion_diferencia(
     cat_diferencias = cruce[cruce["Categoría conciliación"] == "Diferencia Banco vs Nave"]
     cat_banco_sin_nave = cruce[cruce["Categoría conciliación"] == "Banco sin Nave / revisar"]
 
+    claves_mes_anterior = set(cat_mes_anterior["Clave de cruce"])
     importe_acreditado_mes_anterior = cat_mes_anterior["mes anterior acreditado en mes actual"].sum()
     importe_residual_grupos_mixtos = cat_mes_anterior["Diferencia residual"].sum()
     importe_explicado_retencion = sum(
         monto for clave, monto in (explicado_retencion or {}).items()
-        if clave in set(cat_mes_anterior["Clave de cruce"])
+        if clave in claves_mes_anterior
+    )
+    importe_explicado_dia = sum(
+        monto for clave, monto in (explicado_dia or {}).items()
+        if clave in claves_mes_anterior
     )
 
     if df_nave_anterior_dep is not None and len(cat_mes_anterior):
@@ -1048,6 +1092,7 @@ def calcular_conciliacion_diferencia(
         "importe_acreditado_mes_anterior": importe_acreditado_mes_anterior,
         "importe_residual_grupos_mixtos": importe_residual_grupos_mixtos,
         "importe_explicado_retencion": importe_explicado_retencion,
+        "importe_explicado_dia": importe_explicado_dia,
         "desc_acreditado_mes_anterior": (
             f"{_formato_ars(monto_grupos_acreditados)} grupos + "
             f"{_formato_ars(monto_individuales_acreditados)} individuales"
@@ -1204,6 +1249,8 @@ def _escribir_conciliacion_diferencia(wb, datos: dict, mes_anterior: str | None,
         ("Residual de grupos mixtos", datos["importe_residual_grupos_mixtos"], 1, datos["desc_residual"]),
         ("Diferencia Ret Cobro vs Acreditación", datos["importe_explicado_retencion"], 1,
          "Ya resuelta en CRUCE AUTOMÁTICO (Diferencia residual en $0)"),
+        ("Diferencia por acreditación en lote sin agrupar", datos["importe_explicado_dia"], 1,
+         "Ya resuelta en CRUCE AUTOMÁTICO (banco agrupó varios cupones bajo una sola leyenda)"),
         (f"Cupones {mes_act_bare} por acreditar - grupos", datos["importe_pendiente_grupos"], 1, "Resta"),
         ("Diferencias Banco vs Nave", datos["importe_diferencias"], 1, "Suma"),
         ("Banco sin Nave", datos["importe_banco_sin_nave"], 1, "Suma"),
@@ -1237,12 +1284,13 @@ def _escribir_conciliacion_diferencia(wb, datos: dict, mes_anterior: str | None,
     # Casillero de control: retoma los totales por categoría de CRUCE AUTOMÁTICO
     fila_pie = fila_final + 5
     pie = [
-        ("Pendiente actual por acreditar", f"=B{fila_inicio + 4}+B{fila_final}"),
-        ("Diferencia Banco vs Nave", f"=B{fila_inicio + 5}"),
-        ("Banco sin Nave / revisar", f"=B{fila_inicio + 6}"),
+        ("Pendiente actual por acreditar", f"=B{fila_inicio + 5}+B{fila_final}"),
+        ("Diferencia Banco vs Nave", f"=B{fila_inicio + 6}"),
+        ("Banco sin Nave / revisar", f"=B{fila_inicio + 7}"),
         ("Cupón mes anterior acreditado en banco actual", f"=B{fila_inicio + 2}"),
         (None, f"=B{fila_inicio + 1}"),
         (None, f"=B{fila_inicio + 3}"),
+        (None, f"=B{fila_inicio + 4}"),
     ]
     for offset, (etiqueta, formula) in enumerate(pie):
         fila = fila_pie + offset
@@ -1333,14 +1381,16 @@ def generar_excel_plantilla_cupones(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
         df_nave_acred_mes_dep, pendientes, tolerancia,
     )
-    cruce, explicado_dia = explicar_por_dia_acreditacion(cruce, df_nave_actual_dep, tolerancia)
+    cruce, explicado_dia = explicar_por_dia_acreditacion(
+        cruce, df_nave_acred_mes_dep, tolerancia,
+    )
     if explicado_dia:
         diferencia_residual = diferencia_residual[
             ~diferencia_residual["Clave de cruce"].isin(explicado_dia)
         ]
     datos_conciliacion = calcular_conciliacion_diferencia(
         cruce, df_nave_actual_dep, df_nave_anterior_dep if con_anterior else None,
-        mes_anterior, mes_actual, df_nave_acred_mes_dep, explicado_retencion,
+        mes_anterior, mes_actual, df_nave_acred_mes_dep, explicado_retencion, explicado_dia,
     )
 
     wb = Workbook()
