@@ -117,10 +117,11 @@ def construir_resumen_extracto(liquidaciones):
             'Reporte':               liq.get('reporte'),
             'Venta Bruta':           liq.get('venta_bruta'),
             'Descuento de Producto': liq.get('descuento_producto'),
+            'Venta Neta':            liq.get('valor_total_transferir'),
         }
         for liq in liquidaciones
     ]
-    return pd.DataFrame(filas, columns=['Periodo', 'Reporte', 'Venta Bruta', 'Descuento de Producto'])
+    return pd.DataFrame(filas, columns=['Periodo', 'Reporte', 'Venta Bruta', 'Descuento de Producto', 'Venta Neta'])
 
 
 # ─────────────────────────────────────────────
@@ -644,6 +645,7 @@ def construir_cuadro_conceptos(liquidaciones):
     for liq in liquidaciones:
         inicio = _formatear_fecha_liq(liq.get('inicio_periodo_liq'))
         fin    = _formatear_fecha_liq(liq.get('fin_periodo_liq'))
+        filas.append((liq.get('reporte'), None))
         filas.append((f'Liquidacion {inicio} a {fin}', None))
         filas.append(('Valor total a transferir', liq.get('valor_total_transferir')))
 
@@ -726,7 +728,7 @@ def correr_rappi(archivos_liq, archivos_pdf):
         with pd.ExcelWriter(buf_extracto, engine='openpyxl') as writer:
             df_resumen_extracto.to_excel(writer, index=False, sheet_name='resumen_extracto')
             ws_extracto = writer.sheets['resumen_extracto']
-            for col_name in ['Venta Bruta', 'Descuento de Producto']:
+            for col_name in ['Venta Bruta', 'Descuento de Producto', 'Venta Neta']:
                 col_letter = get_column_letter(df_resumen_extracto.columns.get_loc(col_name) + 1)
                 for cell in ws_extracto[col_letter][1:]:
                     cell.number_format = '$ #,##0.00'
