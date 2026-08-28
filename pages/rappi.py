@@ -1,5 +1,5 @@
 import streamlit as st
-from logica_rappi import correr_rappi
+from logica_rappi import correr_rappi, correr_rappi_resumen_facturas
 from logica_atalaya import correr_atalaya
 
 st.set_page_config(
@@ -161,104 +161,173 @@ tab_liquidaciones, tab_atalaya = st.tabs(["📑  Liquidaciones Rappi", "🏪  At
 with tab_liquidaciones:
     st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown('<div class="upload-label">Liquidaciones Rappi (Excel — una o más)</div>', unsafe_allow_html=True)
-    archivos_liq = st.file_uploader(
-        "rappi_liq",
-        type=["xlsx", "xls"],
-        accept_multiple_files=True,
+    modo_rappi = st.radio(
+        "Modo",
+        ["Cruce con liquidaciones", "Resumen simple de facturas"],
+        horizontal=True,
         label_visibility="collapsed",
-        key="rappi_liquidaciones"
+        key="rappi_modo",
     )
-
-    if archivos_liq:
-        st.markdown(f"""
-        <div class="counter-box">
-            <div class="counter-num">{len(archivos_liq)}</div>
-            <div class="counter-label">liquidación{"es" if len(archivos_liq) != 1 else ""} cargada{"s" if len(archivos_liq) != 1 else ""}</div>
-        </div>
-        """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
-    archivos_pdf = st.file_uploader(
-        "rappi_pdfs",
-        type=["pdf"],
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-        key="rappi_pdfs"
-    )
 
-    if archivos_pdf:
-        items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos_pdf)
-        st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
+    if modo_rappi == "Cruce con liquidaciones":
+        st.markdown('<div class="upload-label">Liquidaciones Rappi (Excel — una o más)</div>', unsafe_allow_html=True)
+        archivos_liq = st.file_uploader(
+            "rappi_liq",
+            type=["xlsx", "xls"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+            key="rappi_liquidaciones"
+        )
 
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-
-    todo_ok = bool(archivos_liq and archivos_pdf)
-    if not archivos_liq:
-        st.info("Cargá al menos una liquidación Excel de Rappi.")
-    elif not archivos_pdf:
-        st.info("Cargá al menos una factura PDF de Rappi.")
-
-    boton_rappi = st.button(
-        "CRUZAR FACTURAS vs LIQUIDACIONES",
-        disabled=not todo_ok,
-        use_container_width=True,
-        key="btn_rappi"
-    )
-
-    if boton_rappi and todo_ok:
-        with st.spinner("Procesando Rappi..."):
-            try:
-                zip_buf, stats = correr_rappi(archivos_liq, archivos_pdf)
-                st.session_state["resultado_rappi"] = {"zip": zip_buf, "stats": stats}
-            except Exception as e:
-                st.error(f"Error al procesar: {e}")
-
-    if "resultado_rappi" in st.session_state:
-        r = st.session_state["resultado_rappi"]
-        s = r["stats"]
-
-        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-        st.success("¡Listo! El cruce está generado.")
-
-        st.markdown(f"""
-        <div class="metric-row">
-            <div class="metric-card ok">
-                <div class="metric-value">{s['n_liquidaciones']}</div>
-                <div class="metric-label">Liquidaciones</div>
-            </div>
-            <div class="metric-card ok">
-                <div class="metric-value">{s['n_facturas']}</div>
-                <div class="metric-label">Facturas</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for d in s['detalle']:
-            clase = "liq-card warn" if d['falta'] > 0 else "liq-card"
-            facturas_str = ', '.join(d['facturas']) if d['facturas'] else '—'
+        if archivos_liq:
             st.markdown(f"""
-            <div class="{clase}">
-                <div class="liq-id">ID Pago: {d['id_pago']}</div>
-                <div class="liq-detail">✅ {d['match']} match &nbsp;|&nbsp; ⚠️ {d['falta']} sin factura</div>
-                <div class="liq-detail">Facturas: {facturas_str}</div>
+            <div class="counter-box">
+                <div class="counter-num">{len(archivos_liq)}</div>
+                <div class="counter-label">liquidación{"es" if len(archivos_liq) != 1 else ""} cargada{"s" if len(archivos_liq) != 1 else ""}</div>
             </div>
             """, unsafe_allow_html=True)
 
-        if s['advertencias']:
-            for adv in s['advertencias']:
-                st.warning(adv)
-
         st.markdown("<br>", unsafe_allow_html=True)
-        st.download_button(
-            label="📥 Descargar resultados Rappi (.zip)",
-            data=r["zip"],
-            file_name="resultados_rappi.zip",
-            mime="application/zip",
-            use_container_width=True,
-            key="dl_rappi"
+        st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
+        archivos_pdf = st.file_uploader(
+            "rappi_pdfs",
+            type=["pdf"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+            key="rappi_pdfs"
         )
+
+        if archivos_pdf:
+            items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos_pdf)
+            st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        todo_ok = bool(archivos_liq and archivos_pdf)
+        if not archivos_liq:
+            st.info("Cargá al menos una liquidación Excel de Rappi.")
+        elif not archivos_pdf:
+            st.info("Cargá al menos una factura PDF de Rappi.")
+
+        boton_rappi = st.button(
+            "CRUZAR FACTURAS vs LIQUIDACIONES",
+            disabled=not todo_ok,
+            use_container_width=True,
+            key="btn_rappi"
+        )
+
+        if boton_rappi and todo_ok:
+            with st.spinner("Procesando Rappi..."):
+                try:
+                    zip_buf, stats = correr_rappi(archivos_liq, archivos_pdf)
+                    st.session_state["resultado_rappi"] = {"zip": zip_buf, "stats": stats}
+                except Exception as e:
+                    st.error(f"Error al procesar: {e}")
+
+        if "resultado_rappi" in st.session_state:
+            r = st.session_state["resultado_rappi"]
+            s = r["stats"]
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+            st.success("¡Listo! El cruce está generado.")
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card ok">
+                    <div class="metric-value">{s['n_liquidaciones']}</div>
+                    <div class="metric-label">Liquidaciones</div>
+                </div>
+                <div class="metric-card ok">
+                    <div class="metric-value">{s['n_facturas']}</div>
+                    <div class="metric-label">Facturas</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for d in s['detalle']:
+                clase = "liq-card warn" if d['falta'] > 0 else "liq-card"
+                facturas_str = ', '.join(d['facturas']) if d['facturas'] else '—'
+                st.markdown(f"""
+                <div class="{clase}">
+                    <div class="liq-id">ID Pago: {d['id_pago']}</div>
+                    <div class="liq-detail">✅ {d['match']} match &nbsp;|&nbsp; ⚠️ {d['falta']} sin factura</div>
+                    <div class="liq-detail">Facturas: {facturas_str}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            if s['advertencias']:
+                for adv in s['advertencias']:
+                    st.warning(adv)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="📥 Descargar resultados Rappi (.zip)",
+                data=r["zip"],
+                file_name="resultados_rappi.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_rappi"
+            )
+
+    else:
+        st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
+        archivos_pdf_simple = st.file_uploader(
+            "rappi_pdfs_simple",
+            type=["pdf"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+            key="rappi_pdfs_simple"
+        )
+
+        if archivos_pdf_simple:
+            items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos_pdf_simple)
+            st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        if not archivos_pdf_simple:
+            st.info("Cargá al menos una factura PDF de Rappi.")
+
+        boton_rappi_simple = st.button(
+            "GENERAR RESUMEN DE FACTURAS",
+            disabled=not archivos_pdf_simple,
+            use_container_width=True,
+            key="btn_rappi_simple"
+        )
+
+        if boton_rappi_simple and archivos_pdf_simple:
+            with st.spinner("Procesando facturas..."):
+                try:
+                    buf, stats = correr_rappi_resumen_facturas(archivos_pdf_simple)
+                    st.session_state["resultado_rappi_facturas"] = {"buf": buf, "stats": stats}
+                except Exception as e:
+                    st.error(f"Error al procesar: {e}")
+
+        if "resultado_rappi_facturas" in st.session_state:
+            r = st.session_state["resultado_rappi_facturas"]
+            s = r["stats"]
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+            st.success("¡Listo! El resumen de facturas está generado.")
+
+            st.markdown(f"""
+            <div class="counter-box">
+                <div class="counter-num">{s['n_facturas']}</div>
+                <div class="counter-label">factura{"s" if s['n_facturas'] != 1 else ""} procesada{"s" if s['n_facturas'] != 1 else ""}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="📥 Descargar resumen de facturas (.xlsx)",
+                data=r["buf"],
+                file_name="resumen_facturas.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="dl_rappi_facturas"
+            )
 
 
 # ═══════════════════════════════════════════════

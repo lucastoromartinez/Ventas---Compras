@@ -331,6 +331,25 @@ def depurar_facturas(facturas):
     return facturas
 
 
+def construir_resumen_facturas(facturas):
+    """Igual que el resumen de asignaciones pero sin cruzar contra liquidaciones
+    (por lo tanto sin columna 'id_pago'): solo lo que se puede leer directamente
+    de las facturas."""
+    filas = []
+    for factura in facturas:
+        fin_periodo   = factura.get('fin_periodo')
+        fecha_factura = factura.get('fecha_factura')
+        filas.append({
+            'nro_factura':    factura['nro_factura'],
+            'inicio_periodo': factura.get('inicio_periodo'),
+            'fin_periodo':    datetime.strptime(fin_periodo, '%Y-%m-%d').date() if fin_periodo else None,
+            'fecha_factura':  datetime.strptime(fecha_factura, '%d/%m/%Y').date() if fecha_factura else None,
+            'total_factura':  factura.get('total_factura'),
+        })
+    columnas = ['nro_factura', 'inicio_periodo', 'fin_periodo', 'fecha_factura', 'total_factura']
+    return pd.DataFrame(filas, columns=columnas)
+
+
 # ─────────────────────────────────────────────
 # ASIGNACIÓN: facturas → liquidaciones
 # ─────────────────────────────────────────────
@@ -752,3 +771,30 @@ def correr_rappi(archivos_liq, archivos_pdf):
         ]
     }
     return zip_buf, stats
+
+
+def correr_rappi_resumen_facturas(archivos_pdf):
+    """Modo simple: resume las facturas (mismo cálculo que en el cruce) sin
+    necesitar liquidaciones ni cruzarlas contra nada."""
+    facturas = importar_facturas(archivos_pdf)
+    facturas = depurar_facturas(facturas)
+    df_resumen_facturas = construir_resumen_facturas(facturas)
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df_resumen_facturas.to_excel(writer, index=False, sheet_name='resumen_facturas')
+        ws = writer.sheets['resumen_facturas']
+        formatos_col = {
+            'fin_periodo':   'DD/MM/YYYY',
+            'fecha_factura': 'DD/MM/YYYY',
+            'total_factura': '$ #,##0.00',
+        }
+        for col_name, formato in formatos_col.items():
+            if col_name in df_resumen_facturas.columns:
+                col_letter = get_column_letter(df_resumen_facturas.columns.get_loc(col_name) + 1)
+                for cell in ws[col_letter][1:]:
+                    cell.number_format = formato
+    buf.seek(0)
+
+    stats = {'n_facturas': len(facturas)}
+    return buf, stats
