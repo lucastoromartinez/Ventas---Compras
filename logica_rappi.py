@@ -337,16 +337,26 @@ def construir_resumen_facturas(facturas):
     de las facturas."""
     filas = []
     for factura in facturas:
-        fin_periodo   = factura.get('fin_periodo')
-        fecha_factura = factura.get('fecha_factura')
+        inicio_periodo = factura.get('inicio_periodo')
+        fin_periodo     = factura.get('fin_periodo')
+        fecha_factura   = factura.get('fecha_factura')
+
+        inicio_date = datetime.strptime(inicio_periodo, '%Y-%m-%d').date() if inicio_periodo else None
+        fin_date    = datetime.strptime(fin_periodo, '%Y-%m-%d').date() if fin_periodo else None
+        periodo = (
+            f"Periodo {inicio_date.strftime('%d-%m-%Y')} al {fin_date.strftime('%d-%m-%Y')}"
+            if inicio_date and fin_date else None
+        )
+
         filas.append({
             'nro_factura':    factura['nro_factura'],
-            'inicio_periodo': factura.get('inicio_periodo'),
-            'fin_periodo':    datetime.strptime(fin_periodo, '%Y-%m-%d').date() if fin_periodo else None,
+            'inicio_periodo': inicio_periodo,
+            'fin_periodo':    fin_date,
             'fecha_factura':  datetime.strptime(fecha_factura, '%d/%m/%Y').date() if fecha_factura else None,
             'total_factura':  factura.get('total_factura'),
+            'Periodo':        periodo,
         })
-    columnas = ['nro_factura', 'inicio_periodo', 'fin_periodo', 'fecha_factura', 'total_factura']
+    columnas = ['nro_factura', 'inicio_periodo', 'fin_periodo', 'fecha_factura', 'total_factura', 'Periodo']
     return pd.DataFrame(filas, columns=columnas)
 
 
