@@ -3,6 +3,7 @@ from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
 from logica_cupones     import correr_conciliacion_cupones_plantilla
 from logica_fiser       import correr_conciliacion_fiser
+from logica_mercadopago import correr_conciliacion_mercadopago
 
 st.set_page_config(
     page_title="Conciliaciones Bancarias",
@@ -120,8 +121,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_galicia, tab_hipotecario, tab_cupones, tab_fiser = st.tabs(
-    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🏦  Cupones", "🏦  Fiser"]
+tab_galicia, tab_hipotecario, tab_cupones, tab_fiser, tab_mp = st.tabs(
+    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🏦  Cupones", "🏦  Fiser", "🏦  Mercado Pago"]
 )
 
 
@@ -498,6 +499,137 @@ with tab_fiser:
             label="📥 Descargar reporte Fiser",
             data=r["buf"],
             file_name="conciliacion_fiser.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+
+# ═══════════════════════════════════════════════
+# TAB MERCADO PAGO
+# ═══════════════════════════════════════════════
+with tab_mp:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col12, col13, col14 = st.columns(3)
+    with col12:
+        st.markdown('<div class="upload-label">Detalle MP (mes actual)</div>', unsafe_allow_html=True)
+        archivo_mp = st.file_uploader("mp_detalle", type=["xlsx", "xls"],
+                                       label_visibility="collapsed", key="mp_detalle")
+    with col13:
+        st.markdown('<div class="upload-label">Mayor Mercadopago</div>', unsafe_allow_html=True)
+        archivo_mayor_mp = st.file_uploader("mp_mayor", type=["xlsx", "xls"],
+                                             label_visibility="collapsed", key="mp_mayor")
+    with col14:
+        st.markdown('<div class="upload-label">Mayor Recaudación MP</div>', unsafe_allow_html=True)
+        archivo_mayor_rec = st.file_uploader("mp_mayor_rec", type=["xlsx", "xls"],
+                                              label_visibility="collapsed", key="mp_mayor_rec")
+
+    # Toggle mes anterior (para acreditaciones de fin de mes)
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
+    con_anterior_mp = st.toggle(
+        "Tengo el Detalle MP del mes anterior (resuelve acreditaciones de fin de mes)",
+        value=False, key="toggle_mp_anterior",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    archivo_mp_anterior = None
+    if con_anterior_mp:
+        st.markdown('<div class="upload-label optional">Detalle MP (mes anterior)</div>', unsafe_allow_html=True)
+        archivo_mp_anterior = st.file_uploader("mp_detalle_anterior", type=["xlsx", "xls"],
+                                                label_visibility="collapsed", key="mp_detalle_anterior")
+
+    # Toggle switch '9dD' (Meitre/Irondriver contra el Mayor de Recaudación)
+    st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
+    switch_9dd = st.toggle(
+        "Switch 9dD — separar Meitre/Irondriver y buscarlos en el Mayor de Recaudación",
+        value=False, key="toggle_mp_9dd",
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+    base_ok_mp = all([archivo_mp, archivo_mayor_mp, archivo_mayor_rec])
+    anterior_ok_mp = (not con_anterior_mp) or (con_anterior_mp and archivo_mp_anterior)
+    todo_ok_mp = base_ok_mp and anterior_ok_mp
+
+    if not base_ok_mp:
+        st.info("Cargá el Detalle MP, el Mayor Mercadopago y el Mayor Recaudación MP para habilitar la conciliación.")
+    elif con_anterior_mp and not archivo_mp_anterior:
+        st.info("Cargá el Detalle MP del mes anterior para continuar.")
+
+    boton_mp = st.button("CONCILIAR MERCADO PAGO", disabled=not todo_ok_mp,
+                          use_container_width=True, key="btn_mp")
+
+    if boton_mp and todo_ok_mp:
+        with st.spinner("Procesando Mercado Pago..."):
+            try:
+                buf_mp, stats_mp = correr_conciliacion_mercadopago(
+                    archivo_mp=archivo_mp,
+                    archivo_mayor_mp=archivo_mayor_mp,
+                    archivo_mayor_rec=archivo_mayor_rec,
+                    archivo_mp_anterior=archivo_mp_anterior,
+                    switch="9dD" if switch_9dd else None,
+                )
+                st.session_state["resultado_mp"] = {"buf": buf_mp, "stats": stats_mp}
+            except Exception as e:
+                st.error(f"Error al procesar Mercado Pago: {e}")
+
+    if "resultado_mp" in st.session_state:
+        r = st.session_state["resultado_mp"]
+        s = r["stats"]
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        for adv in s.get("advertencias", []):
+            st.warning(adv)
+
+        info_txt = f"Switch: {s['switch']}"
+        if s.get("mes_actual"):
+            info_txt += f" · Mes detectado: {s['mes_actual']}"
+        st.caption(info_txt)
+
+        clase_fm = "error" if s["falta_mayor"] > 0 else "metric-card"
+        clase_fmp = "error" if s["falta_mp"] > 0 else "metric-card"
+        clase_com = "error" if abs(s["diferencia_comisiones"]) > 0 else "metric-card"
+        clase_imp = "error" if abs(s["diferencia_impuestos"]) > 0 else "metric-card"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric-card">
+                <div class="metric-value">{s['n_matches']}</div>
+                <div class="metric-label">Matches</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{s['acreditacion_pendiente']}</div>
+                <div class="metric-label">Acreditación pendiente</div>
+            </div>
+            <div class="metric-card {clase_fm}">
+                <div class="metric-value">{s['falta_mayor']}</div>
+                <div class="metric-label">Detalle sin matchear</div>
+            </div>
+            <div class="metric-card {clase_fmp}">
+                <div class="metric-value">{s['falta_mp']}</div>
+                <div class="metric-label">Mayor sin matchear</div>
+            </div>
+        </div>
+        <div class="metric-row">
+            <div class="metric-card {clase_com}">
+                <div class="metric-value">{s['diferencia_comisiones']:,.2f}</div>
+                <div class="metric-label">Diferencia comisiones</div>
+            </div>
+            <div class="metric-card {clase_imp}">
+                <div class="metric-value">{s['diferencia_impuestos']:,.2f}</div>
+                <div class="metric-label">Diferencia impuestos</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.download_button(
+            label="📥 Descargar reporte Mercado Pago",
+            data=r["buf"],
+            file_name="conciliacion_mercadopago.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
