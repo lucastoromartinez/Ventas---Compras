@@ -373,14 +373,17 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         .reset_index(drop=True)
     )
 
-    # "revisar" se arma acá mismo (inconsistencias del match + duplicados
-    # detectados en este cruce); cruce2 y cruce3 le van agregando filas.
-    revisar = pd.concat(
-        [revisar_inconsistencias_en_match(match, tol_pesos=tolerancia_total), revisar_duplicados],
-        ignore_index=True,
+    # "revisar" se arma acá mismo (inconsistencias del match, con los
+    # casos de composición Gravado/No Gravado ya separados a
+    # "no_gravado", + duplicados detectados en este cruce); cruce2 y
+    # cruce3 le van agregando filas a "revisar".
+    revisar_base, no_gravado = separar_no_gravado(
+        revisar_inconsistencias_en_match(match, tol_pesos=tolerancia_total),
+        tol_pesos=tolerancia_total,
     )
+    revisar = pd.concat([revisar_base, revisar_duplicados], ignore_index=True)
 
-    return match, falta_sistema, falta_arca, revisar
+    return match, falta_sistema, falta_arca, revisar, no_gravado
 
 
 # ─────────────────────────────────────────────
@@ -504,6 +507,92 @@ def revisar_inconsistencias_en_match(
     )
 
     return revisar
+
+
+# ─────────────────────────────────────────────
+# NO GRAVADO: diferencias de Gravado/No Gravado que son de composición
+# (no una diferencia real) y no deberían ensuciar "revisar"
+# ─────────────────────────────────────────────
+
+# Columnas del sistema que pueden estar "escondiendo" un importe dentro
+# de No Gravado en vez de discriminarlo aparte (percepciones/alícuotas
+# que ARCA agrupa en Otros Tributos). Orden = prioridad de chequeo.
+PERCEP_COLS_NO_GRAVADO = [
+    "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "Perc. Gcias.", "Perc. IVA",
+    "SIRCREB", "Imp. Int.", "IVA 10,5%", "IVA 21%", "IVA 27%",
+]
+
+
+def separar_no_gravado(revisar: pd.DataFrame, tol_pesos: float = 1.0) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Dentro de `revisar`, separa los casos en que la diferencia de
+    Gravado/No Gravado no es una diferencia real sino un problema de
+    composición: el sistema no tiene columna de IVA 0% y lo carga junto
+    con No Gravado, o carga una percepción junto con No Gravado en vez
+    de discriminarla (en ARCA esa percepción cae dentro de Otros
+    Tributos). En ambos casos el Total ya coincidía, solo cambia cómo
+    se reparte entre columnas -no hace falta que alguien lo revise-.
+
+      - IVA 0%: (Gravado_arca - Gravado_sistema) == (No Gravado_sistema
+        - No gravado_arca) dentro de tol_pesos -> lo que "sobra" en
+        No Gravado del sistema es exactamente lo que "falta" en su
+        Gravado.
+      - Percepción en Otros Tributos: No Gravado_sistema + alguna de
+        PERCEP_COLS_NO_GRAVADO == Otros Tributos_arca dentro de tol_pesos.
+
+    Si la fila tiene además otro motivo sin explicar (Fecha, Total, o
+    Gravado si el caso fue por percepción y no por IVA 0%), se mueve
+    igual a `no_gravado` pero conservando ese motivo en el comentario
+    (ej. "Iva 0% registrado como no gravado, Fecha").
+
+    Devuelve (revisar_restante, no_gravado).
+    """
+    df = revisar.copy()
+    vacio = df.iloc[0:0].copy()
+
+    tiene_no_gravado = df["comentario"].str.contains("No Gravado", na=False)
+    if not tiene_no_gravado.any():
+        return df, vacio
+
+    idx_cand = df.index[tiene_no_gravado]
+    cand = df.loc[idx_cand]
+
+    diff_gravado   = cand["Gravado_arca"] - cand["Gravado_sistema"]
+    diff_nogravado = cand["No Gravado_sistema"] - cand["No gravado_arca"]
+    es_iva0 = (diff_gravado - diff_nogravado).abs() <= tol_pesos
+
+    etiqueta = pd.Series(pd.NA, index=idx_cand, dtype="object")
+    etiqueta.loc[idx_cand[es_iva0.values]] = "Iva 0% registrado como no gravado"
+
+    pendientes = idx_cand[~es_iva0.values]
+    for col in PERCEP_COLS_NO_GRAVADO:
+        if col not in cand.columns or len(pendientes) == 0:
+            continue
+        sub = cand.loc[pendientes]
+        diff_percep = (sub["No Gravado_sistema"] + sub[col].fillna(0.0) - sub["Otros Tributos_arca"]).abs()
+        idx_ok = pendientes[(diff_percep <= tol_pesos).values]
+        if len(idx_ok):
+            etiqueta.loc[idx_ok] = f"{col} registrada junto con No Gravado (coincide con Otros Tributos)"
+            pendientes = pendientes.difference(idx_ok)
+
+    idx_no_gravado = etiqueta.index[etiqueta.notna()]
+    if len(idx_no_gravado) == 0:
+        return df, vacio
+
+    no_gravado = df.loc[idx_no_gravado].copy()
+    otros_motivos = (
+        no_gravado["comentario"]
+        .str.split(", ")
+        .apply(lambda motivos: [m for m in motivos if m not in ("Gravado", "No Gravado")])
+    )
+    no_gravado["comentario"] = [
+        ", ".join([etiqueta.loc[i]] + otros_motivos.loc[i]) for i in idx_no_gravado
+    ]
+
+    revisar_restante = df.drop(index=idx_no_gravado).reset_index(drop=True)
+    no_gravado = no_gravado.reset_index(drop=True)
+
+    return revisar_restante, no_gravado
 
 
 # ─────────────────────────────────────────────
@@ -861,6 +950,7 @@ def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPO
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
+    no_gravado: pd.DataFrame,
 ) -> bytes:
     DATE_FORMAT   = "DD/MM/YYYY"
     AMOUNT_FORMAT = "#,##0.00"
@@ -881,6 +971,11 @@ def generar_excel_en_memoria(
     )
     rev_date_cols = ["Fecha_Sistema", "Fecha_arca"]
 
+    ng_out = _forzar_importes_float(
+        no_gravado[[c for c in ordered_rev if c in no_gravado.columns]]
+    )
+    ng_date_cols = ["Fecha_Sistema", "Fecha_arca"]
+
     fs_out       = _forzar_importes_float(falta_sistema)
     fs_date_cols = ["Fecha_arca"]
 
@@ -897,6 +992,7 @@ def generar_excel_en_memoria(
         return df, date_col_indices, amount_col_indices
 
     rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
+    ng_prep,  ng_date_idx,  ng_amount_idx  = _prep_df(ng_out,  ng_date_cols)
     fs_prep,  fs_date_idx,  fs_amount_idx  = _prep_df(fs_out,  fs_date_cols)
 
     def _style_sheet(ws, date_col_indices: list[int], amount_col_indices: list[int]) -> None:
@@ -929,10 +1025,12 @@ def generar_excel_en_memoria(
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         rev_prep.to_excel(writer, sheet_name="revisar",       index=False)
+        ng_prep.to_excel( writer, sheet_name="no_gravado",    index=False)
         fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
 
         wb = writer.book
         _style_sheet(wb["revisar"],       rev_date_idx, rev_amount_idx)
+        _style_sheet(wb["no_gravado"],    ng_date_idx, ng_amount_idx)
         _style_sheet(wb["falta_sistema"], fs_date_idx, fs_amount_idx)
 
     return buf.getvalue()
@@ -949,7 +1047,7 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca_dep    = depurar_arca(df_arca)
     df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, falta_sistema1, falta_arca1, revisar1 = cruce1(
+    match, falta_sistema1, falta_arca1, revisar1, no_gravado = cruce1(
         df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos
     )
 
@@ -965,10 +1063,11 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
         "match":             len(match),
         "revisar":           len(revisar3),
         "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
+        "no_gravado":        len(no_gravado),
         "faltante_arca":     len(falta_arca3),
         "faltante_sistema":  len(falta_sistema_final),
     }
 
-    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final)
+    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final, no_gravado)
 
     return buf_reporte, stats
