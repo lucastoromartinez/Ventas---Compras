@@ -89,7 +89,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def card(col, accent, icon, title, desc, page_key):
+def card(col, accent, icon, title, desc, page_key, fallback_path):
     with col:
         with st.container(key=f"card_{accent}"):
             st.markdown(f"""
@@ -101,21 +101,25 @@ def card(col, accent, icon, title, desc, page_key):
             """, unsafe_allow_html=True)
             clicked = st.button(f"{title} - {desc}", key=f"nav_{accent}")
         if clicked:
-            st.switch_page(st.session_state["_pages"][page_key])
+            pages = st.session_state.get("_pages")
+            # Si "_pages" no está en session_state (ej. se entró directo a
+            # esta página por link y la sesión no pasó por app_principal),
+            # se usa el path como string en vez de romper con KeyError.
+            st.switch_page(pages[page_key] if pages else fallback_path)
 
 
 row1 = st.columns(3, gap="medium")
-card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "compras")
-card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "ventas")
-card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "tesoreria")
+card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "compras", "pages/compras.py")
+card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "ventas", "pages/ventas.py")
+card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "tesoreria", "pages/tesoreria.py")
 
 row2 = st.columns(3, gap="medium")
-card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "conciliaciones")
+card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "conciliaciones", "pages/conciliaciones.py")
 
 row3 = st.columns(3, gap="medium")
-card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs")
-card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "rappi")
-card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "impuestos")
+card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs", "pages/lector_pdfs.py")
+card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "rappi", "pages/rappi.py")
+card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "impuestos", "pages/impuestos.py")
 
 st.markdown("""
 <div class="footer">Seleccioná un proceso para comenzar</div>
