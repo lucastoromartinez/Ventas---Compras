@@ -292,18 +292,21 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     temp_cols_arca = ["_idx_arca", "_total_arca"]
 
     # ---------------------------------------------------------------
-    # Duplicados: misma clave (Pto. Venta + N°Comprobante + CUIT) repetida
-    # más de una vez de un mismo lado. La fila "sobrante" (la que no ganó
-    # el match 1 a 1 de arriba) no es una diferencia real con la otra
-    # fuente, es un problema de carga interna -> se manda a "revisar" en
-    # vez de a "falta":
-    #   - Si su importe se cancela (+/- tolerancia) con la otra fila de la
-    #     misma clave  -> "NC pasada con Nro de Factura que cancela"
-    #     (la Nota de Crédito se cargó reutilizando el N° de la factura).
-    #   - Si su importe coincide con la otra fila de la misma clave ->
-    #     "Duplicado" (la misma factura se cargó dos veces).
-    #   - Si la clave se repite pero el importe no coincide con nada ->
-    #     "Duplicado (revisar importe)".
+    # Duplicados exactos: misma clave (Pto. Venta + N°Comprobante + CUIT)
+    # Y mismo importe repetidos más de una vez de un mismo lado (la misma
+    # factura cargada dos veces). La copia "sobrante" (la que no ganó el
+    # match 1 a 1 de arriba) nunca va a encontrar contraparte en la otra
+    # fuente -esta ya la "gastó" la primera copia-, así que terminaría
+    # en falta_arca/falta_sistema como si fuera un comprobante realmente
+    # faltante. Se manda a "revisar" con comentario "Duplicado" en vez de
+    # a "falta".
+    #
+    # El caso de una Nota de Crédito cargada reutilizando el N° de la
+    # factura (mismo Pto. Venta+N°Comprobante+CUIT, importe con signo
+    # inverso) NO se trata acá: si el respaldo real está en ARCA, lo
+    # termina resolviendo cruce3 por CUIT+Fecha+importe; si no está,
+    # queda en falta_arca legítimamente (es una diferencia real, no un
+    # artefacto de carga duplicada).
     # ---------------------------------------------------------------
     def _detectar_duplicados(df_full, key_cols, idx_col, total_col, usados):
         totales = df_full.set_index(idx_col)[total_col]
@@ -315,16 +318,11 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
                 if i in usados or i in usados_extra:
                     continue
                 otros = [j for j in idxs if j != i]
-                if any(abs(totales[i] + totales[j]) <= tolerancia_total for j in otros):
-                    comentario = "NC pasada con Nro de Factura que cancela"
-                elif any(abs(totales[i] - totales[j]) <= tolerancia_total for j in otros):
-                    comentario = "Duplicado"
-                else:
-                    comentario = "Duplicado (revisar importe)"
-                fila = df_full.loc[[i]].copy()
-                fila["comentario"] = comentario
-                filas.append(fila)
-                usados_extra.add(i)
+                if any(abs(totales[i] - totales[j]) <= tolerancia_total for j in otros):
+                    fila = df_full.loc[[i]].copy()
+                    fila["comentario"] = "Duplicado"
+                    filas.append(fila)
+                    usados_extra.add(i)
         if filas:
             return pd.concat(filas, ignore_index=True), usados_extra
         vacio = df_full.iloc[0:0].copy()
