@@ -291,6 +291,62 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     temp_cols_sis  = ["_idx_sis",  "_total_sis"]
     temp_cols_arca = ["_idx_arca", "_total_arca"]
 
+    # ---------------------------------------------------------------
+    # Duplicados: misma clave (Pto. Venta + N°Comprobante + CUIT) repetida
+    # más de una vez de un mismo lado. La fila "sobrante" (la que no ganó
+    # el match 1 a 1 de arriba) no es una diferencia real con la otra
+    # fuente, es un problema de carga interna -> se manda a "revisar" en
+    # vez de a "falta":
+    #   - Si su importe se cancela (+/- tolerancia) con la otra fila de la
+    #     misma clave  -> "NC pasada con Nro de Factura que cancela"
+    #     (la Nota de Crédito se cargó reutilizando el N° de la factura).
+    #   - Si su importe coincide con la otra fila de la misma clave ->
+    #     "Duplicado" (la misma factura se cargó dos veces).
+    #   - Si la clave se repite pero el importe no coincide con nada ->
+    #     "Duplicado (revisar importe)".
+    # ---------------------------------------------------------------
+    def _detectar_duplicados(df_full, key_cols, idx_col, total_col, usados):
+        totales = df_full.set_index(idx_col)[total_col]
+        filas, usados_extra = [], set()
+        for idxs in df_full.groupby(key_cols)[idx_col].apply(list):
+            if len(idxs) < 2:
+                continue
+            for i in idxs:
+                if i in usados or i in usados_extra:
+                    continue
+                otros = [j for j in idxs if j != i]
+                if any(abs(totales[i] + totales[j]) <= tolerancia_total for j in otros):
+                    comentario = "NC pasada con Nro de Factura que cancela"
+                elif any(abs(totales[i] - totales[j]) <= tolerancia_total for j in otros):
+                    comentario = "Duplicado"
+                else:
+                    comentario = "Duplicado (revisar importe)"
+                fila = df_full.loc[[i]].copy()
+                fila["comentario"] = comentario
+                filas.append(fila)
+                usados_extra.add(i)
+        if filas:
+            return pd.concat(filas, ignore_index=True), usados_extra
+        vacio = df_full.iloc[0:0].copy()
+        vacio["comentario"] = pd.Series(dtype="object")
+        return vacio, usados_extra
+
+    dup_sis, extra_usados_sis = _detectar_duplicados(
+        sis, ["Pto. Venta", "N°Comprobante", "CUIT_norm"], "_idx_sis", "_total_sis", usados_sis
+    )
+    usados_sis |= extra_usados_sis
+
+    dup_arca, extra_usados_arca = _detectar_duplicados(
+        arca, ["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor"], "_idx_arca", "_total_arca", usados_arca
+    )
+    usados_arca |= extra_usados_arca
+
+    revisar_duplicados = pd.concat([
+        dup_sis.drop(columns=temp_cols_sis, errors="ignore").rename(columns=sis_rename),
+        dup_arca[[c for c in arca_cols_available if c in dup_arca.columns] + ["comentario"]]
+            .rename(columns=arca_cols_rename),
+    ], ignore_index=True)
+
     match_sis = (
         sis.loc[matched_sis_idx]
         .drop(columns=temp_cols_sis, errors="ignore")
@@ -319,7 +375,7 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         .reset_index(drop=True)
     )
 
-    return match, falta_sistema, falta_arca
+    return match, falta_sistema, falta_arca, revisar_duplicados
 
 
 # ─────────────────────────────────────────────
@@ -800,6 +856,7 @@ def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPO
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
+    falta_arca: pd.DataFrame,
 ) -> bytes:
     DATE_FORMAT   = "DD/MM/YYYY"
     AMOUNT_FORMAT = "#,##0.00"
@@ -823,6 +880,9 @@ def generar_excel_en_memoria(
     fs_out       = _forzar_importes_float(falta_sistema)
     fs_date_cols = ["Fecha_arca"]
 
+    fa_out       = _forzar_importes_float(falta_arca)
+    fa_date_cols = ["Fecha_Sistema"]
+
     def _prep_df(df: pd.DataFrame, date_col_names: list[str]) -> tuple[pd.DataFrame, list[int], list[int]]:
         df = df.copy()
         date_col_indices   = []
@@ -837,6 +897,7 @@ def generar_excel_en_memoria(
 
     rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
     fs_prep,  fs_date_idx,  fs_amount_idx  = _prep_df(fs_out,  fs_date_cols)
+    fa_prep,  fa_date_idx,  fa_amount_idx  = _prep_df(fa_out,  fa_date_cols)
 
     def _style_sheet(ws, date_col_indices: list[int], amount_col_indices: list[int]) -> None:
         thin          = Side(style="thin")
@@ -869,10 +930,12 @@ def generar_excel_en_memoria(
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         rev_prep.to_excel(writer, sheet_name="revisar",       index=False)
         fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
+        fa_prep.to_excel( writer, sheet_name="falta_arca",    index=False)
 
         wb = writer.book
         _style_sheet(wb["revisar"],       rev_date_idx, rev_amount_idx)
         _style_sheet(wb["falta_sistema"], fs_date_idx, fs_amount_idx)
+        _style_sheet(wb["falta_arca"],    fa_date_idx, fa_amount_idx)
 
     return buf.getvalue()
 
@@ -888,9 +951,14 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca_dep    = depurar_arca(df_arca)
     df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, falta_sistema1, falta_arca1 = cruce1(df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos)
+    match, falta_sistema1, falta_arca1, revisar_dup1 = cruce1(
+        df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos
+    )
 
-    revisar1 = revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos)
+    revisar1 = pd.concat(
+        [revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos), revisar_dup1],
+        ignore_index=True,
+    )
 
     revisar2, falta_arca2, falta_sistema2 = cruce2(revisar1, falta_arca1, falta_sistema1)
 
@@ -903,10 +971,11 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     stats = {
         "match":             len(match),
         "revisar":           len(revisar3),
+        "duplicados":        len(revisar_dup1),
         "faltante_arca":     len(falta_arca3),
         "faltante_sistema":  len(falta_sistema_final),
     }
 
-    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final)
+    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final, falta_arca3)
 
     return buf_reporte, stats
