@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from io import BytesIO
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -389,11 +390,12 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
 # ─────────────────────────────────────────────
 
 # Columnas del sistema que pueden estar "escondiendo" un importe dentro
-# de No Gravado en vez de discriminarlo aparte (percepciones/alícuotas
-# que ARCA agrupa en Otros Tributos). Orden = prioridad de chequeo.
+# de No Gravado en vez de discriminarlo aparte (percepciones que ARCA
+# agrupa en Otros Tributos). Puede ser más de una a la vez (ej. IIBB
+# CABA + Perc. IVA juntas). No incluye IVA 10,5/21/27%: son un concepto
+# distinto, no forman parte de Otros Tributos.
 PERCEP_COLS_NO_GRAVADO = [
-    "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "Perc. Gcias.", "Perc. IVA",
-    "SIRCREB", "Imp. Int.", "IVA 10,5%", "IVA 21%", "IVA 27%",
+    "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "Perc. Gcias.", "Perc. IVA", "SIRCREB", "Imp. Int.",
 ]
 
 
@@ -415,10 +417,10 @@ def revisar_inconsistencias_en_match(
              junto con No Gravado -> (Gravado_arca - Gravado_sistema)
              == (No Gravado_sistema - No gravado_arca). Esto también
              explica el Gravado (mismo movimiento).
-          d) alguna columna de PERCEP_COLS_NO_GRAVADO: el sistema carga
-             esa percepción junto con No Gravado en vez de
-             discriminarla -> No Gravado_sistema + percepción ==
-             Otros Tributos_arca.
+          d) una o más columnas de PERCEP_COLS_NO_GRAVADO: el sistema
+             carga esa(s) percepción(es) junto con No Gravado en vez de
+             discriminarla(s) -> No Gravado_sistema + (una o la suma de
+             varias de esas columnas) == Otros Tributos_arca.
         Las filas explicadas por (a)/(b)/(c)/(d) no van a "revisar":
         van a "no_gravado", con el motivo puntual en el comentario
         más cualquier otro motivo que la fila tenga sin explicar (ej.
@@ -529,13 +531,25 @@ def revisar_inconsistencias_en_match(
     pendiente &= ~ok
 
     if c_otros_trib is not None:
-        for col in PERCEP_COLS_NO_GRAVADO:
-            if col not in df.columns or not pendiente.any():
-                continue
-            percep = _to_num(df[col]).fillna(0.0).round(2)
-            ok = pendiente & ((nograv_sis + percep - otros_trib).abs() <= tol)
-            etiqueta_no_gravado.loc[ok] = f"{col} registrada junto con No Gravado (coincide con Otros Tributos)"
-            pendiente &= ~ok
+        percep_disponibles = [c for c in PERCEP_COLS_NO_GRAVADO if c in df.columns]
+        # Se prueban combinaciones de 1, 2, 3... columnas (puede ser más de
+        # una percepción junta, ej. IIBB CABA + Perc. IVA) hasta explicar
+        # la fila; se prioriza la combinación más chica que cierre.
+        for r in range(1, len(percep_disponibles) + 1):
+            if not pendiente.any():
+                break
+            for combo in combinations(percep_disponibles, r):
+                if not pendiente.any():
+                    break
+                suma_percep = df.loc[pendiente, list(combo)].apply(_to_num).fillna(0.0).sum(axis=1).round(2)
+                ok_idx = suma_percep.index[
+                    (nograv_sis.loc[pendiente] + suma_percep - otros_trib.loc[pendiente]).abs() <= tol
+                ]
+                if len(ok_idx):
+                    etiqueta_no_gravado.loc[ok_idx] = (
+                        f"{' + '.join(combo)} registrada(s) junto con No Gravado (coincide con Otros Tributos)"
+                    )
+                    pendiente.loc[ok_idx] = False
 
     mask_nograv_explicado = etiqueta_no_gravado.notna()
     mask_nograv = pendiente
