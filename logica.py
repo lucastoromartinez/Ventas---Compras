@@ -373,7 +373,14 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         .reset_index(drop=True)
     )
 
-    return match, falta_sistema, falta_arca, revisar_duplicados
+    # "revisar" se arma acá mismo (inconsistencias del match + duplicados
+    # detectados en este cruce); cruce2 y cruce3 le van agregando filas.
+    revisar = pd.concat(
+        [revisar_inconsistencias_en_match(match, tol_pesos=tolerancia_total), revisar_duplicados],
+        ignore_index=True,
+    )
+
+    return match, falta_sistema, falta_arca, revisar
 
 
 # ─────────────────────────────────────────────
@@ -854,7 +861,6 @@ def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPO
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
-    falta_arca: pd.DataFrame,
 ) -> bytes:
     DATE_FORMAT   = "DD/MM/YYYY"
     AMOUNT_FORMAT = "#,##0.00"
@@ -878,9 +884,6 @@ def generar_excel_en_memoria(
     fs_out       = _forzar_importes_float(falta_sistema)
     fs_date_cols = ["Fecha_arca"]
 
-    fa_out       = _forzar_importes_float(falta_arca)
-    fa_date_cols = ["Fecha_Sistema"]
-
     def _prep_df(df: pd.DataFrame, date_col_names: list[str]) -> tuple[pd.DataFrame, list[int], list[int]]:
         df = df.copy()
         date_col_indices   = []
@@ -895,7 +898,6 @@ def generar_excel_en_memoria(
 
     rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
     fs_prep,  fs_date_idx,  fs_amount_idx  = _prep_df(fs_out,  fs_date_cols)
-    fa_prep,  fa_date_idx,  fa_amount_idx  = _prep_df(fa_out,  fa_date_cols)
 
     def _style_sheet(ws, date_col_indices: list[int], amount_col_indices: list[int]) -> None:
         thin          = Side(style="thin")
@@ -928,12 +930,10 @@ def generar_excel_en_memoria(
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         rev_prep.to_excel(writer, sheet_name="revisar",       index=False)
         fs_prep.to_excel( writer, sheet_name="falta_sistema", index=False)
-        fa_prep.to_excel( writer, sheet_name="falta_arca",    index=False)
 
         wb = writer.book
         _style_sheet(wb["revisar"],       rev_date_idx, rev_amount_idx)
         _style_sheet(wb["falta_sistema"], fs_date_idx, fs_amount_idx)
-        _style_sheet(wb["falta_arca"],    fa_date_idx, fa_amount_idx)
 
     return buf.getvalue()
 
@@ -949,13 +949,8 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca_dep    = depurar_arca(df_arca)
     df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, falta_sistema1, falta_arca1, revisar_dup1 = cruce1(
+    match, falta_sistema1, falta_arca1, revisar1 = cruce1(
         df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos
-    )
-
-    revisar1 = pd.concat(
-        [revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos), revisar_dup1],
-        ignore_index=True,
     )
 
     revisar2, falta_arca2, falta_sistema2 = cruce2(revisar1, falta_arca1, falta_sistema1)
@@ -969,11 +964,11 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     stats = {
         "match":             len(match),
         "revisar":           len(revisar3),
-        "duplicados":        len(revisar_dup1),
+        "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
         "faltante_arca":     len(falta_arca3),
         "faltante_sistema":  len(falta_sistema_final),
     }
 
-    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final, falta_arca3)
+    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final)
 
     return buf_reporte, stats
