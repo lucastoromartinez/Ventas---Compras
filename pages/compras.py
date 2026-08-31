@@ -143,6 +143,7 @@ if "resultado_compras" in st.session_state:
 
     clase_revisar = "warn"  if stats["revisar"]          > 0 else "metric-card"
     clase_dup     = "warn"  if stats["duplicados"]       > 0 else "metric-card"
+    clase_ng      = "metric-card"
     clase_falt_a  = "error" if stats["faltante_arca"]    > 0 else "metric-card"
     clase_falt_s  = "error" if stats["faltante_sistema"] > 0 else "metric-card"
 
@@ -159,6 +160,10 @@ if "resultado_compras" in st.session_state:
         <div class="metric-card {clase_dup}">
             <div class="metric-value">{stats['duplicados']}</div>
             <div class="metric-label">Duplicados (en revisar)</div>
+        </div>
+        <div class="metric-card {clase_ng}">
+            <div class="metric-value">{stats['no_gravado']}</div>
+            <div class="metric-label">No Gravado (composición)</div>
         </div>
         <div class="metric-card {clase_falt_a}">
             <div class="metric-value">{stats['faltante_arca']}</div>
