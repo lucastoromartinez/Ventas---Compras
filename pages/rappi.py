@@ -142,7 +142,10 @@ div[data-testid="stTabs"] button[aria-selected="true"] {
 # Botón volver
 st.markdown('<div class="back-btn">', unsafe_allow_html=True)
 if st.button("← Volver al inicio"):
-    st.switch_page(st.session_state["_pages"]["home"])
+    st.switch_page(
+        st.session_state["_pages"]["home"] if "_pages" in st.session_state
+        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
+    )
 st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("""
