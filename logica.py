@@ -291,6 +291,60 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     temp_cols_sis  = ["_idx_sis",  "_total_sis"]
     temp_cols_arca = ["_idx_arca", "_total_arca"]
 
+    # ---------------------------------------------------------------
+    # Duplicados exactos: misma clave (Pto. Venta + N°Comprobante + CUIT)
+    # Y mismo importe repetidos más de una vez de un mismo lado (la misma
+    # factura cargada dos veces). La copia "sobrante" (la que no ganó el
+    # match 1 a 1 de arriba) nunca va a encontrar contraparte en la otra
+    # fuente -esta ya la "gastó" la primera copia-, así que terminaría
+    # en falta_arca/falta_sistema como si fuera un comprobante realmente
+    # faltante. Se manda a "revisar" con comentario "Duplicado" en vez de
+    # a "falta".
+    #
+    # El caso de una Nota de Crédito cargada reutilizando el N° de la
+    # factura (mismo Pto. Venta+N°Comprobante+CUIT, importe con signo
+    # inverso) NO se trata acá: si el respaldo real está en ARCA, lo
+    # termina resolviendo cruce3 por CUIT+Fecha+importe; si no está,
+    # queda en falta_arca legítimamente (es una diferencia real, no un
+    # artefacto de carga duplicada).
+    # ---------------------------------------------------------------
+    def _detectar_duplicados(df_full, key_cols, idx_col, total_col, usados):
+        totales = df_full.set_index(idx_col)[total_col]
+        filas, usados_extra = [], set()
+        for idxs in df_full.groupby(key_cols)[idx_col].apply(list):
+            if len(idxs) < 2:
+                continue
+            for i in idxs:
+                if i in usados or i in usados_extra:
+                    continue
+                otros = [j for j in idxs if j != i]
+                if any(abs(totales[i] - totales[j]) <= tolerancia_total for j in otros):
+                    fila = df_full.loc[[i]].copy()
+                    fila["comentario"] = "Duplicado"
+                    filas.append(fila)
+                    usados_extra.add(i)
+        if filas:
+            return pd.concat(filas, ignore_index=True), usados_extra
+        vacio = df_full.iloc[0:0].copy()
+        vacio["comentario"] = pd.Series(dtype="object")
+        return vacio, usados_extra
+
+    dup_sis, extra_usados_sis = _detectar_duplicados(
+        sis, ["Pto. Venta", "N°Comprobante", "CUIT_norm"], "_idx_sis", "_total_sis", usados_sis
+    )
+    usados_sis |= extra_usados_sis
+
+    dup_arca, extra_usados_arca = _detectar_duplicados(
+        arca, ["Pto. Venta", "N°Comprobante", "Nro. Doc. Emisor"], "_idx_arca", "_total_arca", usados_arca
+    )
+    usados_arca |= extra_usados_arca
+
+    revisar_duplicados = pd.concat([
+        dup_sis.drop(columns=temp_cols_sis, errors="ignore").rename(columns=sis_rename),
+        dup_arca[[c for c in arca_cols_available if c in dup_arca.columns] + ["comentario"]]
+            .rename(columns=arca_cols_rename),
+    ], ignore_index=True)
+
     match_sis = (
         sis.loc[matched_sis_idx]
         .drop(columns=temp_cols_sis, errors="ignore")
@@ -319,7 +373,14 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         .reset_index(drop=True)
     )
 
-    return match, falta_sistema, falta_arca
+    # "revisar" se arma acá mismo (inconsistencias del match + duplicados
+    # detectados en este cruce); cruce2 y cruce3 le van agregando filas.
+    revisar = pd.concat(
+        [revisar_inconsistencias_en_match(match, tol_pesos=tolerancia_total), revisar_duplicados],
+        ignore_index=True,
+    )
+
+    return match, falta_sistema, falta_arca, revisar
 
 
 # ─────────────────────────────────────────────
@@ -888,9 +949,9 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     df_arca_dep    = depurar_arca(df_arca)
     df_sistema_dep = depurar_sistema(df_sistema)
 
-    match, falta_sistema1, falta_arca1 = cruce1(df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos)
-
-    revisar1 = revisar_inconsistencias_en_match(match, tol_pesos=tol_pesos)
+    match, falta_sistema1, falta_arca1, revisar1 = cruce1(
+        df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos
+    )
 
     revisar2, falta_arca2, falta_sistema2 = cruce2(revisar1, falta_arca1, falta_sistema1)
 
@@ -903,6 +964,7 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     stats = {
         "match":             len(match),
         "revisar":           len(revisar3),
+        "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
         "faltante_arca":     len(falta_arca3),
         "faltante_sistema":  len(falta_sistema_final),
     }
