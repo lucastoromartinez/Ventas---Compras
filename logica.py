@@ -979,6 +979,7 @@ def generar_excel_en_memoria(
         "Razón Social",
         "Pto. Venta_sistema",    "Pto. Venta_arca",
         "N°Comprobante_sistema", "N°Comprobante_arca",
+        "cuit_sistema",          "cuit_arca",
         "Gravado_sistema",       "Gravado_arca",
         "No Gravado_sistema",    "No gravado_arca",
         "Otros Tributos_arca",   "Exentas_arca",
