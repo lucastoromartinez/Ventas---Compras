@@ -591,11 +591,26 @@ def revisar_inconsistencias_en_match(
 # CRUCE 2: faltantes por N°Comprobante + CUIT (sin Pto. Venta)
 # ─────────────────────────────────────────────
 
-def cruce2(revisar1: pd.DataFrame, falta_arca: pd.DataFrame, falta_sistema: pd.DataFrame):
+def cruce2(
+    revisar1: pd.DataFrame,
+    falta_arca: pd.DataFrame,
+    falta_sistema: pd.DataFrame,
+    tol_pesos: float = 1.0,
+):
     """
     Segundo cruce: cruza falta_arca y falta_sistema por N°Comprobante + CUIT (sin Pto. Venta).
 
-    - Los que matchean se sacan de los faltantes y se agregan a revisar con comentario "Pto. Venta".
+    El N°Comprobante no es único por CUIT (se repite entre distintos Ptos.
+    de Venta, o entre una factura y una nota de crédito), así que no alcanza
+    con que coincidan N°Comprobante + CUIT: además se exige que Gravado y
+    No Gravado coincidan dentro de la tolerancia (igual que cruce1/cruce3).
+    Sin ese chequeo de importe, dos comprobantes de un mismo proveedor que
+    no tienen nada que ver entre sí (fechas e importes totalmente distintos)
+    podían "matchear" solo por coincidir de casualidad en el número, tapando
+    un faltante real de cada lado con un falso "Pto. Venta".
+
+    - Los que matchean (importe dentro de tolerancia) se sacan de los
+      faltantes y se agregan a revisar con comentario "Pto. Venta".
     - Los que no matchean permanecen en sus respectivos faltantes.
     """
 
@@ -608,40 +623,59 @@ def cruce2(revisar1: pd.DataFrame, falta_arca: pd.DataFrame, falta_sistema: pd.D
     fa["_idx_fa"] = fa.index
     fs["_idx_fs"] = fs.index
 
-    fa["_conteo"] = fa.groupby(["N°Comprobante_sistema", "cuit_sistema"]).cumcount() + 1
-    fs["_conteo"] = fs.groupby(["N°Comprobante_arca",    "cuit_arca"   ]).cumcount() + 1
+    fa["_ng_key"]  = pd.to_numeric(fa["Gravado_sistema"   ], errors="coerce").round(2).fillna(0.0)
+    fa["_nng_key"] = pd.to_numeric(fa["No Gravado_sistema"], errors="coerce").round(2).fillna(0.0)
+    fs["_ng_key"]  = pd.to_numeric(fs["Gravado_arca"      ], errors="coerce").round(2).fillna(0.0)
+    fs["_nng_key"] = pd.to_numeric(fs["No gravado_arca"   ], errors="coerce").round(2).fillna(0.0)
 
-    merge_df = pd.merge(
+    cand = pd.merge(
         fa,
         fs,
-        left_on  =["N°Comprobante_sistema", "cuit_sistema", "_conteo"],
-        right_on =["N°Comprobante_arca",    "cuit_arca",    "_conteo"],
-        how      ="outer",
-        indicator=True,
+        left_on  =["N°Comprobante_sistema", "cuit_sistema"],
+        right_on =["N°Comprobante_arca",    "cuit_arca"],
+        how      ="inner",
         suffixes =("_fa", "_fs"),
     )
-
-    match_raw = merge_df[merge_df["_merge"] == "both"].copy()
 
     arca_cols_match = [
         "Fecha_arca", "Pto. Venta_arca", "N°Comprobante_arca",
         "cuit_arca", "No gravado_arca", "Gravado_arca",
         "Exentas_arca", "Otros Tributos_arca", "Imp. Total_arca",
     ]
+    arca_cols_available = [c for c in arca_cols_match if c in fs.columns]
 
-    if not match_raw.empty:
-        fa_idx = match_raw["_idx_fa"].astype(int).values
-        fs_idx = match_raw["_idx_fs"].astype(int).values
+    if not cand.empty:
+        cand["_diff_ng"]    = (cand["_ng_key_fa"]  - cand["_ng_key_fs"]).abs()
+        cand["_diff_nng"]   = (cand["_nng_key_fa"] - cand["_nng_key_fs"]).abs()
+        cand["_diff_total"] = cand["_diff_ng"] + cand["_diff_nng"]
 
+        cand_ok = cand[
+            (cand["_diff_ng"]  <= tol_pesos) &
+            (cand["_diff_nng"] <= tol_pesos)
+        ].sort_values("_diff_total")
+
+        usados_fa_idx, usados_fs_idx = set(), set()
+        fa_idx_sel, fs_idx_sel = [], []
+        for _, row in cand_ok.iterrows():
+            i_fa = int(row["_idx_fa"])
+            i_fs = int(row["_idx_fs"])
+            if i_fa not in usados_fa_idx and i_fs not in usados_fs_idx:
+                usados_fa_idx.add(i_fa)
+                usados_fs_idx.add(i_fs)
+                fa_idx_sel.append(i_fa)
+                fs_idx_sel.append(i_fs)
+    else:
+        usados_fa_idx, usados_fs_idx = set(), set()
+        fa_idx_sel, fs_idx_sel = [], []
+
+    if fa_idx_sel:
         fa_match = (
-            fa.loc[fa_idx]
-            .drop(columns=["_conteo", "_idx_fa"], errors="ignore")
+            fa.loc[fa_idx_sel]
+            .drop(columns=["_idx_fa", "_ng_key", "_nng_key"], errors="ignore")
             .reset_index(drop=True)
         )
-
-        arca_cols_available = [c for c in arca_cols_match if c in fs.columns]
         fs_match = (
-            fs.loc[fs_idx, arca_cols_available]
+            fs.loc[fs_idx_sel, arca_cols_available]
             .reset_index(drop=True)
         )
 
@@ -652,18 +686,18 @@ def cruce2(revisar1: pd.DataFrame, falta_arca: pd.DataFrame, falta_sistema: pd.D
     else:
         revisar = revisar1.copy()
 
-    matched_fa_idx = set(match_raw["_idx_fa"].dropna().astype(int))
-    matched_fs_idx = set(match_raw["_idx_fs"].dropna().astype(int))
+    matched_fa_idx = usados_fa_idx
+    matched_fs_idx = usados_fs_idx
 
     falta_arca_new = (
         fa.loc[~fa["_idx_fa"].isin(matched_fa_idx)]
-        .drop(columns=["_conteo", "_idx_fa"], errors="ignore")
+        .drop(columns=["_idx_fa", "_ng_key", "_nng_key"], errors="ignore")
         .reset_index(drop=True)
     )
 
     falta_sistema_new = (
         fs.loc[~fs["_idx_fs"].isin(matched_fs_idx)]
-        .drop(columns=["_conteo", "_idx_fs"], errors="ignore")
+        .drop(columns=["_idx_fs", "_ng_key", "_nng_key"], errors="ignore")
         .reset_index(drop=True)
     )
 
@@ -1034,7 +1068,9 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
         df_arca_dep, df_sistema_dep, tolerancia_total=tol_pesos
     )
 
-    revisar2, falta_arca2, falta_sistema2 = cruce2(revisar1, falta_arca1, falta_sistema1)
+    revisar2, falta_arca2, falta_sistema2 = cruce2(
+        revisar1, falta_arca1, falta_sistema1, tol_pesos=tol_pesos
+    )
 
     revisar3, falta_arca3, falta_sistema3 = cruce3(
         revisar2, falta_arca2, falta_sistema2, tol_pesos=tol_pesos
