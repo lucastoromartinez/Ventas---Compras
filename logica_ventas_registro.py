@@ -83,8 +83,8 @@ FONT_HEADER = Font(name=FUENTE, size=TAMANO, bold=True, color="FFFFFF")
 FONT_TITULO = Font(name=FUENTE, size=TAMANO + 1, bold=True)
 FILL_HEADER = PatternFill("solid", fgColor="305496")
 FILL_TOTAL = PatternFill("solid", fgColor="D9E1F2")
+FILL_AMARILLO = PatternFill("solid", fgColor="FFFF00")
 BORDE_FINO = Border(*[Side(style="thin", color="BFBFBF")] * 4)
-LADO_AMARILLO = Side(style="medium", color="FFD700")
 
 FORMATO_IMPORTE = '#,##0.00'
 FORMATO_FECHA = 'dd/mm/yyyy'
@@ -158,43 +158,20 @@ def _escribir_tabla_cruda(ws, df, columnas):
 
 def _resaltar_filas_posteriores(ws, df_local: pd.DataFrame, presentes: list[str], ultimo_dia: pd.Timestamp) -> None:
     """
-    Dibuja, en la tabla cruda ya escrita, un contorno amarillo alrededor de
-    cada bloque contiguo de filas cuya Fecha ARCA es posterior al mes de
+    Rellena de amarillo (PatternFill, no solo el borde) las celdas de la
+    tabla cruda ya escrita cuya Fecha ARCA es posterior al mes de
     referencia (las mismas que se suman aparte en el cuadro "ARCA
-    pendiente"), para identificarlas línea por línea a simple vista.
-
-    Es un contorno real (solo el borde exterior del bloque), no un borde de
-    4 lados en cada celda: pintar los 4 lados de cada celda individualmente
-    genera una grilla amarilla que "rellena" el bloque en vez de delimitarlo.
+    pendiente"), para identificarlas línea por línea a simple vista y
+    poder filtrarlas desde Excel por color de celda ("Filtrar por color").
     """
     n_cols = len(presentes)
     if n_cols == 0:
         return
 
-    es_posterior = [pd.notnull(f) and f > ultimo_dia for f in df_local['Fecha ARCA'].tolist()]
-
-    i = 0
-    n = len(es_posterior)
-    while i < n:
-        if not es_posterior[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and es_posterior[j]:
-            j += 1
-        fila_ini, fila_fin = i + 2, j + 1  # filas de Excel (offset de encabezado)
-
-        for fila in range(fila_ini, fila_fin + 1):
+    for i, fecha in enumerate(df_local['Fecha ARCA'].tolist(), start=2):
+        if pd.notnull(fecha) and fecha > ultimo_dia:
             for c in range(1, n_cols + 1):
-                cell = ws.cell(row=fila, column=c)
-                b = cell.border
-                cell.border = Border(
-                    top=LADO_AMARILLO if fila == fila_ini else b.top,
-                    bottom=LADO_AMARILLO if fila == fila_fin else b.bottom,
-                    left=LADO_AMARILLO if c == 1 else b.left,
-                    right=LADO_AMARILLO if c == n_cols else b.right,
-                )
-        i = j
+                ws.cell(row=i, column=c).fill = FILL_AMARILLO
 
 
 def _armar_cuadro_pivot(ws, df_mes, fila_inicio, col_inicio, titulo,
@@ -313,13 +290,14 @@ def exportar_ventas_hio_buffer(
       - Hoja 'Reporte Gral': todos los registros, todas las fechas.
       - Una hoja por Local (ERSA, EASA, RONDA, 9DD) con:
           * tabla de datos cruda (todas las fechas, importes en formato miles,
-            misma tipografia/tamaño en toda la hoja), con un contorno
-            amarillo alrededor de las filas cuya Fecha ARCA cae en un mes
-            posterior al de referencia
+            misma tipografia/tamaño en toda la hoja), con las celdas
+            rellenas de amarillo en las filas cuya Fecha ARCA cae en un mes
+            posterior al de referencia (permite además filtrarlas desde
+            Excel por color de celda)
           * cuadro tipo tabla dinamica (Medio Pago x Tipo, Neto/IVA/Total)
             SOLO para filas con Fecha ARCA dentro del mes de referencia
           * debajo, un cuadro resumen (mismo agrupamiento) con todo lo que
-            quedo FUERA del mes de referencia (las filas contorneadas de
+            quedo FUERA del mes de referencia (las filas rellenas de
             amarillo en la tabla cruda)
 
     Devuelve (bytes_del_excel, (anio, mes)) con el mes de referencia usado.
