@@ -84,6 +84,10 @@ FONT_TITULO = Font(name=FUENTE, size=TAMANO + 1, bold=True)
 FILL_HEADER = PatternFill("solid", fgColor="305496")
 FILL_TOTAL = PatternFill("solid", fgColor="D9E1F2")
 BORDE_FINO = Border(*[Side(style="thin", color="BFBFBF")] * 4)
+# Contorno para resaltar, en la tabla cruda de cada local, las filas cuya
+# Fecha ARCA cae en un mes posterior al de referencia (mismas filas que se
+# suman aparte en el cuadro "ARCA pendiente").
+BORDE_AMARILLO = Border(*[Side(style="medium", color="FFD700")] * 4)
 
 FORMATO_IMPORTE = '#,##0.00'
 FORMATO_FECHA = 'dd/mm/yyyy'
@@ -152,7 +156,29 @@ def _escribir_tabla_cruda(ws, df, columnas):
         ancho = max(12, min(28, len(col) + 4))
         ws.column_dimensions[letra].width = ancho
 
-    return presentes, len(df) + 1  # ultima fila con datos (o 1 si vacio)
+    ultima_fila = len(df) + 1  # ultima fila con datos (o 1 si vacio)
+
+    # Filtro automático en el encabezado, para poder filtrar por ej. por
+    # Medio Pago desde Excel (el cuadro resumen reacciona a ese filtro).
+    if not df.empty:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(presentes))}{ultima_fila}"
+
+    return presentes, ultima_fila
+
+
+def _resaltar_filas_posteriores(ws, df_local: pd.DataFrame, presentes: list[str], ultimo_dia: pd.Timestamp) -> None:
+    """
+    Contornea de amarillo, en la tabla cruda ya escrita, las filas cuya
+    Fecha ARCA es posterior al mes de referencia (las mismas que se suman
+    aparte en el cuadro "ARCA pendiente"), para que se identifiquen a
+    simple vista línea por línea.
+    """
+    n_cols = len(presentes)
+    fechas = df_local['Fecha ARCA'].tolist()
+    for i, fecha in enumerate(fechas, start=2):
+        if pd.notnull(fecha) and fecha > ultimo_dia:
+            for c in range(1, n_cols + 1):
+                ws.cell(row=i, column=c).border = BORDE_AMARILLO
 
 
 def _armar_cuadro_pivot(ws, df_mes, fila_inicio, col_inicio, titulo,
@@ -160,9 +186,16 @@ def _armar_cuadro_pivot(ws, df_mes, fila_inicio, col_inicio, titulo,
                           dentro_del_mes=True):
     """
     Arma un cuadro tipo tabla dinamica (Medio Pago en filas, Tipo en columnas,
-    Neto/IVA/Total sumarizados) usando formulas SUMIFS que apuntan a la tabla
-    cruda de la misma hoja. dentro_del_mes=True filtra por el mes de
-    referencia; False suma todo lo que queda FUERA de ese mes.
+    Neto/IVA/Total sumarizados) usando fórmulas SUMPRODUCT + SUBTOTAL que
+    apuntan a la tabla cruda de la misma hoja. dentro_del_mes=True filtra por
+    el mes de referencia; False suma todo lo que queda FUERA de ese mes.
+
+    Se usa SUBTOTAL(103, ...) por fila (en vez de SUMIFS) para que el cuadro
+    reaccione al AutoFilter de la tabla cruda: si desde Excel se filtra por
+    ej. la columna Medio Pago = "Efectivo", este resumen recalcula sus
+    columnas (Neto/IVA/Total por Tipo y el Total general) solo con las filas
+    que quedan visibles, sin perder los títulos de columna ni las demás
+    filas del cuadro (quedan en 0 si no tienen ninguna fila visible).
     """
     tipos = sorted([t for t in df_mes['Tipo'].dropna().unique().tolist()]) if not df_mes.empty else ['B', 'N']
     medios = sorted(df_mes['Medio Pago'].dropna().unique().tolist()) if not df_mes.empty else []
@@ -196,21 +229,34 @@ def _armar_cuadro_pivot(ws, df_mes, fila_inicio, col_inicio, titulo,
     fila_actual = fila_datos_ini
 
     def formula_sumifs(col_valor_letra, medio_pago_cell, tipo_valor=None):
-        base = (f'=SUMIFS(${col_valor_letra}$2:${col_valor_letra}${ultima_fila_datos},'
-                f'${col_medio}$2:${col_medio}${ultima_fila_datos},{medio_pago_cell}')
+        # Máscara de visibilidad fila a fila: SUBTOTAL(103, celda única) da
+        # 1 si la celda está visible (no oculta por el AutoFilter) y 0 si
+        # está filtrada/oculta. Multiplicada contra los demás criterios y
+        # la columna de importe dentro de SUMPRODUCT, hace que el resumen
+        # solo sume lo que queda visible en la tabla cruda.
+        visible = (
+            f'SUBTOTAL(103,OFFSET(${col_medio}$2,'
+            f'ROW(${col_medio}$2:${col_medio}${ultima_fila_datos})-ROW(${col_medio}$2),0))'
+        )
+        partes = [visible, f'(${col_medio}$2:${col_medio}${ultima_fila_datos}={medio_pago_cell})']
         if tipo_valor is not None:
-            base += f',${col_tipo}$2:${col_tipo}${ultima_fila_datos},"{tipo_valor}"'
+            partes.append(f'(${col_tipo}$2:${col_tipo}${ultima_fila_datos}="{tipo_valor}")')
         if dentro_del_mes:
-            base += (f',${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos},">="&DATE({primer_dia.year},{primer_dia.month},{primer_dia.day})'
-                      f',${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos},"<="&DATE({ultimo_dia.year},{ultimo_dia.month},{ultimo_dia.day})')
-            base += ')'
-            return base
+            partes.append(
+                f'(${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos}>=DATE({primer_dia.year},{primer_dia.month},{primer_dia.day}))'
+            )
+            partes.append(
+                f'(${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos}<=DATE({ultimo_dia.year},{ultimo_dia.month},{ultimo_dia.day}))'
+            )
         else:
             # Solo lo POSTERIOR al mes de referencia (ARCA pendiente de imputar).
             # Lo anterior al mes de referencia es remanente de meses ya
             # reportados y no debe volver a sumarse aca.
-            base += f',${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos},">"&DATE({ultimo_dia.year},{ultimo_dia.month},{ultimo_dia.day}))'
-            return base
+            partes.append(
+                f'(${col_fecha_arca}$2:${col_fecha_arca}${ultima_fila_datos}>DATE({ultimo_dia.year},{ultimo_dia.month},{ultimo_dia.day}))'
+            )
+        partes.append(f'${col_valor_letra}$2:${col_valor_letra}${ultima_fila_datos}')
+        return '=SUMPRODUCT(' + ','.join(partes) + ')'
 
     for medio in medios:
         medio_cell = f"${get_column_letter(col_inicio)}${fila_actual}"
@@ -271,11 +317,17 @@ def exportar_ventas_hio_buffer(
       - Hoja 'Reporte Gral': todos los registros, todas las fechas.
       - Una hoja por Local (ERSA, EASA, RONDA, 9DD) con:
           * tabla de datos cruda (todas las fechas, importes en formato miles,
-            misma tipografia/tamaño en toda la hoja)
+            misma tipografia/tamaño en toda la hoja, con AutoFilter en el
+            encabezado), contorneando de amarillo las filas cuya Fecha ARCA
+            cae en un mes posterior al de referencia
           * cuadro tipo tabla dinamica (Medio Pago x Tipo, Neto/IVA/Total)
-            SOLO para filas con Fecha ARCA dentro del mes de referencia
+            SOLO para filas con Fecha ARCA dentro del mes de referencia;
+            reacciona al AutoFilter de la tabla cruda (ej. si se filtra por
+            Medio Pago = "Efectivo", el resumen recalcula solo con esas
+            filas, sin perder los títulos de columna)
           * debajo, un cuadro resumen (mismo agrupamiento) con todo lo que
-            quedo FUERA del mes de referencia
+            quedo FUERA del mes de referencia (las filas contorneadas de
+            amarillo en la tabla cruda)
 
     Devuelve (bytes_del_excel, (anio, mes)) con el mes de referencia usado.
     """
@@ -299,6 +351,7 @@ def exportar_ventas_hio_buffer(
         ws = wb.create_sheet(nombre_hoja)
 
         presentes, ultima_fila = _escribir_tabla_cruda(ws, df_local, COLS_LOCAL)
+        _resaltar_filas_posteriores(ws, df_local, presentes, ultimo_dia)
 
         # letras de columnas relevantes dentro de la tabla cruda de esta hoja
         idx = {c: presentes.index(c) + 1 for c in presentes}
