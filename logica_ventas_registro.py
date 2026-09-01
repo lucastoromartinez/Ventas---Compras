@@ -4,7 +4,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill, NamedStyle
 from openpyxl.utils import get_column_letter
 
 # ======================================================================
@@ -108,6 +108,49 @@ MAPA_LOCALES = {
     '9DD': '9dD',
 }
 
+# Estilos con nombre para las celdas de datos de la tabla cruda. Asignar
+# `cell.style = <nombre>` (una sola asignación) en vez de font/number_format/
+# alignment por separado en cada celda es mucho más rápido con volumen: cada
+# asignación individual obliga a openpyxl a recalcular y buscar un hash en su
+# tabla interna de estilos, y con miles de filas eso se nota (medido: ~2x más
+# rápido en total para escribir+guardar el archivo con esta técnica).
+ESTILO_IMPORTE = 'dato_importe'
+ESTILO_FECHA = 'dato_fecha'
+ESTILO_HORA = 'dato_hora'
+ESTILO_TEXTO = 'dato_texto'
+ESTILO_DEFAULT = 'dato_default'
+
+
+def _registrar_estilos_datos(wb: Workbook) -> None:
+    """Registra en el workbook los estilos con nombre usados en la tabla cruda."""
+    wb.add_named_style(NamedStyle(
+        name=ESTILO_IMPORTE, font=FONT_NORMAL,
+        number_format=FORMATO_IMPORTE, alignment=Alignment(horizontal="right"),
+    ))
+    wb.add_named_style(NamedStyle(
+        name=ESTILO_FECHA, font=FONT_NORMAL, number_format=FORMATO_FECHA,
+    ))
+    wb.add_named_style(NamedStyle(
+        name=ESTILO_HORA, font=FONT_NORMAL, number_format=FORMATO_HORA,
+    ))
+    wb.add_named_style(NamedStyle(
+        name=ESTILO_TEXTO, font=FONT_NORMAL,
+        number_format='@', alignment=Alignment(horizontal="left"),
+    ))
+    wb.add_named_style(NamedStyle(name=ESTILO_DEFAULT, font=FONT_NORMAL))
+
+
+def _estilo_para_columna(col: str) -> str:
+    if col in COLS_IMPORTE:
+        return ESTILO_IMPORTE
+    if col == 'Fecha Z' or col == 'Fecha ARCA':
+        return ESTILO_FECHA
+    if col == 'Hora':
+        return ESTILO_HORA
+    if col in COLS_TEXTO:
+        return ESTILO_TEXTO
+    return ESTILO_DEFAULT
+
 
 def _aplicar_estilo_header(ws, fila, col_inicio, col_fin):
     for c in range(col_inicio, col_fin + 1):
@@ -128,24 +171,19 @@ def _escribir_tabla_cruda(ws, df, columnas):
     _aplicar_estilo_header(ws, 1, 1, len(presentes))
     ws.freeze_panes = "A2"
 
-    # Datos
-    for i, (_, fila) in enumerate(df[presentes].iterrows(), start=2):
-        for j, col in enumerate(presentes, start=1):
-            valor = fila[col]
-            if pd.isnull(valor):
-                valor = None
-            cell = ws.cell(row=i, column=j, value=valor)
-            cell.font = FONT_NORMAL
-            if col in COLS_IMPORTE:
-                cell.number_format = FORMATO_IMPORTE
-                cell.alignment = Alignment(horizontal="right")
-            elif col == 'Fecha Z' or col == 'Fecha ARCA':
-                cell.number_format = FORMATO_FECHA
-            elif col == 'Hora':
-                cell.number_format = FORMATO_HORA
-            elif col in COLS_TEXTO:
-                cell.number_format = '@'
-                cell.alignment = Alignment(horizontal="left")
+    # Datos: primero se escriben los valores con append() (mucho más rápido
+    # que ws.cell(row=i, column=j, value=...) celda por celda), y el estilo
+    # se aplica aparte en una segunda pasada con estilos con nombre
+    # precomputados por columna (ver _registrar_estilos_datos).
+    for fila in df[presentes].itertuples(index=False):
+        ws.append([None if pd.isnull(v) else v for v in fila])
+
+    ultima_fila = len(df) + 1  # ultima fila con datos (o 1 si vacio)
+
+    estilos_por_col = [_estilo_para_columna(c) for c in presentes]
+    for row in ws.iter_rows(min_row=2, max_row=ultima_fila):
+        for cell, nombre_estilo in zip(row, estilos_por_col):
+            cell.style = nombre_estilo
 
     # Ancho de columnas aproximado
     for j, col in enumerate(presentes, start=1):
@@ -153,7 +191,7 @@ def _escribir_tabla_cruda(ws, df, columnas):
         ancho = max(12, min(28, len(col) + 4))
         ws.column_dimensions[letra].width = ancho
 
-    return presentes, len(df) + 1  # ultima fila con datos (o 1 si vacio)
+    return presentes, ultima_fila
 
 
 def _resaltar_filas_posteriores(ws, df_local: pd.DataFrame, presentes: list[str], ultimo_dia: pd.Timestamp) -> None:
@@ -313,6 +351,7 @@ def exportar_ventas_hio_buffer(
     ultimo_dia = pd.Timestamp(anio, mes, calendar.monthrange(anio, mes)[1])
 
     wb = Workbook()
+    _registrar_estilos_datos(wb)
     ws_gral = wb.active
     ws_gral.title = "Reporte Gral"
     _escribir_tabla_cruda(ws_gral, df, COLS_GENERAL)
