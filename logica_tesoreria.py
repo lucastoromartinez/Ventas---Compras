@@ -292,7 +292,14 @@ def cruzar_caja(
     warnings = []
 
     # ------------------------------------------------------------------
-    # PASO 1: bloque de "ingresos" agrupados
+    # PASO 1: bloque de "ingresos" agrupados, por mes
+    #
+    # Cuando el detalle de tesorería contiene "ingreso" y más de un número
+    # (ej. varios comprobantes en una misma línea), se agrupan y suman
+    # junto con el resto de "ingreso" del mismo lado que caigan en el
+    # mismo mes, y se comparan contra la suma de "ingreso efectivo" del
+    # sistema de ese mismo mes (en vez de una única suma global), para no
+    # perder matches cuando distintos meses no cuadran entre sí.
     # ------------------------------------------------------------------
     def tiene_ingreso_y_mas_de_un_numero(texto):
         if not isinstance(texto, str):
@@ -307,27 +314,41 @@ def cruzar_caja(
         unif[col_detalle_unificada].astype(str).str.lower().str.contains("ingreso efectivo", na=False)
     )
 
-    grupo_michu = michu[mask_michu_ingreso]
-    grupo_unif = unif[mask_unif_ingreso_efectivo]
+    grupo_michu_total = michu[mask_michu_ingreso]
+    grupo_unif_total = unif[mask_unif_ingreso_efectivo]
 
-    suma_michu = grupo_michu["_monto_norm"].sum()
-    suma_unif = grupo_unif["_monto_norm"].sum()
+    meses = sorted(set(
+        grupo_michu_total["_fecha_norm"].apply(lambda f: (f.year, f.month))
+    ) | set(
+        grupo_unif_total["_fecha_norm"].apply(lambda f: (f.year, f.month))
+    ))
 
-    if len(grupo_michu) > 0 and len(grupo_unif) > 0:
-        tol = _tolerancia_dinamica(max(abs(suma_michu), abs(suma_unif)), tolerancia_pesos, tolerancia_pct)
-        if abs(suma_michu - suma_unif) <= tol:
-            michu.loc[grupo_michu.index, "_matched"] = True
-            michu.loc[grupo_michu.index, "id"] = match_id_counter
-            unif.loc[grupo_unif.index, "_matched"] = True
-            unif.loc[grupo_unif.index, "id"] = match_id_counter
-            tipo_por_id[match_id_counter] = "Agrupado (Ingreso)"
-            match_id_counter += 1
-        else:
-            warnings.append(
-                f"Ingresos no cuadran: tesorería suma {suma_michu:.2f} vs sistema "
-                f"'Ingreso efectivo' suma {suma_unif:.2f} (diferencia "
-                f"{suma_michu - suma_unif:.2f}, tolerancia {tol:.2f}). No se marcaron como matcheados."
-            )
+    for mes in meses:
+        grupo_michu = grupo_michu_total[
+            grupo_michu_total["_fecha_norm"].apply(lambda f: (f.year, f.month)) == mes
+        ]
+        grupo_unif = grupo_unif_total[
+            grupo_unif_total["_fecha_norm"].apply(lambda f: (f.year, f.month)) == mes
+        ]
+
+        suma_michu = grupo_michu["_monto_norm"].sum()
+        suma_unif = grupo_unif["_monto_norm"].sum()
+
+        if len(grupo_michu) > 0 and len(grupo_unif) > 0:
+            tol = _tolerancia_dinamica(max(abs(suma_michu), abs(suma_unif)), tolerancia_pesos, tolerancia_pct)
+            if abs(suma_michu - suma_unif) <= tol:
+                michu.loc[grupo_michu.index, "_matched"] = True
+                michu.loc[grupo_michu.index, "id"] = match_id_counter
+                unif.loc[grupo_unif.index, "_matched"] = True
+                unif.loc[grupo_unif.index, "id"] = match_id_counter
+                tipo_por_id[match_id_counter] = "Agrupado (Ingreso)"
+                match_id_counter += 1
+            else:
+                warnings.append(
+                    f"Ingresos no cuadran en {mes[0]}-{mes[1]:02d}: tesorería suma {suma_michu:.2f} vs "
+                    f"sistema 'Ingreso efectivo' suma {suma_unif:.2f} (diferencia "
+                    f"{suma_michu - suma_unif:.2f}, tolerancia {tol:.2f}). No se marcaron como matcheados."
+                )
 
     # ------------------------------------------------------------------
     # PASO 2: agrupamiento por nombre, en ambos lados
