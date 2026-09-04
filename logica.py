@@ -248,11 +248,17 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         suffixes =("_sis", "_arca"),
     )
 
-    # Filtrar por tolerancia de importe total
+    # Mismo Pto. Venta + N°Comprobante + CUIT ya es matchear: no se filtra
+    # por importe acá (la tolerancia de importe es un criterio de
+    # desambiguación para los cruces posteriores, que cruzan con menos
+    # precisión -cruce2 sin Pto. Venta, cruce3 sin CUIT o sin N°Comprobante-,
+    # no para descartar un match de clave exacta). Cualquier diferencia de
+    # importe sobre un match así queda reflejada después en "revisar" vía
+    # revisar_inconsistencias_en_match (comentario "Total").
     cand["_diff_total"] = (cand["_total_sis"] - cand["_total_arca"]).abs()
-    cand_ok = cand[cand["_diff_total"] <= tolerancia_total].sort_values("_diff_total")
 
     # Resolver 1-a-1: entre duplicados de la misma clave, tomar el par con menor diferencia de importe
+    cand_ok = cand.sort_values("_diff_total")
     usados_sis, usados_arca = set(), set()
     matched_sis_idx, matched_arca_idx = [], []
 
@@ -304,10 +310,12 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     #
     # El caso de una Nota de Crédito cargada reutilizando el N° de la
     # factura (mismo Pto. Venta+N°Comprobante+CUIT, importe con signo
-    # inverso) NO se trata acá: si el respaldo real está en ARCA, lo
-    # termina resolviendo cruce3 por CUIT+Fecha+importe; si no está,
-    # queda en falta_arca legítimamente (es una diferencia real, no un
-    # artefacto de carga duplicada).
+    # inverso) tampoco es un duplicado en este sentido -los importes no
+    # coinciden entre sí, así que no cae acá-: al compartir clave exacta,
+    # el match 1 a 1 de arriba ya la empareja directo con la factura y
+    # queda reflejada en "revisar" por la diferencia de Total (no se
+    # busca su respaldo real en otro lado vía cruce3: clave exacta matchea
+    # sin mirar el importe).
     # ---------------------------------------------------------------
     def _detectar_duplicados(df_full, key_cols, idx_col, total_col, usados):
         totales = df_full.set_index(idx_col)[total_col]
