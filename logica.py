@@ -248,11 +248,17 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
         suffixes =("_sis", "_arca"),
     )
 
-    # Filtrar por tolerancia de importe total
+    # Mismo Pto. Venta + N°Comprobante + CUIT ya es matchear: no se filtra
+    # por importe acá (la tolerancia de importe es un criterio de
+    # desambiguación para los cruces posteriores, que cruzan con menos
+    # precisión -cruce2 sin Pto. Venta, cruce3 sin CUIT o sin N°Comprobante-,
+    # no para descartar un match de clave exacta). Cualquier diferencia de
+    # importe sobre un match así queda reflejada después en "revisar" vía
+    # revisar_inconsistencias_en_match (comentario "Total").
     cand["_diff_total"] = (cand["_total_sis"] - cand["_total_arca"]).abs()
-    cand_ok = cand[cand["_diff_total"] <= tolerancia_total].sort_values("_diff_total")
 
     # Resolver 1-a-1: entre duplicados de la misma clave, tomar el par con menor diferencia de importe
+    cand_ok = cand.sort_values("_diff_total")
     usados_sis, usados_arca = set(), set()
     matched_sis_idx, matched_arca_idx = [], []
 
@@ -293,56 +299,6 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     temp_cols_arca = ["_idx_arca", "_total_arca"]
 
     # ---------------------------------------------------------------
-    # Misma clave exacta (Pto. Venta + N°Comprobante + CUIT) pero el
-    # importe total queda fuera de tolerancia: es el mismo comprobante,
-    # cargado con un importe distinto de un lado (error de tipeo,
-    # actualización no reflejada, etc.), no dos comprobantes distintos.
-    # Si se los deja caer sin más, terminan cada uno por su lado en
-    # falta_arca/falta_sistema como si fueran comprobantes realmente
-    # faltantes -y falta_arca ni siquiera se exporta en el reporte, así
-    # que la mitad de la pareja queda invisible para el equipo. Se
-    # emparejan acá y van a "revisar" con comentario "Total" para que
-    # se vea la diferencia de importe sobre el mismo comprobante.
-    #
-    # Se excluyen los pares con signo distinto entre sí (Total sistema y
-    # Total ARCA de signo opuesto): eso es el patrón de una Nota de
-    # Crédito cargada reutilizando el N° de la factura, que cruce3 debe
-    # seguir resolviendo por CUIT+Fecha+importe contra su respaldo real.
-    # ---------------------------------------------------------------
-    cand_fuera_tol = cand[cand["_diff_total"] > tolerancia_total].copy()
-    cand_fuera_tol = cand_fuera_tol[
-        np.sign(cand_fuera_tol["_total_sis"]) == np.sign(cand_fuera_tol["_total_arca"])
-    ].sort_values("_diff_total")
-
-    mismo_comp_distinto_total_sis_idx, mismo_comp_distinto_total_arca_idx = [], []
-    for _, row in cand_fuera_tol.iterrows():
-        i_sis  = int(row["_idx_sis"])
-        i_arca = int(row["_idx_arca"])
-        if i_sis not in usados_sis and i_arca not in usados_arca:
-            usados_sis.add(i_sis)
-            usados_arca.add(i_arca)
-            mismo_comp_distinto_total_sis_idx.append(i_sis)
-            mismo_comp_distinto_total_arca_idx.append(i_arca)
-
-    if mismo_comp_distinto_total_sis_idx:
-        rt_sis = (
-            sis.loc[mismo_comp_distinto_total_sis_idx]
-            .drop(columns=temp_cols_sis, errors="ignore")
-            .rename(columns=sis_rename)
-            .reset_index(drop=True)
-        )
-        rt_arca = (
-            arca.loc[mismo_comp_distinto_total_arca_idx, arca_cols_available]
-            .drop(columns=temp_cols_arca, errors="ignore")
-            .rename(columns=arca_cols_rename)
-            .reset_index(drop=True)
-        )
-        revisar_mismo_comp = pd.concat([rt_sis, rt_arca], axis=1)
-        revisar_mismo_comp["comentario"] = "Total"
-    else:
-        revisar_mismo_comp = pd.DataFrame()
-
-    # ---------------------------------------------------------------
     # Duplicados exactos: misma clave (Pto. Venta + N°Comprobante + CUIT)
     # Y mismo importe repetidos más de una vez de un mismo lado (la misma
     # factura cargada dos veces). La copia "sobrante" (la que no ganó el
@@ -354,10 +310,12 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     #
     # El caso de una Nota de Crédito cargada reutilizando el N° de la
     # factura (mismo Pto. Venta+N°Comprobante+CUIT, importe con signo
-    # inverso) NO se trata acá: si el respaldo real está en ARCA, lo
-    # termina resolviendo cruce3 por CUIT+Fecha+importe; si no está,
-    # queda en falta_arca legítimamente (es una diferencia real, no un
-    # artefacto de carga duplicada).
+    # inverso) tampoco es un duplicado en este sentido -los importes no
+    # coinciden entre sí, así que no cae acá-: al compartir clave exacta,
+    # el match 1 a 1 de arriba ya la empareja directo con la factura y
+    # queda reflejada en "revisar" por la diferencia de Total (no se
+    # busca su respaldo real en otro lado vía cruce3: clave exacta matchea
+    # sin mirar el importe).
     # ---------------------------------------------------------------
     def _detectar_duplicados(df_full, key_cols, idx_col, total_col, usados):
         totales = df_full.set_index(idx_col)[total_col]
@@ -430,7 +388,7 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
     # duplicados detectados en este cruce); cruce2 y cruce3 le van
     # agregando filas a "revisar".
     revisar_base, no_gravado = revisar_inconsistencias_en_match(match, tol_pesos=tolerancia_total)
-    revisar = pd.concat([revisar_base, revisar_duplicados, revisar_mismo_comp], ignore_index=True)
+    revisar = pd.concat([revisar_base, revisar_duplicados], ignore_index=True)
 
     return match, falta_sistema, falta_arca, revisar, no_gravado
 
