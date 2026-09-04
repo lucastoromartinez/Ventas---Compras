@@ -267,12 +267,22 @@ def cruzar_caja(
     Returns
     -------
     dict con match_caja_unificada, match_tesoreria, falta_unificada,
-    falta_tesoreria y warnings (lista de strings con inconsistencias
-    detectadas, ej. ingresos que no cuadran).
+    falta_tesoreria, comisiones y warnings (lista de strings con
+    inconsistencias detectadas, ej. ingresos que no cuadran).
     """
 
     unif = df_caja_unificada.copy().reset_index(drop=True)
     michu = df_caja_michu.copy().reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Comisiones: se sacan de tesorería antes de cruzar y van aparte,
+    # sin participar del match.
+    # ------------------------------------------------------------------
+    mask_comision = michu[col_detalle_michu].apply(
+        lambda t: "comision" in _normalizar_texto(t)
+    )
+    comisiones = michu[mask_comision].reset_index(drop=True)
+    michu = michu[~mask_comision].reset_index(drop=True)
 
     unif["_id"] = unif.index
     michu["_id"] = michu.index
@@ -503,6 +513,7 @@ def cruzar_caja(
         "match_tesoreria": match_tesoreria,
         "falta_unificada": falta_unificada,
         "falta_tesoreria": falta_tesoreria,
+        "comisiones": comisiones,
         "warnings": warnings,
     }
 
@@ -512,9 +523,10 @@ def cruzar_caja(
 # ─────────────────────────────────────────────
 
 def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
-                                        falta_unificada, falta_tesoreria) -> bytes:
+                                        falta_unificada, falta_tesoreria,
+                                        comisiones) -> bytes:
     """
-    Exporta los 4 DataFrames del cruce a un Excel en memoria, con:
+    Exporta los DataFrames del cruce a un Excel en memoria, con:
       - columnas float con formato numérico (separador de miles, 2 decimales)
       - columnas de fecha con formato dd/mm/aaaa
       - ancho de columna autoajustado al contenido
@@ -526,6 +538,7 @@ def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
         "Match Tesoreria": match_tesoreria,
         "Falta Contabilidad": falta_unificada,
         "Falta Tesoreria": falta_tesoreria,
+        "Comisiones": comisiones,
     }
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -597,12 +610,14 @@ def correr_conciliacion_tesoreria(
         resultado["match_tesoreria"],
         resultado["falta_unificada"],
         resultado["falta_tesoreria"],
+        resultado["comisiones"],
     )
 
     stats = {
         "match": len(resultado["match_caja_unificada"]),
         "falta_contabilidad": len(resultado["falta_unificada"]),
         "falta_tesoreria": len(resultado["falta_tesoreria"]),
+        "comisiones": len(resultado["comisiones"]),
         "warnings": resultado["warnings"],
     }
 
