@@ -386,6 +386,7 @@ def _elegir_liquidacion(factura, candidatos):
 def asignar_facturas(facturas, liquidaciones):
     TOLERANCIA = 1
     advertencias = []
+    facturas_sin_asignar = []
 
     for liq in liquidaciones:
         liq['facturas_publicidad'] = []
@@ -433,13 +434,15 @@ def asignar_facturas(facturas, liquidaciones):
                 liq_elegida['facturas_servicios'].append(factura)
                 liq_elegida['nros_factura'].append(nro_fac)
                 ocupadas_servicios.add(id(liq_elegida))
-            elif len(candidatos) > 1:
-                advertencias.append(
-                    f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
-                    "y no se pudo distinguir por período de venta"
-                )
             else:
-                advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
+                facturas_sin_asignar.append(factura)
+                if len(candidatos) > 1:
+                    advertencias.append(
+                        f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
+                        "y no se pudo distinguir por período de venta"
+                    )
+                else:
+                    advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
 
         elif tipo == 'publicidad':
             mask_pub = df_fac['Cod'].str.replace(' ','').str.lower().str.contains('serviciosdepublicidadindexaccionrappi', na=False)
@@ -461,15 +464,21 @@ def asignar_facturas(facturas, liquidaciones):
                 liq_elegida['facturas_publicidad'].append(factura)
                 liq_elegida['nros_factura'].append(nro_fac)
                 ocupadas_publicidad.add(id(liq_elegida))
-            elif len(candidatos) > 1:
-                advertencias.append(
-                    f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
-                    "y no se pudo distinguir por período de venta"
-                )
             else:
-                advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
+                facturas_sin_asignar.append(factura)
+                if len(candidatos) > 1:
+                    advertencias.append(
+                        f"Factura {nro_fac} ({tipo}) coincide en monto con {len(candidatos)} liquidaciones "
+                        "y no se pudo distinguir por período de venta"
+                    )
+                else:
+                    advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
 
-    return liquidaciones, advertencias
+        else:
+            facturas_sin_asignar.append(factura)
+            advertencias.append(f"Factura {nro_fac} ({tipo}) no encontró liquidación")
+
+    return liquidaciones, advertencias, facturas_sin_asignar
 
 
 # ─────────────────────────────────────────────
@@ -669,7 +678,28 @@ def _formatear_fecha_liq(valor):
     return valor.strftime('%d/%m/%Y')
 
 
-def construir_cuadro_conceptos(liquidaciones):
+def _formatear_nro_factura(nro):
+    """Devuelve el número de factura como nnnn-nnnnnnnn (punto de venta y
+    comprobante). Si el identificador no es numérico (p.ej. el que sale del
+    nombre del archivo en cuentas al día) se deja tal cual."""
+    if nro is None:
+        return ''
+    texto = str(nro).strip()
+
+    m = re.fullmatch(r'(\d{1,4})\s*-\s*(\d{1,8})', texto)
+    if m:
+        return f'{m.group(1).zfill(4)}-{m.group(2).zfill(8)}'
+
+    solo_digitos = re.sub(r'[\s.]', '', texto)
+    if solo_digitos.isdigit() and len(solo_digitos) <= 12:
+        pto_vta     = solo_digitos[:-8] if len(solo_digitos) > 8 else ''
+        comprobante = solo_digitos[-8:]
+        return f'{pto_vta.zfill(4)}-{comprobante.zfill(8)}'
+
+    return texto
+
+
+def construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar=None):
     filas = []
     for liq in liquidaciones:
         inicio = _formatear_fecha_liq(liq.get('inicio_periodo_liq'))
@@ -683,13 +713,22 @@ def construir_cuadro_conceptos(liquidaciones):
             filas.append((concepto, row['Total']))
 
         for factura in liq['facturas_publicidad'] + liq['facturas_servicios']:
-            filas.append((factura['nro_factura'], factura.get('total_factura')))
+            filas.append((_formatear_nro_factura(factura['nro_factura']), factura.get('total_factura')))
 
         filas.append(None)
         filas.append(None)
 
     while filas and filas[-1] is None:
         filas.pop()
+
+    # Facturas que no matchearon con ninguna liquidación: van al final, después
+    # de dos filas en blanco, bajo el título "Facturas no asignadas".
+    if facturas_sin_asignar:
+        filas.append(None)
+        filas.append(None)
+        filas.append(('Facturas no asignadas', None))
+        for factura in facturas_sin_asignar:
+            filas.append((_formatear_nro_factura(factura['nro_factura']), factura.get('total_factura')))
 
     return filas
 
@@ -707,7 +746,7 @@ def correr_rappi(archivos_liq, archivos_pdf):
     facturas = importar_facturas(archivos_pdf)
     facturas = depurar_facturas(facturas)
 
-    liquidaciones, advertencias = asignar_facturas(facturas, liquidaciones)
+    liquidaciones, advertencias, facturas_sin_asignar = asignar_facturas(facturas, liquidaciones)
     liquidaciones, df_resumen   = procesar_liquidaciones(liquidaciones)
 
     zip_buf = io.BytesIO()
@@ -737,7 +776,7 @@ def correr_rappi(archivos_liq, archivos_pdf):
         buf_res.seek(0)
         zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
 
-        cuadro_filas = construir_cuadro_conceptos(liquidaciones)
+        cuadro_filas = construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar)
         wb_cuadro = openpyxl.Workbook()
         ws_cuadro = wb_cuadro.active
         ws_cuadro.title = 'cuadro_conceptos'
