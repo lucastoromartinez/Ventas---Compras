@@ -1,7 +1,8 @@
 import io
 import re
 import zipfile
-from datetime import datetime
+import unicodedata
+from datetime import date, datetime
 import pandas as pd
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -11,6 +12,62 @@ import pdfplumber
 # ─────────────────────────────────────────────
 # IMPORTAR LIQUIDACIONES (múltiples Excel)
 # ─────────────────────────────────────────────
+
+def _normalizar(texto):
+    """Minúsculas, sin tildes, sin espacios ni signos: para comparar rótulos
+    escritos de cualquier manera ('Fecha de Pago', 'FECHA DEPAGO', etc.)."""
+    if texto is None:
+        return ''
+    sin_tildes = unicodedata.normalize('NFKD', str(texto))
+    sin_tildes = ''.join(c for c in sin_tildes if not unicodedata.combining(c))
+    return re.sub(r'[^a-z0-9]', '', sin_tildes.lower())
+
+
+FORMATOS_FECHA = ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d', '%d/%m/%y')
+
+
+def _parsear_fecha(valor):
+    """Devuelve un date si el valor es una fecha (objeto o texto), si no None."""
+    if valor is None:
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    for formato in FORMATOS_FECHA:
+        try:
+            return datetime.strptime(texto, formato).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _leer_fecha_pago(ws):
+    """Hoja 'Resumen': la fecha de pago del encabezado. Se busca el rótulo que
+    contenga 'fecha de pago' (sin importar mayúsculas, tildes ni espacios) y,
+    si no aparece, se toma la tercera fecha del encabezado (inicio y fin del
+    período de venta son las dos primeras)."""
+    fila_encabezado = None
+    for fila in ws.iter_rows(min_row=1, max_row=30):
+        if any(_normalizar(c.value) == 'grupo' for c in fila):
+            fila_encabezado = fila[0].row
+            break
+    ultima_fila = (fila_encabezado - 1) if fila_encabezado else 9
+
+    fechas = []
+    for fila in ws.iter_rows(min_row=1, max_row=ultima_fila):
+        valores  = [c.value for c in fila]
+        etiqueta = any('fechadepago' in _normalizar(v) for v in valores)
+        fechas_fila = [f for f in (_parsear_fecha(v) for v in valores) if f]
+        if etiqueta and fechas_fila:
+            return fechas_fila[0]
+        fechas.extend(fechas_fila)
+
+    return fechas[2] if len(fechas) >= 3 else None
+
 
 def _leer_nombre_tienda(wb):
     """Hoja 'Detalle': encabezados en la fila 2, solo se necesita la fila 3
@@ -47,6 +104,7 @@ def importar_liquidaciones(archivos):
         fin_periodo_liq    = ws.cell(row=4, column=4).value
         nombre_aliado      = ws.cell(row=6, column=4).value
         nombre_tienda      = _leer_nombre_tienda(wb)
+        fecha_pago         = _leer_fecha_pago(ws)
 
         merged_ranges = list(ws.merged_cells.ranges)
         for rango in merged_ranges:
@@ -85,6 +143,7 @@ def importar_liquidaciones(archivos):
             'id_pago':                id_pago,
             'inicio_periodo_liq':     inicio_periodo_liq,
             'fin_periodo_liq':        fin_periodo_liq,
+            'fecha_pago':             fecha_pago,
             'valor_total_transferir': valor_total_transferir,
             'periodo_str':            f'{inicio_periodo_liq} al {fin_periodo_liq}',
             'reporte':                _determinar_reporte(nombre_aliado, nombre_tienda),
@@ -671,11 +730,8 @@ def procesar_liquidaciones(liquidaciones):
 def _formatear_fecha_liq(valor):
     if not valor:
         return ''
-    try:
-        valor = datetime.strptime(str(valor), '%Y-%m-%d')
-    except ValueError:
-        return str(valor)
-    return valor.strftime('%d/%m/%Y')
+    fecha = _parsear_fecha(valor)
+    return fecha.strftime('%d/%m/%Y') if fecha else str(valor)
 
 
 def _formatear_nro_factura(nro):
@@ -706,6 +762,11 @@ def construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar=None):
         fin    = _formatear_fecha_liq(liq.get('fin_periodo_liq'))
         filas.append((liq.get('reporte'), None))
         filas.append((f'Liquidacion {inicio} a {fin}', None))
+
+        fecha_pago = _formatear_fecha_liq(liq.get('fecha_pago'))
+        if fecha_pago:
+            filas.append((f'Fecha de Pago {fecha_pago}', None))
+
         filas.append(('Valor total a transferir', liq.get('valor_total_transferir')))
 
         for _, row in liq['falta_factura'].iterrows():
