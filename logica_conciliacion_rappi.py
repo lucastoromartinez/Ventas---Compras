@@ -104,6 +104,58 @@ def _como_archivo(datos, nombre=None):
     return buf
 
 
+def _tiene_columnas(df, grupos_clave):
+    return all(_buscar_col(df, *claves, obligatoria=False) is not None for claves in grupos_clave)
+
+
+def _leer_reporte(archivo, etiqueta, grupos_clave=()):
+    """Lee un reporte Excel y verifica que sea el que corresponde a ese
+    casillero. Si el archivo trae filas de título arriba de los encabezados,
+    busca la fila que tiene las columnas esperadas y la usa como encabezado."""
+    datos = _leer_bytes(archivo)
+    df = pd.read_excel(_como_archivo(datos))
+
+    if not grupos_clave or _tiene_columnas(df, grupos_clave):
+        return df
+
+    # El encabezado puede estar más abajo (títulos, logos, filtros del export).
+    crudo = pd.read_excel(_como_archivo(datos), header=None, nrows=15)
+    for i in range(len(crudo)):
+        fila = [_normalizar(v) for v in crudo.iloc[i].tolist()]
+        if all(any(all(_normalizar(k) in celda for k in claves) for celda in fila)
+               for claves in grupos_clave):
+            return pd.read_excel(_como_archivo(datos), header=i)
+
+    esperadas = ', '.join(' '.join(claves) for claves in grupos_clave)
+    raise ValueError(
+        f"El archivo cargado en «{etiqueta}» no parece ser ese reporte: no tiene "
+        f"las columnas esperadas ({esperadas}). Columnas encontradas: {list(df.columns)}. "
+        "Revisá que no se haya mezclado con otro de los archivos."
+    )
+
+
+def _leer_pendientes(archivo, etiqueta):
+    """El cuadro de pendientes viene sin encabezados: texto en la segunda
+    columna y montos en la cuarta."""
+    df = pd.read_excel(_como_archivo(_leer_bytes(archivo)), header=None)
+
+    if df.shape[1] < 4:
+        raise ValueError(
+            f"El archivo cargado en «{etiqueta}» tiene {df.shape[1]} columna/s: el cuadro "
+            "de pendientes necesita al menos 4 (el texto va en la segunda y el monto en la cuarta)."
+        )
+
+    texto = df.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else _normalizar(x))
+    if not texto.str.startswith("saldosegunmayorcontable").any():
+        raise ValueError(
+            f"El archivo cargado en «{etiqueta}» no parece el cuadro de pendientes: "
+            "no tiene la línea 'Saldo según Mayor Contable'. "
+            "Revisá que no se haya mezclado con otro de los archivos."
+        )
+
+    return df
+
+
 def _normalizar_id(serie):
     """IDs que a veces vienen como float ('123456.0') y a veces como texto."""
     def _conv(x):
@@ -1498,11 +1550,14 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
         raise ValueError("Las liquidaciones no traen órdenes en la hoja 'Detalle'.")
     df_venta_rappi_dep = depurar_venta_rappi(df_venta_rappi)
 
-    df_dean_rappi = pd.read_excel(_como_archivo(_leer_bytes(archivo_dean)))
+    df_dean_rappi = _leer_reporte(archivo_dean, 'Reporte Dean',
+                                  [('fecha',), ('transacc',), ('online',), ('efectivo',)])
     df_dean_dep = depurar_dean_rappi(df_dean_rappi, advertencias)
 
-    df_hio_documento = pd.read_excel(_como_archivo(_leer_bytes(archivo_hio_documento)))
-    df_hio_metodo = pd.read_excel(_como_archivo(_leer_bytes(archivo_hio_metodo)))
+    df_hio_documento = _leer_reporte(archivo_hio_documento, 'Reporte HIO por documento',
+                                     [('serie',), ('localizador',), ('venta',)])
+    df_hio_metodo = _leer_reporte(archivo_hio_metodo, 'Reporte HIO por método de pago',
+                                  [('serie',), ('medio', 'pago')])
     df_hio, falta_documento, falta_metodo = cruzar_hio_documento_metodo(df_hio_documento, df_hio_metodo)
 
     match_dean1, match_rappi_dean1, falta_rappi_dean1, falta_dean1 = cruzar_dean(
@@ -1518,8 +1573,9 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     venta_hio = calcular_venta_hio(df_hio)
 
     # ── Facturas y conceptos contra el mayor ──
-    df_recaudacion = pd.read_excel(_como_archivo(_leer_bytes(archivo_recaudacion)))
-    pendientes_mes_anterior = pd.read_excel(_como_archivo(_leer_bytes(archivo_pendientes)), header=None)
+    df_recaudacion = _leer_reporte(archivo_recaudacion, 'Cuenta recaudación Rappi (mayor)',
+                                   [('comentario',), ('haber',), ('saldo',), ('sufactura',)])
+    pendientes_mes_anterior = _leer_pendientes(archivo_pendientes, 'Cuadro de pendientes del mes anterior')
 
     facturas_periodo_actual = extraer_facturas_cuadro_conceptos(cuadro_conceptos)
     (match_facturas_periodo_actual, falta_facturas_periodo_actual,
