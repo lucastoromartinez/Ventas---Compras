@@ -118,7 +118,7 @@ card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", 
 
 row3 = st.columns(3, gap="medium")
 card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs", "pages/lector_pdfs.py")
-card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones y conciliación Atalaya", "rappi", "pages/rappi.py")
+card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones, conciliación y Atalaya", "rappi", "pages/rappi.py")
 card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "impuestos", "pages/impuestos.py")
 
 st.markdown("""

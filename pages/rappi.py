@@ -1,6 +1,7 @@
 import streamlit as st
 from logica_rappi import correr_rappi, correr_rappi_resumen_facturas
 from logica_atalaya import correr_atalaya
+from logica_conciliacion_rappi import correr_conciliacion_rappi_easa
 
 st.set_page_config(
     page_title="Rappi",
@@ -155,7 +156,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_liquidaciones, tab_atalaya = st.tabs(["📑  Liquidaciones Rappi", "🏪  Atalaya"])
+tab_liquidaciones, tab_conciliacion, tab_atalaya = st.tabs(
+    ["📑  Liquidaciones Rappi", "🧾  Conciliación Rappi", "🏪  Atalaya"]
+)
 
 
 # ═══════════════════════════════════════════════
@@ -331,6 +334,194 @@ with tab_liquidaciones:
                 use_container_width=True,
                 key="dl_rappi_facturas"
             )
+
+
+# ═══════════════════════════════════════════════
+# TAB CONCILIACIÓN RAPPI
+# ═══════════════════════════════════════════════
+with tab_conciliacion:
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    tab_easa, tab_ronda = st.tabs(["🏢  EASA", "🏢  Ronda"])
+
+    with tab_easa:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="liq-card"><div class="liq-detail">'
+            'Corre el cruce de facturas contra liquidaciones y sigue desde el cuadro de '
+            'conceptos: ventas contra Dean y HIO, facturas y acreditaciones contra el mayor, '
+            'y deja armado el cuadro de pendientes del mes siguiente.'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Liquidaciones Rappi (Excel — una o más)</div>', unsafe_allow_html=True)
+        conc_liq = st.file_uploader(
+            "conc_liq", type=["xlsx", "xls"], accept_multiple_files=True,
+            label_visibility="collapsed", key="conc_easa_liquidaciones"
+        )
+
+        st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
+        conc_pdf = st.file_uploader(
+            "conc_pdf", type=["pdf"], accept_multiple_files=True,
+            label_visibility="collapsed", key="conc_easa_pdfs"
+        )
+
+        if conc_liq or conc_pdf:
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card ok">
+                    <div class="metric-value">{len(conc_liq or [])}</div>
+                    <div class="metric-label">Liquidaciones</div>
+                </div>
+                <div class="metric-card ok">
+                    <div class="metric-value">{len(conc_pdf or [])}</div>
+                    <div class="metric-label">Facturas</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        st.markdown('<div class="upload-label">Reporte HIO por documento (Excel)</div>', unsafe_allow_html=True)
+        conc_hio_doc = st.file_uploader(
+            "conc_hio_doc", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_hio_documento"
+        )
+
+        st.markdown('<div class="upload-label">Reporte HIO por método de pago (Excel)</div>', unsafe_allow_html=True)
+        conc_hio_met = st.file_uploader(
+            "conc_hio_met", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_hio_metodo"
+        )
+
+        st.markdown('<div class="upload-label">Reporte Dean (Excel)</div>', unsafe_allow_html=True)
+        conc_dean = st.file_uploader(
+            "conc_dean", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_dean"
+        )
+
+        st.markdown('<div class="upload-label">Cuenta recaudación Rappi — mayor (Excel)</div>', unsafe_allow_html=True)
+        conc_recaudacion = st.file_uploader(
+            "conc_recaudacion", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_recaudacion"
+        )
+
+        st.markdown('<div class="upload-label">Cuadro de pendientes del mes anterior (Excel)</div>', unsafe_allow_html=True)
+        conc_pendientes = st.file_uploader(
+            "conc_pendientes", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_pendientes"
+        )
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        faltantes = [
+            nombre for nombre, valor in [
+                ("las liquidaciones Rappi", conc_liq),
+                ("las facturas PDF", conc_pdf),
+                ("el reporte HIO por documento", conc_hio_doc),
+                ("el reporte HIO por método de pago", conc_hio_met),
+                ("el reporte de Dean", conc_dean),
+                ("la cuenta recaudación Rappi", conc_recaudacion),
+                ("el cuadro de pendientes", conc_pendientes),
+            ] if not valor
+        ]
+        if faltantes:
+            st.info("Falta cargar: " + ", ".join(faltantes) + ".")
+
+        boton_conc = st.button(
+            "CONCILIAR RAPPI — EASA",
+            disabled=bool(faltantes),
+            use_container_width=True,
+            key="btn_conciliacion_easa"
+        )
+
+        if boton_conc and not faltantes:
+            with st.spinner("Conciliando Rappi EASA..."):
+                try:
+                    zip_buf, stats = correr_conciliacion_rappi_easa(
+                        conc_liq, conc_pdf, conc_hio_doc, conc_hio_met,
+                        conc_dean, conc_recaudacion, conc_pendientes
+                    )
+                    st.session_state["resultado_conciliacion_easa"] = {"zip": zip_buf, "stats": stats}
+                except Exception as e:
+                    st.error(f"Error al procesar: {e}")
+
+        if "resultado_conciliacion_easa" in st.session_state:
+            r = st.session_state["resultado_conciliacion_easa"]
+            s = r["stats"]
+            c = s["conciliacion"]
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+            st.success(f"¡Listo! Conciliación de {c['nombre_mes']} {c['anio']} generada.")
+
+            def _pesos(valor):
+                if valor is None:
+                    return "—"
+                return f"$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card ok">
+                    <div class="metric-value">{c['match_dean'] + c['match_hio'] + c['match_hio_fecha']}</div>
+                    <div class="metric-label">Ventas cruzadas</div>
+                </div>
+                <div class="metric-card warn">
+                    <div class="metric-value">{c['falta_rappi_dean'] + c['falta_dean'] + c['falta_rappi_hio'] + c['falta_hio']}</div>
+                    <div class="metric-label">Ventas sin cruzar</div>
+                </div>
+                <div class="metric-card ok">
+                    <div class="metric-value">{c['match_facturas'] + c['match_pendientes']}</div>
+                    <div class="metric-label">Facturas cobradas</div>
+                </div>
+                <div class="metric-card warn">
+                    <div class="metric-value">{c['falta_facturas'] + c['falta_pendientes']}</div>
+                    <div class="metric-label">Facturas pendientes</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"""
+            <div class="liq-card">
+                <div class="liq-id">Ventas del mes</div>
+                <div class="liq-detail">Dean: {_pesos(c['venta_dean'])} &nbsp;|&nbsp; HIO: {_pesos(c['venta_hio'])}</div>
+                <div class="liq-detail">Diferencia D&amp;D: {_pesos(c['total_dean'])} &nbsp;|&nbsp; Diferencia HIO: {_pesos(c['total_hio'])}</div>
+            </div>
+            <div class="liq-card">
+                <div class="liq-id">Acreditaciones {c['mes']:02d}-{c['anio']}</div>
+                <div class="liq-detail">Mayor: {_pesos(c['acred_mayor'])} &nbsp;|&nbsp; Esperado: {_pesos(c['acred_esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos(c['acred_diferencia'])}</div>
+                <div class="liq-detail">Sin registrar: {c['acred_faltantes']} &nbsp;|&nbsp; A cobrar el mes que viene: {c['acred_mes_siguiente']}</div>
+            </div>
+            <div class="liq-card">
+                <div class="liq-id">Cierre del cuadro</div>
+                <div class="liq-detail">Saldo según mayor: {_pesos(c.get('saldo_mayor'))} &nbsp;|&nbsp; Total saldo del mes: {_pesos(c.get('total_saldo_mes'))}</div>
+                <div class="liq-detail">Saldo a acreditar: {_pesos(c.get('saldo_acreditar'))} &nbsp;|&nbsp; Diferencia de centavos: {_pesos(c.get('diferencia_centavos'))}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if c['dif_facturas'] or c['dif_pendientes']:
+                st.warning(
+                    f"Hay {c['dif_facturas'] + c['dif_pendientes']} factura/s con diferencia "
+                    "no explicada contra el mayor: están en el detalle del cruce."
+                )
+
+            for adv in s['advertencias']:
+                st.warning(adv)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="📥 Descargar conciliación Rappi EASA (.zip)",
+                data=r["zip"],
+                file_name=f"conciliacion_rappi_easa_{c['mes']:02d}_{c['anio']}.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_conciliacion_easa"
+            )
+
+    with tab_ronda:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.info("La conciliación de Ronda todavía no está armada.")
 
 
 # ═══════════════════════════════════════════════

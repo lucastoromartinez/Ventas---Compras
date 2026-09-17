@@ -798,7 +798,22 @@ def construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar=None):
 # FUNCIÓN PRINCIPAL → devuelve ZIP en memoria
 # ─────────────────────────────────────────────
 
-def correr_rappi(archivos_liq, archivos_pdf):
+def cuadro_conceptos_a_df(cuadro_filas):
+    """Las filas del cuadro de conceptos como DataFrame ('Concepto' / 'Monto'),
+    con el mismo orden e índice que tienen en el Excel, para poder trabajarlas
+    en memoria (la conciliación parte de acá)."""
+    registros = [
+        {'Concepto': fila[0], 'Monto': fila[1]} if fila is not None
+        else {'Concepto': None, 'Monto': None}
+        for fila in cuadro_filas
+    ]
+    return pd.DataFrame(registros, columns=['Concepto', 'Monto'])
+
+
+def procesar_rappi(archivos_liq, archivos_pdf):
+    """Corre el cruce de facturas contra liquidaciones y devuelve todas las
+    piezas resultantes, sin escribir nada. `correr_rappi` arma el zip con esto,
+    y la conciliación lo reusa para seguir trabajando sobre el cuadro."""
     liquidaciones = importar_liquidaciones(archivos_liq)
     liquidaciones = depurar_liquidaciones(liquidaciones)
 
@@ -808,68 +823,86 @@ def correr_rappi(archivos_liq, archivos_pdf):
     facturas = depurar_facturas(facturas)
 
     liquidaciones, advertencias, facturas_sin_asignar = asignar_facturas(facturas, liquidaciones)
-    liquidaciones, df_resumen   = procesar_liquidaciones(liquidaciones)
+    liquidaciones, df_resumen = procesar_liquidaciones(liquidaciones)
 
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for liq in liquidaciones:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                liq['match_liquidacion'].to_excel(writer, sheet_name='match_liquidacion', index=False)
-                liq['falta_factura'].to_excel(writer, sheet_name='falta_factura', index=False)
-            buf.seek(0)
-            zf.writestr(f"liquidacion_{liq['id_pago']}.xlsx", buf.read())
+    cuadro_filas = construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar)
 
-        buf_res = io.BytesIO()
-        with pd.ExcelWriter(buf_res, engine='openpyxl') as writer:
-            df_resumen.to_excel(writer, index=False, sheet_name='Sheet1')
-            ws = writer.sheets['Sheet1']
-            formatos_col = {
-                'fin_periodo':   'DD/MM/YYYY',
-                'fecha_factura': 'DD/MM/YYYY',
-                'total_factura': '$ #,##0.00',
-            }
-            for col_name, formato in formatos_col.items():
-                if col_name in df_resumen.columns:
-                    col_letter = get_column_letter(df_resumen.columns.get_loc(col_name) + 1)
-                    for cell in ws[col_letter][1:]:
-                        cell.number_format = formato
-        buf_res.seek(0)
-        zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
+    return {
+        'liquidaciones':         liquidaciones,
+        'facturas':              facturas,
+        'facturas_sin_asignar':  facturas_sin_asignar,
+        'advertencias':          advertencias,
+        'df_resumen':            df_resumen,
+        'df_resumen_extracto':   df_resumen_extracto,
+        'cuadro_filas':          cuadro_filas,
+    }
 
-        cuadro_filas = construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar)
-        wb_cuadro = openpyxl.Workbook()
-        ws_cuadro = wb_cuadro.active
-        ws_cuadro.title = 'cuadro_conceptos'
-        ws_cuadro.append(['Concepto', 'Monto'])
-        for fila in cuadro_filas:
-            ws_cuadro.append(list(fila) if fila is not None else [])
-        for row in ws_cuadro.iter_rows(min_row=2, min_col=2, max_col=2):
-            for cell in row:
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = '$ #,##0.00'
-        buf_cuadro = io.BytesIO()
-        wb_cuadro.save(buf_cuadro)
-        buf_cuadro.seek(0)
-        zf.writestr('cuadro_conceptos.xlsx', buf_cuadro.read())
 
-        buf_extracto = io.BytesIO()
-        with pd.ExcelWriter(buf_extracto, engine='openpyxl') as writer:
-            df_resumen_extracto.to_excel(writer, index=False, sheet_name='resumen_extracto')
-            ws_extracto = writer.sheets['resumen_extracto']
-            for col_name in ['Venta Bruta', 'Descuento de Producto', 'Venta Neta']:
-                col_letter = get_column_letter(df_resumen_extracto.columns.get_loc(col_name) + 1)
-                for cell in ws_extracto[col_letter][1:]:
-                    cell.number_format = '$ #,##0.00'
-        buf_extracto.seek(0)
-        zf.writestr('resumen_extracto.xlsx', buf_extracto.read())
+def escribir_salidas_rappi(zf, piezas):
+    """Escribe en el zip los libros del cruce: una liquidación por archivo, el
+    resumen de asignaciones, el cuadro de conceptos y el resumen de extracto."""
+    liquidaciones       = piezas['liquidaciones']
+    df_resumen          = piezas['df_resumen']
+    df_resumen_extracto = piezas['df_resumen_extracto']
 
-    zip_buf.seek(0)
+    for liq in liquidaciones:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            liq['match_liquidacion'].to_excel(writer, sheet_name='match_liquidacion', index=False)
+            liq['falta_factura'].to_excel(writer, sheet_name='falta_factura', index=False)
+        buf.seek(0)
+        zf.writestr(f"liquidacion_{liq['id_pago']}.xlsx", buf.read())
 
-    stats = {
+    buf_res = io.BytesIO()
+    with pd.ExcelWriter(buf_res, engine='openpyxl') as writer:
+        df_resumen.to_excel(writer, index=False, sheet_name='Sheet1')
+        ws = writer.sheets['Sheet1']
+        formatos_col = {
+            'fin_periodo':   'DD/MM/YYYY',
+            'fecha_factura': 'DD/MM/YYYY',
+            'total_factura': '$ #,##0.00',
+        }
+        for col_name, formato in formatos_col.items():
+            if col_name in df_resumen.columns:
+                col_letter = get_column_letter(df_resumen.columns.get_loc(col_name) + 1)
+                for cell in ws[col_letter][1:]:
+                    cell.number_format = formato
+    buf_res.seek(0)
+    zf.writestr('resumen_asignaciones.xlsx', buf_res.read())
+
+    wb_cuadro = openpyxl.Workbook()
+    ws_cuadro = wb_cuadro.active
+    ws_cuadro.title = 'cuadro_conceptos'
+    ws_cuadro.append(['Concepto', 'Monto'])
+    for fila in piezas['cuadro_filas']:
+        ws_cuadro.append(list(fila) if fila is not None else [])
+    for row in ws_cuadro.iter_rows(min_row=2, min_col=2, max_col=2):
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '$ #,##0.00'
+    buf_cuadro = io.BytesIO()
+    wb_cuadro.save(buf_cuadro)
+    buf_cuadro.seek(0)
+    zf.writestr('cuadro_conceptos.xlsx', buf_cuadro.read())
+
+    buf_extracto = io.BytesIO()
+    with pd.ExcelWriter(buf_extracto, engine='openpyxl') as writer:
+        df_resumen_extracto.to_excel(writer, index=False, sheet_name='resumen_extracto')
+        ws_extracto = writer.sheets['resumen_extracto']
+        for col_name in ['Venta Bruta', 'Descuento de Producto', 'Venta Neta']:
+            col_letter = get_column_letter(df_resumen_extracto.columns.get_loc(col_name) + 1)
+            for cell in ws_extracto[col_letter][1:]:
+                cell.number_format = '$ #,##0.00'
+    buf_extracto.seek(0)
+    zf.writestr('resumen_extracto.xlsx', buf_extracto.read())
+
+
+def construir_stats_rappi(piezas):
+    liquidaciones = piezas['liquidaciones']
+    return {
         'n_liquidaciones': len(liquidaciones),
-        'n_facturas':      len(facturas),
-        'advertencias':    advertencias,
+        'n_facturas':      len(piezas['facturas']),
+        'advertencias':    piezas['advertencias'],
         'detalle': [
             {
                 'id_pago':  liq['id_pago'],
@@ -880,7 +913,17 @@ def correr_rappi(archivos_liq, archivos_pdf):
             for liq in liquidaciones
         ]
     }
-    return zip_buf, stats
+
+
+def correr_rappi(archivos_liq, archivos_pdf):
+    piezas = procesar_rappi(archivos_liq, archivos_pdf)
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        escribir_salidas_rappi(zf, piezas)
+    zip_buf.seek(0)
+
+    return zip_buf, construir_stats_rappi(piezas)
 
 
 def correr_rappi_resumen_facturas(archivos_pdf):
