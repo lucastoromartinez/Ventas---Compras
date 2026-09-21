@@ -997,6 +997,17 @@ def extraer_acreditaciones_pendientes(pendientes_mes_anterior):
     return pd.DataFrame(filas, columns=["Concepto", "Importe"]).reset_index(drop=True)
 
 
+def separar_acreditaciones_negativas(liquidaciones_mes_actual):
+    """Una liquidación con 'Valor total a transferir' negativo no se cobra, así
+    que Rappi nunca la acredita: si se dejara en el cruce, el mayor quedaría
+    siempre corto contra lo esperado y el buscador de combinaciones se pondría a
+    adivinar qué liquidación explica la diferencia. Se aparta y va derecho al
+    cuadro de pendientes."""
+    negativas = liquidaciones_mes_actual[liquidaciones_mes_actual["Importe"] < 0].reset_index(drop=True)
+    positivas = liquidaciones_mes_actual[liquidaciones_mes_actual["Importe"] >= 0].reset_index(drop=True)
+    return positivas, negativas
+
+
 def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anterior,
                           anio, mes_numero, advertencias=None):
     """Chequea que las acreditaciones del mes estén bien cargadas en el mayor:
@@ -1012,11 +1023,14 @@ def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anter
     total_mayor = round(df_rec.loc[comentario.str.contains(patron_acred, na=False), "Haber"].sum(), 2)
 
     ultimo_dia_mes = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
-    es_del_mes = _hasta_fecha(liquidaciones_mes_actual["Fecha de Pago"], ultimo_dia_mes)
 
-    corriente = liquidaciones_mes_actual[es_del_mes][["Concepto", "Importe"]].reset_index(drop=True)
+    # Las liquidaciones negativas no se acreditan: quedan afuera del cruce.
+    positivas, negativas = separar_acreditaciones_negativas(liquidaciones_mes_actual)
+    es_del_mes = _hasta_fecha(positivas["Fecha de Pago"], ultimo_dia_mes)
+
+    corriente = positivas[es_del_mes][["Concepto", "Importe"]].reset_index(drop=True)
     acred_pendientes_mes_siguiente = (
-        liquidaciones_mes_actual[~es_del_mes][["Concepto", "Importe"]].reset_index(drop=True)
+        positivas[~es_del_mes][["Concepto", "Importe"]].reset_index(drop=True)
     )
     anterior = acred_mes_anterior[["Concepto", "Importe"]].reset_index(drop=True)
 
@@ -1070,6 +1084,7 @@ def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anter
         'total_mayor': total_mayor,
         'esperado':    esperado,
         'diferencia':  diferencia,
+        'negativas':   len(negativas),
     }
 
     return (acred_match_mes_anterior, acred_match_mes_corriente,
@@ -1133,7 +1148,8 @@ def actualizar_pendientes_mes_anterior(df_pendientes_raw, facturas_pendientes,
 
 def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
                         falta_facturas_periodo_actual, anio=None, mes_numero=None,
-                        cuadro_conceptos=None, con_anio=True, advertencias=None):
+                        cuadro_conceptos=None, con_anio=True, advertencias=None,
+                        acreditaciones_negativas=None):
     """Reorganiza el cuadro al cerrar el mes:
     - Baja el bloque 'Gastos Faltan Registrar Acreditaciones de <mes anterior>
       Registradas en <mes actual>' a una línea debajo del bloque del mes anterior.
@@ -1198,6 +1214,20 @@ def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
         [None, None] + [-round(m, 2) for _, _, m in items_mes]
     )
 
+    # Las liquidaciones negativas van en su propio bloque, arriba de 'Total Saldo
+    # del mes' y en positivo. Escritas con el prefijo 'Acreditaciones Negativas'
+    # no las levanta ningún extractor del pendientes el mes que viene.
+    bloque_negativas = _fila_vacia(df, 0)
+    if acreditaciones_negativas is not None and len(acreditaciones_negativas):
+        bloque_negativas = _bloque(
+            df,
+            [f'Acreditaciones Negativas {encabezado_mes}'] +
+            [f'Acreditaciones Negativas {fila["Concepto"]}'
+             for _, fila in acreditaciones_negativas.iterrows()],
+            [None] + [-round(fila["Importe"], 2)
+                      for _, fila in acreditaciones_negativas.iterrows()]
+        )
+
     bloque_siguiente = _fila_vacia(df, 0)
     if items_siguiente:
         bloque_siguiente = _bloque(
@@ -1214,7 +1244,10 @@ def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
     partes = [antes]
     if len(bloque_viejo):
         partes += [_fila_vacia(df), bloque_viejo]
-    partes += [_fila_vacia(df), bloque_mes, _fila_vacia(df, 2)]
+    partes += [_fila_vacia(df), bloque_mes]
+    if len(bloque_negativas):
+        partes += [_fila_vacia(df), bloque_negativas]
+    partes += [_fila_vacia(df, 2)]
 
     if ini_gfr is not None:
         partes.append(df.iloc[pos_total:ini_gfr].copy())
@@ -1590,14 +1623,17 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     conceptos_mes_actual = extraer_conceptos_cuadro_conceptos(cuadro_conceptos)
 
     # ── Armado del cuadro de pendientes del mes siguiente ──
+    liquidaciones_mes_actual = extraer_liquidaciones_cuadro_conceptos(cuadro_conceptos)
+    _, acreditaciones_negativas = separar_acreditaciones_negativas(liquidaciones_mes_actual)
+
     pendientes = actualizar_pendientes_mes_anterior(
         pendientes_mes_anterior, facturas_pendientes, match_facturas_pendientes)
     pendientes = agregar_seccion_mes(
         pendientes, conceptos_mes_actual, falta_facturas_periodo_actual,
-        anio=anio, mes_numero=mes, advertencias=advertencias)
+        anio=anio, mes_numero=mes, advertencias=advertencias,
+        acreditaciones_negativas=acreditaciones_negativas)
 
     acred_mes_anterior = extraer_acreditaciones_pendientes(pendientes_mes_anterior)
-    liquidaciones_mes_actual = extraer_liquidaciones_cuadro_conceptos(cuadro_conceptos)
     (acred_match_mes_anterior, acred_match_mes_corriente,
      acred_pendientes_mes_siguiente, acreditacion_faltante,
      resumen_acred) = cruzar_acreditaciones(
@@ -1653,6 +1689,7 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
         'acred_esperado':       resumen_acred['esperado'],
         'acred_diferencia':     resumen_acred['diferencia'],
         'acred_faltantes':      len(acreditacion_faltante),
+        'acred_negativas':      len(acreditaciones_negativas),
         'acred_mes_siguiente':  len(acred_pendientes_mes_siguiente),
         **resumen_saldo,
     }

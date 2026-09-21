@@ -492,7 +492,7 @@ with tab_conciliacion:
             <div class="liq-card">
                 <div class="liq-id">Acreditaciones {c['mes']:02d}-{c['anio']}</div>
                 <div class="liq-detail">Mayor: {_pesos(c['acred_mayor'])} &nbsp;|&nbsp; Esperado: {_pesos(c['acred_esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos(c['acred_diferencia'])}</div>
-                <div class="liq-detail">Sin registrar: {c['acred_faltantes']} &nbsp;|&nbsp; A cobrar el mes que viene: {c['acred_mes_siguiente']}</div>
+                <div class="liq-detail">Sin registrar: {c['acred_faltantes']} &nbsp;|&nbsp; Negativas: {c['acred_negativas']} &nbsp;|&nbsp; A cobrar el mes que viene: {c['acred_mes_siguiente']}</div>
             </div>
             <div class="liq-card">
                 <div class="liq-id">Cierre del cuadro</div>
@@ -524,11 +524,11 @@ with tab_conciliacion:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(
             '<div class="liq-card"><div class="liq-detail">'
-            'Parte del cuadro de conceptos ya generado (pestaña Liquidaciones Rappi) y concilia: '
+            'Corre el cruce de facturas contra liquidaciones y sigue desde el cuadro de conceptos: '
             'ventas contra HIO —por localizador y, lo que no tiene, por fecha, local e importe— '
-            'y contra Atalaya, facturas y acreditaciones contra el mayor, y arma el cuadro de '
-            'pendientes del mes siguiente. Las liquidaciones con valor total negativo no se cruzan: '
-            'van al cuadro como Acreditaciones Negativas.'
+            'y contra Atalaya, facturas y acreditaciones contra el mayor, y deja armado el cuadro '
+            'de pendientes del mes siguiente. Las liquidaciones con valor total negativo no se '
+            'cruzan: van al cuadro como Acreditaciones Negativas.'
             '</div></div>',
             unsafe_allow_html=True
         )
@@ -540,19 +540,25 @@ with tab_conciliacion:
             label_visibility="collapsed", key="conc_ronda_liquidaciones"
         )
 
-        if ronda_liq:
+        st.markdown('<div class="upload-label">Facturas Rappi (PDFs)</div>', unsafe_allow_html=True)
+        ronda_pdf = st.file_uploader(
+            "ronda_pdf", type=["pdf"], accept_multiple_files=True,
+            label_visibility="collapsed", key="conc_ronda_pdfs"
+        )
+
+        if ronda_liq or ronda_pdf:
             st.markdown(f"""
-            <div class="counter-box">
-                <div class="counter-num">{len(ronda_liq)}</div>
-                <div class="counter-label">liquidación{"es" if len(ronda_liq) != 1 else ""} cargada{"s" if len(ronda_liq) != 1 else ""}</div>
+            <div class="metric-row">
+                <div class="metric-card ok">
+                    <div class="metric-value">{len(ronda_liq or [])}</div>
+                    <div class="metric-label">Liquidaciones</div>
+                </div>
+                <div class="metric-card ok">
+                    <div class="metric-value">{len(ronda_pdf or [])}</div>
+                    <div class="metric-label">Facturas</div>
+                </div>
             </div>
             """, unsafe_allow_html=True)
-
-        st.markdown('<div class="upload-label">Cuadro de conceptos (Excel)</div>', unsafe_allow_html=True)
-        ronda_cuadro = st.file_uploader(
-            "ronda_cuadro", type=["xlsx", "xls"], label_visibility="collapsed",
-            key="conc_ronda_cuadro"
-        )
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
@@ -591,7 +597,7 @@ with tab_conciliacion:
         faltantes_ronda = [
             nombre for nombre, valor in [
                 ("las liquidaciones Rappi", ronda_liq),
-                ("el cuadro de conceptos", ronda_cuadro),
+                ("las facturas PDF", ronda_pdf),
                 ("el reporte HIO por documento", ronda_hio_doc),
                 ("el reporte HIO por método de pago", ronda_hio_met),
                 ("el reporte de Atalaya", ronda_atalaya),
@@ -612,11 +618,11 @@ with tab_conciliacion:
         if boton_ronda and not faltantes_ronda:
             with st.spinner("Conciliando Rappi Ronda..."):
                 try:
-                    buf, stats, _ = correr_conciliacion_rappi_ronda(
-                        ronda_liq, ronda_cuadro, ronda_recaudacion,
+                    zip_buf, stats, _ = correr_conciliacion_rappi_ronda(
+                        ronda_liq, ronda_pdf, ronda_recaudacion,
                         ronda_hio_doc, ronda_hio_met, ronda_atalaya, ronda_pendientes
                     )
-                    st.session_state["resultado_conciliacion_ronda"] = {"buf": buf, "stats": stats}
+                    st.session_state["resultado_conciliacion_ronda"] = {"zip": zip_buf, "stats": stats}
                 except Exception as e:
                     st.error(f"Error al procesar: {e}")
 
@@ -688,10 +694,10 @@ with tab_conciliacion:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar conciliación Rappi Ronda (.xlsx)",
-                data=r["buf"],
-                file_name=f"conciliacion_rappi_ronda_{s['mes_numero']:02d}_{s['anio']}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                label="📥 Descargar conciliación Rappi Ronda (.zip)",
+                data=r["zip"],
+                file_name=f"conciliacion_rappi_ronda_{s['mes_numero']:02d}_{s['anio']}.zip",
+                mime="application/zip",
                 use_container_width=True,
                 key="dl_conciliacion_ronda"
             )
