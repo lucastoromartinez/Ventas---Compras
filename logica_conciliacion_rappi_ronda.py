@@ -39,6 +39,7 @@ import re
 import itertools
 import calendar
 import unicodedata
+import zipfile
 from collections import Counter
 
 import openpyxl
@@ -46,9 +47,20 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill
 
 from logica_atalaya import depurar_rappi, depurar_atalaya, cruzar_rappi_atalaya
-# Mismos validadores de archivos que EASA: verifican que cada archivo sea el del
-# casillero que lo recibió y toleran filas de título arriba de los encabezados.
-from logica_conciliacion_rappi import _leer_reporte, _leer_pendientes
+# Del módulo de EASA se reusa el cruce de facturas contra liquidaciones (que es
+# el que arma el cuadro de conceptos) y los validadores de archivos, que
+# verifican que cada archivo sea el del casillero que lo recibió y toleran filas
+# de título arriba de los encabezados.
+from logica_conciliacion_rappi import (
+    _como_archivo,
+    _leer_bytes,
+    _leer_pendientes,
+    _leer_reporte,
+    construir_stats_rappi,
+    cuadro_conceptos_a_df,
+    escribir_salidas_rappi,
+    procesar_rappi,
+)
 
 
 MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
@@ -917,22 +929,38 @@ def exportar_conciliacion(pendientes, hojas_datos):
 # FUNCIÓN PRINCIPAL
 # ─────────────────────────────────────────────
 
-def correr_conciliacion_rappi_ronda(archivos_liq, archivo_cuadro_conceptos, archivo_recaudacion,
+def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudacion,
                                     archivo_hio_documento, archivo_hio_metodo,
                                     archivo_reporte_atalaya, archivo_pendientes_mes_anterior):
     """
     Corre la conciliación completa de Ronda.
-    Devuelve (buffer del Excel, stats, pendientes nuevo). El Excel trae la hoja
-    'Conciliación' (el pendientes nuevo) más el mayor, los reportes y los cruces.
+    Devuelve (zip, stats, pendientes nuevo). El zip trae los archivos del cruce
+    de facturas contra liquidaciones más 'Conciliacion.xlsx', con la hoja
+    'Conciliación' (el pendientes nuevo), el mayor, los reportes y los cruces.
     """
     avisos = []
 
-    info_liq, df_venta_rappi = importar_liquidaciones_ronda(archivos_liq)
+    # Las liquidaciones se usan dos veces (el cruce de facturas y las ventas de
+    # la hoja Detalle), así que se leen una sola vez a memoria.
+    liq_datos = [(getattr(a, 'name', f'liquidacion_{i}.xlsx'), _leer_bytes(a))
+                 for i, a in enumerate(archivos_liq)]
+    pdf_datos = [(getattr(a, 'name', f'factura_{i}.pdf'), _leer_bytes(a))
+                 for i, a in enumerate(archivos_pdf)]
+
+    # El cuadro de conceptos sale del cruce de facturas contra liquidaciones,
+    # igual que en EASA: no se carga como archivo.
+    piezas = procesar_rappi(
+        [_como_archivo(datos, nombre) for nombre, datos in liq_datos],
+        [_como_archivo(datos, nombre) for nombre, datos in pdf_datos],
+    )
+    avisos.extend(piezas['advertencias'])
+    cuadro = cuadro_conceptos_a_df(piezas['cuadro_filas'])
+
+    info_liq, df_venta_rappi = importar_liquidaciones_ronda(
+        [_como_archivo(datos, nombre) for nombre, datos in liq_datos])
     if df_venta_rappi.empty:
         raise ValueError("Las liquidaciones no traen órdenes en la hoja 'Detalle'.")
 
-    cuadro = _leer_reporte(archivo_cuadro_conceptos, 'Cuadro de conceptos',
-                           [('concepto',), ('monto',)])
     cuadro = agregar_fecha_pago_cuadro(cuadro, info_liq)
     anio, mes = detectar_mes_cuadro_conceptos(cuadro)
     if anio is None:
@@ -1008,13 +1036,23 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivo_cuadro_conceptos, arch
         ("Falta Rappi (sobra HIO)", hio["falta_rappi_hio2"]),
         ("Falta HIO (sobra Rappi)", hio["falta_hio2"]),
     ]
-    buf = exportar_conciliacion(pendientes_nuevo, hojas)
+    buf_conciliacion = exportar_conciliacion(pendientes_nuevo, hojas)
 
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        escribir_salidas_rappi(zf, piezas)
+        zf.writestr('Conciliacion.xlsx', buf_conciliacion.read())
+    zip_buf.seek(0)
+
+    stats_rappi = construir_stats_rappi(piezas)
     stats = {
         "mes": f"{MESES_ES[mes]} {anio}",
         "mes_numero": mes,
         "anio": anio,
         "advertencias": avisos,
+        "n_liquidaciones": stats_rappi["n_liquidaciones"],
+        "n_facturas": stats_rappi["n_facturas"],
+        "detalle_liquidaciones": stats_rappi["detalle"],
         "venta_rappi_hio": hio["venta_rappi"],
         "venta_sistema_hio": hio["venta_sistema"],
         "venta_rappi_atalaya": atalaya["venta_rappi"],
@@ -1034,4 +1072,4 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivo_cuadro_conceptos, arch
                            "faltantes": len(acred["faltantes"]), "negativas": len(acred["negativas"]),
                            "mes_siguiente": len(acred["siguiente"])},
     }
-    return buf, stats, pendientes_nuevo
+    return zip_buf, stats, pendientes_nuevo
