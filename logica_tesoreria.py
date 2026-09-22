@@ -30,6 +30,7 @@ from io import BytesIO
 from itertools import combinations
 
 import numpy as np
+import auditoria_tesoreria
 import openpyxl
 import pandas as pd
 from rapidfuzz import fuzz
@@ -471,7 +472,7 @@ def _marcar(df, indices, id_match):
 
 def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
                     tolerancia_pesos, tolerancia_pct, tolerancia_dias,
-                    etiqueta=None, ignorar_fecha=False):
+                    etiqueta=None, ignorar_fecha=False, margen_por_id=None):
     """
     Cruza línea contra línea por monto (con tolerancia) y fecha (con
     tolerancia_dias), resolviendo el emparejamiento de forma óptima
@@ -492,6 +493,13 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
     se revise, no el detalle de qué se relajó). Si no, se clasifica como
     Exacto / Tolerancia Importe / Tolerancia Fecha / Tolerancia Importe
     y Fecha, como siempre.
+
+    Si se pasa `margen_por_id`, guarda ahí, para cada match, la distancia
+    de costo al mejor candidato alternativo que quedó libre en su misma
+    fila o columna (0 si había uno prácticamente tan bueno como el
+    elegido). No decide nada distinto con ese dato: es diagnóstico para
+    que una auditoría externa sepa qué asignaciones fueron un empate
+    resuelto por la matemática, no una coincidencia inequívoca.
     """
     pendientes_u = unif[~unif["_matched"]]
     pendientes_m = michu[~michu["_matched"]]
@@ -538,6 +546,14 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
                 tipo = "Tolerancia Fecha"
             else:
                 tipo = "Tolerancia Importe y Fecha"
+
+        if margen_por_id is not None:
+            fila_libre = np.delete(costos[i], j)
+            columna_libre = np.delete(costos[:, j], i)
+            alternativas = np.concatenate([fila_libre, columna_libre])
+            alternativas = alternativas[alternativas < INADMISIBLE]
+            if len(alternativas):
+                margen_por_id[contador] = round(float(alternativas.min() - costos[i, j]), 4)
 
         _marcar(unif, [indices_u[i]], contador)
         _marcar(michu, [indices_m[j]], contador)
@@ -945,6 +961,7 @@ def cruzar_caja(
 
     contador = 1
     tipo_por_id = {}
+    margen_por_id = {}
     warnings = []
 
     # ------------------------------------------------------------------
@@ -1062,6 +1079,7 @@ def cruzar_caja(
     contador = _paso_uno_a_uno(
         unif, michu, tipo_por_id, contador,
         tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        margen_por_id=margen_por_id,
     )
 
     # ------------------------------------------------------------------
@@ -1102,12 +1120,13 @@ def cruzar_caja(
         contador = _paso_uno_a_uno(
             unif, michu, tipo_por_id, contador,
             tolerancia_pesos, tolerancia_pct_amplia, tolerancia_dias,
-            etiqueta="Diferencia de Importe",
+            etiqueta="Diferencia de Importe", margen_por_id=margen_por_id,
         )
         contador = _paso_uno_a_uno(
             unif, michu, tipo_por_id, contador,
             tolerancia_pesos, tolerancia_pct, tolerancia_dias,
             etiqueta="Coincidencia de Importe", ignorar_fecha=True,
+            margen_por_id=margen_por_id,
         )
 
         if contador == antes:
@@ -1115,6 +1134,8 @@ def cruzar_caja(
 
     unif["Tipo Match"] = unif["id"].map(tipo_por_id)
     michu["Tipo Match"] = michu["id"].map(tipo_por_id)
+    unif["Margen Asignación"] = unif["id"].map(margen_por_id)
+    michu["Margen Asignación"] = michu["id"].map(margen_por_id)
 
     # ------------------------------------------------------------------
     # Armar resultados finales
@@ -1122,8 +1143,9 @@ def cruzar_caja(
     cols_unif = list(df_caja_unificada.columns)
     cols_michu = list(df_caja_michu.columns)
 
-    match_caja_unificada = unif[unif["_matched"]][cols_unif + ["id", "Tipo Match"]].sort_values("id").reset_index(drop=True)
-    match_tesoreria = michu[michu["_matched"]][cols_michu + ["id", "Tipo Match"]].sort_values("id").reset_index(drop=True)
+    cols_match = ["id", "Tipo Match", "Margen Asignación"]
+    match_caja_unificada = unif[unif["_matched"]][cols_unif + cols_match].sort_values("id").reset_index(drop=True)
+    match_tesoreria = michu[michu["_matched"]][cols_michu + cols_match].sort_values("id").reset_index(drop=True)
     falta_unificada = unif[~unif["_matched"]][cols_unif + ["id"]].reset_index(drop=True)
     falta_tesoreria = michu[~michu["_matched"]][cols_michu + ["id"]].reset_index(drop=True)
 
@@ -1153,7 +1175,8 @@ def cruzar_caja(
 def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
                                         falta_unificada, falta_tesoreria,
                                         comisiones, diferencia_arqueo=None,
-                                        neteos=None, revisar=None) -> bytes:
+                                        neteos=None, revisar=None,
+                                        auditoria=None) -> bytes:
     """
     Exporta los DataFrames del cruce a un Excel en memoria, con:
       - columnas float con formato numérico (separador de miles, 2 decimales)
@@ -1175,6 +1198,8 @@ def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
         hojas["Neteos Contabilidad"] = neteos
     if revisar is not None:
         hojas["Revisar"] = revisar
+    if auditoria is not None:
+        hojas["Auditoría"] = auditoria
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for nombre, df in hojas.items():
@@ -1242,6 +1267,13 @@ def correr_conciliacion_tesoreria(
         tolerancia_dias=tolerancia_dias,
     )
 
+    # La auditoría corre siempre, sin que haga falta pedirla: es un
+    # chequeo independiente del propio resultado, no un paso más del
+    # cruce (ver auditoria_tesoreria.py).
+    auditoria = auditoria_tesoreria.auditar(
+        resultado, df_caja_unificada["Monto"].sum(), df_caja_michu["Monto"].sum(),
+    )
+
     buf = generar_excel_en_memoria_tesoreria(
         resultado["match_caja_unificada"],
         resultado["match_tesoreria"],
@@ -1251,6 +1283,7 @@ def correr_conciliacion_tesoreria(
         resultado["diferencia_arqueo"],
         resultado["neteos"],
         resultado["revisar"],
+        auditoria,
     )
 
     stats = {
@@ -1262,6 +1295,9 @@ def correr_conciliacion_tesoreria(
         "neteos": len(resultado["neteos"]),
         "revisar": len(resultado["revisar"]),
         "warnings": resultado["warnings"],
+        "auditoria_errores": int((auditoria["Severidad"] == "ERROR").sum()) if len(auditoria) else 0,
+        "auditoria_alertas": int((auditoria["Severidad"] == "ALERTA").sum()) if len(auditoria) else 0,
+        "auditoria_revisar": int((auditoria["Severidad"] == "revisar").sum()) if len(auditoria) else 0,
     }
 
     return buf, stats

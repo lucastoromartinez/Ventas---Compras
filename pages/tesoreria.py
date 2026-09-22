@@ -218,6 +218,24 @@ if "resultado_tesoreria" in st.session_state:
     </div>
     """, unsafe_allow_html=True)
 
+    clase_aud = "error" if s.get("auditoria_errores", 0) > 0 else "metric-card"
+    st.markdown(f"""
+    <div class="metric-row">
+        <div class="metric-card {clase_aud}">
+            <div class="metric-value">{s.get('auditoria_errores', 0)}</div>
+            <div class="metric-label">Auditoría: errores</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{s.get('auditoria_alertas', 0)}</div>
+            <div class="metric-label">Auditoría: alertas</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{s.get('auditoria_revisar', 0)}</div>
+            <div class="metric-label">Auditoría: a revisar</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         label="📥 Descargar reporte Tesorería",
