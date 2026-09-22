@@ -6,11 +6,21 @@ cargado por Tesorería) contra el mayor contable unificado del sistema:
   1. Carga la Caja Central hoja por hoja, ubicando SALDO INICIAL, encabezado
      Detalle/Monto, SALDO FINAL y la fila de DIFERENCIA de arqueo.
   2. Depura la Caja Unificada del sistema (Monto = Debe - Haber).
-  3. Cruza ambos lados en 4 pasos: ingresos agrupados, agrupamiento por
-     nombre, uno a uno por monto+fecha, y combinaciones (varias líneas de
-     un lado suman una del otro).
-  4. Exporta el resultado (match y faltantes de cada lado) a un Excel en
-     memoria, con formato numérico/fecha y ancho de columna autoajustado.
+  3. Aparta lo que nunca tiene contrapartida del otro lado: comisiones y
+     diferencias de arqueo (tesorería), y los pares pago/devolución del
+     mismo tercero que se anulan entre sí (contabilidad), sin importar
+     cuántos días pasaron entre el pago y su devolución.
+  4. Cruza ambos lados: primero los pasos que exigen coincidencia exacta
+     (ingresos agrupados por mes, agrupamiento por nombre, uno a uno por
+     monto+fecha, suma por día, combinaciones) y recién al final el que
+     afloja la tolerancia de importe, repitiendo el ciclo hasta que no
+     aparezcan matches nuevos.
+  5. Separa de los faltantes los casos donde el nombre coincide de los
+     dos lados pero el importe no: son diferencias contra una contraparte
+     identificada, no faltantes, y van a su propia hoja.
+  6. Exporta el resultado (match, faltantes de cada lado y lo apartado) a
+     un Excel en memoria, con formato numérico/fecha y ancho de columna
+     autoajustado.
 """
 
 import datetime
@@ -21,6 +31,7 @@ from itertools import combinations
 
 import openpyxl
 import pandas as pd
+from rapidfuzz import fuzz
 from openpyxl.utils import get_column_letter
 
 
@@ -235,6 +246,497 @@ def _buscar_combinacion(monto_objetivo, fecha_objetivo, pool_df, max_combinacion
     return None
 
 
+# ─────────────────────────────────────────────
+# SEPARACIONES PREVIAS AL CRUCE
+# ─────────────────────────────────────────────
+
+def _separar_por_texto(df, col_detalle, palabra):
+    """
+    Parte df en (resto, apartados) según si el detalle normalizado
+    contiene `palabra`. Se usa para sacar del cruce lo que nunca tiene
+    contrapartida del otro lado.
+    """
+    mask = df[col_detalle].apply(lambda t: palabra in _normalizar_texto(t))
+    return df[~mask].reset_index(drop=True), df[mask].reset_index(drop=True)
+
+
+def _separar_neteos(unif, col_fecha, col_monto, col_tercero, tolerancia_pesos):
+    """
+    Saca de contabilidad los pares que se anulan entre sí (un pago y su
+    devolución): mismo tercero e importes exactamente opuestos. Esas
+    filas nunca van a tener contrapartida en tesorería porque la
+    operación se revirtió, así que ensucian el cruce y el listado de
+    faltantes.
+
+    No usa ventana de fechas: si el tercero es el mismo y los importes
+    son opuestos al peso, que la devolución haya salido dos semanas
+    después no la hace menos devolución. La fecha entra sólo como
+    criterio de prioridad -se arman todos los pares posibles y se toman
+    primero los más cercanos en el tiempo-, porque recorrer las filas en
+    orden de archivo hacía que un pago viejo se quedara con la
+    devolución de otro y dejara huérfano al par correcto del mismo día.
+
+    Devuelve (resto, neteos). Si el archivo no trae la columna de
+    tercero, no netea nada: sin tercero el criterio sería demasiado laxo.
+    """
+    if col_tercero not in unif.columns:
+        return unif.reset_index(drop=True), unif.iloc[0:0].reset_index(drop=True)
+
+    fechas = pd.to_datetime(unif[col_fecha]).dt.date
+    montos = unif[col_monto].astype(float).round(2)
+    terceros = unif[col_tercero].apply(_normalizar_texto)
+
+    candidatos = []
+    for i in unif.index:
+        if montos[i] >= 0 or terceros[i] == "":
+            continue
+        for j in unif.index:
+            if montos[j] <= 0 or terceros[j] != terceros[i]:
+                continue
+            if abs(montos[i] + montos[j]) <= tolerancia_pesos:
+                candidatos.append((abs((fechas[i] - fechas[j]).days), i, j))
+    candidatos.sort()
+
+    usados = set()
+    for _, i, j in candidatos:
+        if i in usados or j in usados:
+            continue
+        usados.update({i, j})
+
+    neteos = unif.loc[sorted(usados)].reset_index(drop=True)
+    resto = unif.drop(index=usados).reset_index(drop=True)
+    return resto, neteos
+
+
+# ─────────────────────────────────────────────
+# CLAVES DE AGRUPAMIENTO
+# ─────────────────────────────────────────────
+
+def _claves_por_tercero(df, col_tercero):
+    """Clave de agrupamiento = el tercero normalizado. Vacío = no agrupa."""
+    if col_tercero not in df.columns:
+        return pd.Series("", index=df.index)
+    return df[col_tercero].apply(_normalizar_texto)
+
+
+def _claves_por_similitud(df, col_detalle, score_minimo):
+    """
+    Agrupa las filas de un mismo lado por parecido de texto: dos detalles
+    caen en el mismo grupo si su versión normalizada (sin mayúsculas, sin
+    acentos, sin puntuación y sin espacios de más) llega al score mínimo.
+
+    Hace falta en tesorería, donde el mismo concepto se escribe distinto
+    de un día para otro ("Iron Driver" / "IronDriver"). El recorrido es
+    greedy: la primera fila de cada grupo le presta su texto como clave a
+    todas las que se le parecen.
+    """
+    textos = df[col_detalle].apply(_normalizar_texto)
+    claves = pd.Series("", index=df.index, dtype=object)
+
+    libres = [i for i in df.index if textos[i] != ""]
+    while libres:
+        cabeza = libres.pop(0)
+        claves[cabeza] = textos[cabeza]
+        for otro in list(libres):
+            if fuzz.token_sort_ratio(textos[cabeza], textos[otro]) >= score_minimo:
+                claves[otro] = textos[cabeza]
+                libres.remove(otro)
+    return claves
+
+
+def _clusters_por_fecha(sub, max_gap):
+    """
+    Parte un grupo en tramos donde el salto entre fechas consecutivas no
+    supera max_gap. Sin esto, agrupar por tercero sumaría movimientos de
+    meses distintos que no tienen nada que ver entre sí.
+    """
+    sub = sub.sort_values("_fecha_norm")
+    tramos, actual = [], []
+    for idx, fila in sub.iterrows():
+        if actual and (fila["_fecha_norm"] - sub.loc[actual[-1], "_fecha_norm"]).days > max_gap:
+            tramos.append(actual)
+            actual = []
+        actual.append(idx)
+    if actual:
+        tramos.append(actual)
+    return tramos
+
+
+# ─────────────────────────────────────────────
+# PASOS DE MATCH
+# ─────────────────────────────────────────────
+
+def _marcar(df, indices, id_match):
+    df.loc[indices, "_matched"] = True
+    df.loc[indices, "id"] = id_match
+
+
+def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
+                    tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+                    etiqueta=None, ignorar_fecha=False):
+    """
+    Cruza línea contra línea por monto (con tolerancia) y fecha (con
+    tolerancia_dias), eligiendo siempre el candidato más cercano en fecha
+    y después en importe.
+
+    Con `ignorar_fecha` la fecha deja de filtrar y queda sólo como
+    criterio de desempate: entre varios candidatos del mismo importe se
+    elige el más cercano en el tiempo, pero ninguno se descarta por
+    lejano. Es la última pasada de todas: cuando un movimiento ya no
+    cruzó por ningún otro camino, que el importe coincida exacto es
+    señal suficiente, y fijar una ventana de días sería arbitrario.
+
+    Si `etiqueta` viene dada, todos los matches se taggean con ese texto
+    (se usa en las pasadas finales, donde lo que importa es que el match
+    se revise, no el detalle de qué se relajó). Si no, se clasifica como
+    Exacto / Tolerancia Importe / Tolerancia Fecha / Tolerancia Importe
+    y Fecha, como siempre.
+    """
+    restante_michu = michu[~michu["_matched"]].copy()
+
+    for _, fila_u in unif[~unif["_matched"]].sort_values("_fecha_norm").iterrows():
+        if restante_michu.empty:
+            break
+
+        monto_u = fila_u["_monto_norm"]
+        fecha_u = fila_u["_fecha_norm"]
+        tol = _tolerancia_dinamica(monto_u, tolerancia_pesos, tolerancia_pct)
+
+        candidatos = restante_michu[(restante_michu["_monto_norm"] - monto_u).abs() <= tol]
+        if candidatos.empty:
+            continue
+
+        if not ignorar_fecha:
+            dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
+            candidatos = candidatos[dif_dias <= tolerancia_dias]
+            if candidatos.empty:
+                continue
+
+        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
+        dif_monto = (candidatos["_monto_norm"] - monto_u).abs()
+        orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
+            ["dif_dias", "dif_monto"]
+        )
+        fila_m = candidatos.loc[orden.index[0]]
+        id_michu_elegido = fila_m["_id"]
+
+        if etiqueta is not None:
+            tipo = etiqueta
+        else:
+            dm = round(abs(monto_u - fila_m["_monto_norm"]), 2)
+            dd = abs((fecha_u - fila_m["_fecha_norm"]).days)
+            if dm == 0 and dd == 0:
+                tipo = "Exacto"
+            elif dm > 0 and dd == 0:
+                tipo = "Tolerancia Importe"
+            elif dm == 0 and dd > 0:
+                tipo = "Tolerancia Fecha"
+            else:
+                tipo = "Tolerancia Importe y Fecha"
+
+        _marcar(unif, unif["_id"] == fila_u["_id"], contador)
+        _marcar(michu, michu["_id"] == id_michu_elegido, contador)
+        tipo_por_id[contador] = tipo
+        contador += 1
+
+        restante_michu = restante_michu[restante_michu["_id"] != id_michu_elegido]
+
+    return contador
+
+
+def _paso_suma_por_dia(origen, destino, tipo_por_id, contador,
+                       tolerancia_pesos, tolerancia_pct, tolerancia_dias):
+    """
+    Suma el remanente de `origen` de cada día y lo compara contra UNA
+    línea suelta de `destino`.
+
+    Sirve para los movimientos que un lado carga en una sola línea y el
+    otro registra desagregados en varios apuntes del mismo día. Se corre
+    en las dos direcciones, porque tanto tesorería puede abrir un gasto
+    que contabilidad consolidó, como contabilidad puede abrir en varios
+    apuntes un pago que tesorería anotó de una sola vez.
+
+    Es más barato y más explicable que buscar combinaciones: no explora
+    subconjuntos, toma el día entero. Por eso mismo depende de que el día
+    esté limpio, y de ahí que el cruce se repita después de las pasadas
+    flojas (ver `cruzar_caja`).
+    """
+    for dia, grupo in origen[~origen["_matched"]].groupby("_fecha_norm"):
+        if len(grupo) < 2:
+            continue
+
+        suma = round(grupo["_monto_norm"].sum(), 2)
+        tol = _tolerancia_dinamica(suma, tolerancia_pesos, tolerancia_pct)
+
+        candidatos = destino[(~destino["_matched"]) &
+                             ((destino["_monto_norm"] - suma).abs() <= tol)]
+        if candidatos.empty:
+            continue
+
+        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - dia).days))
+        candidatos = candidatos[dif_dias <= tolerancia_dias]
+        if candidatos.empty:
+            continue
+
+        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - dia).days))
+        dif_monto = (candidatos["_monto_norm"] - suma).abs()
+        orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
+            ["dif_dias", "dif_monto"]
+        )
+
+        _marcar(destino, [orden.index[0]], contador)
+        _marcar(origen, grupo.index, contador)
+        tipo_por_id[contador] = "Agrupado (Día)"
+        contador += 1
+
+    return contador
+
+
+
+def _paso_suma_por_clave(origen, destino, claves, etiqueta,
+                         tipo_por_id, contador,
+                         tolerancia_pesos, tolerancia_pct, tolerancia_dias):
+    """
+    Agrupa el remanente de `origen` por una clave (el tercero en
+    contabilidad, el detalle parecido en tesorería), suma cada grupo y
+    busca UNA línea suelta de `destino` que coincida con ese total.
+
+    Es el mismo mecanismo que la suma por día, con otra clave: sirve para
+    cuando un lado carga el movimiento consolidado y el otro lo tiene
+    abierto en varias líneas del mismo proveedor o concepto.
+
+    Cada grupo se parte además por cercanía de fechas (`tolerancia_dias`
+    de salto máximo entre líneas consecutivas). Sin ese corte, un tercero
+    con movimientos todos los meses sumaría el período entero.
+    """
+    restante = origen[~origen["_matched"]]
+
+    for clave, grupo in restante[claves.reindex(restante.index) != ""].groupby(
+        claves.reindex(restante.index)
+    ):
+        for tramo in _clusters_por_fecha(grupo, tolerancia_dias):
+            if len(tramo) < 2:
+                continue
+
+            suma = round(origen.loc[tramo, "_monto_norm"].sum(), 2)
+            tol = _tolerancia_dinamica(suma, tolerancia_pesos, tolerancia_pct)
+            fechas_tramo = origen.loc[tramo, "_fecha_norm"]
+
+            candidatos = destino[(~destino["_matched"]) &
+                                 ((destino["_monto_norm"] - suma).abs() <= tol)]
+            if candidatos.empty:
+                continue
+
+            dif_dias = candidatos["_fecha_norm"].apply(
+                lambda f: min(abs((f - g).days) for g in fechas_tramo)
+            )
+            candidatos = candidatos[dif_dias <= tolerancia_dias]
+            if candidatos.empty:
+                continue
+
+            dif_dias = candidatos["_fecha_norm"].apply(
+                lambda f: min(abs((f - g).days) for g in fechas_tramo)
+            )
+            dif_monto = (candidatos["_monto_norm"] - suma).abs()
+            orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
+                ["dif_dias", "dif_monto"]
+            )
+
+            _marcar(destino, [orden.index[0]], contador)
+            _marcar(origen, tramo, contador)
+            tipo_por_id[contador] = etiqueta
+            contador += 1
+
+    return contador
+
+
+def _armar_grupos(df, claves, tolerancia_dias):
+    """
+    Arma los grupos de un lado: agrupa el remanente por clave y parte cada
+    grupo por cercanía de fechas. Devuelve sólo los grupos de 2 o más
+    líneas, porque los de una sola ya los cubre el cruce uno a uno.
+    """
+    restante = df[~df["_matched"]]
+    claves_restante = claves.reindex(restante.index)
+
+    grupos = []
+    for clave, grupo in restante[claves_restante != ""].groupby(
+        claves_restante[claves_restante != ""]
+    ):
+        for tramo in _clusters_por_fecha(grupo, tolerancia_dias):
+            if len(tramo) >= 2:
+                grupos.append((clave, tramo))
+    return grupos
+
+
+def _paso_grupo_contra_grupo(unif, michu, claves_unif, claves_michu, etiqueta,
+                             tipo_por_id, contador,
+                             tolerancia_pesos, tolerancia_pct, tolerancia_dias):
+    """
+    Cruza un grupo contra otro grupo: contabilidad agrupada por tercero
+    contra tesorería agrupada por detalle parecido, comparando las sumas
+    de los dos lados.
+
+    Los pasos de suma por clave anteriores resuelven N contra 1 -varias
+    líneas de un lado contra una sola del otro-. Este resuelve N contra
+    M: el caso en que los DOS lados tienen el movimiento abierto, pero
+    abierto distinto (contabilidad en tres pagos al mismo proveedor,
+    tesorería en cinco entregas del mismo concepto). Por eso exige 2 o
+    más líneas de cada lado: lo de una sola línea ya pasó por los pasos
+    anteriores.
+
+    Como cada grupo ya viene acotado por fecha, para cruzarlos alcanza
+    con que alguna fecha de un lado caiga a tolerancia_dias de alguna del
+    otro.
+    """
+    grupos_unif = _armar_grupos(unif, claves_unif, tolerancia_dias)
+    grupos_michu = _armar_grupos(michu, claves_michu, tolerancia_dias)
+
+    for _, tramo_u in grupos_unif:
+        if unif.loc[tramo_u, "_matched"].any():
+            continue
+
+        suma_u = round(unif.loc[tramo_u, "_monto_norm"].sum(), 2)
+        tol = _tolerancia_dinamica(suma_u, tolerancia_pesos, tolerancia_pct)
+        fechas_u = unif.loc[tramo_u, "_fecha_norm"]
+
+        for _, tramo_m in grupos_michu:
+            if michu.loc[tramo_m, "_matched"].any():
+                continue
+
+            suma_m = round(michu.loc[tramo_m, "_monto_norm"].sum(), 2)
+            if abs(suma_u - suma_m) > tol:
+                continue
+
+            fechas_m = michu.loc[tramo_m, "_fecha_norm"]
+            cerca = min(abs((fu - fm).days) for fu in fechas_u for fm in fechas_m)
+            if cerca > tolerancia_dias:
+                continue
+
+            _marcar(unif, tramo_u, contador)
+            _marcar(michu, tramo_m, contador)
+            tipo_por_id[contador] = etiqueta
+            contador += 1
+            break
+
+    return contador
+
+
+def _paso_combinaciones(unif, michu, tipo_por_id, contador,
+                        tolerancia_pesos, tolerancia_pct,
+                        max_combinacion, ventana_dias_combinacion):
+    """
+    Para lo que sigue sin matchear, busca si VARIAS líneas de un lado
+    (hasta max_combinacion) suman el monto de UNA línea del otro lado,
+    dentro de ventana_dias_combinacion días. Se corre en las dos
+    direcciones. Es greedy y más propenso a falsos positivos que los
+    pasos anteriores, por eso queda taggeado aparte.
+    """
+    for ancla, pool in ((unif, michu), (michu, unif)):
+        for _, fila in ancla[~ancla["_matched"]].sort_values("_fecha_norm").iterrows():
+            if ancla.loc[ancla["_id"] == fila["_id"], "_matched"].iloc[0]:
+                continue
+
+            combo_idx = _buscar_combinacion(
+                fila["_monto_norm"], fila["_fecha_norm"], pool[~pool["_matched"]],
+                max_combinacion, ventana_dias_combinacion,
+                tolerancia_pesos, tolerancia_pct,
+            )
+            if combo_idx is None:
+                continue
+
+            _marcar(ancla, ancla["_id"] == fila["_id"], contador)
+            _marcar(pool, combo_idx, contador)
+            tipo_por_id[contador] = "Agrupado (Combinación)"
+            contador += 1
+
+    return contador
+
+
+def _armar_revisar(falta_unif, falta_michu, col_fecha, col_monto,
+                   col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
+                   score_revisar, tolerancia_dias):
+    """
+    Entre lo que quedó en falta, busca los pares donde el NOMBRE coincide
+    de los dos lados y la fecha también, pero el importe no.
+
+    No son matches y tampoco son faltantes: son diferencias concretas
+    contra una contraparte identificada, y mezcladas en el listado de
+    faltantes se pierden de vista. Van a su propia salida, con la
+    diferencia calculada, y salen de falta.
+
+    Puntúa con WRatio y no con token_sort_ratio: acá se compara la razón
+    social del sistema contra el nombre corto que escribe tesorería
+    ("GONZALEZ GUAIA ALEJANDRO" vs "Gonzalez Guaia"), y token_sort_ratio
+    castiga los tokens de más. El umbral es más bajo que el de
+    agrupamiento a propósito: un falso positivo acá sólo cuesta que
+    alguien mire una fila de más, mientras que un falso negativo esconde
+    una diferencia real entre dos partidas identificadas.
+
+    Devuelve (falta_unif, falta_michu, revisar) ya depurados.
+    """
+    columnas = ["Fecha Contabilidad", "Tercero", "Comentario", "Monto Contabilidad",
+                "Fecha Tesorería", "Detalle", "Monto Tesorería", "Diferencia",
+                "Score Nombre", "Días"]
+    if falta_unif.empty or falta_michu.empty:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    fechas_u = pd.to_datetime(falta_unif[col_fecha]).dt.date
+    fechas_m = pd.to_datetime(falta_michu[col_fecha]).dt.date
+
+    def nombre_contable(fila):
+        # El tercero es la mejor identificación; si viene vacío, el
+        # comentario a veces trae el nombre escrito a mano.
+        if col_tercero_unificada in falta_unif.columns:
+            tercero = _normalizar_texto(fila[col_tercero_unificada])
+            if tercero:
+                return tercero
+        return _normalizar_texto(fila[col_detalle_unificada])
+
+    candidatos = []
+    for i, fila_u in falta_unif.iterrows():
+        nombre_u = nombre_contable(fila_u)
+        if not nombre_u:
+            continue
+        for j, fila_m in falta_michu.iterrows():
+            nombre_m = _normalizar_texto(fila_m[col_detalle_michu])
+            if not nombre_m:
+                continue
+            dias = abs((fechas_u[i] - fechas_m[j]).days)
+            if dias > tolerancia_dias:
+                continue
+            score = fuzz.WRatio(nombre_u, nombre_m)
+            if score < score_revisar:
+                continue
+            candidatos.append((-score, dias, i, j))
+
+    candidatos.sort()
+    usados_u, usados_m, filas = set(), set(), []
+    for score_neg, dias, i, j in candidatos:
+        if i in usados_u or j in usados_m:
+            continue
+        usados_u.add(i)
+        usados_m.add(j)
+        fila_u, fila_m = falta_unif.loc[i], falta_michu.loc[j]
+        filas.append({
+            "Fecha Contabilidad": fila_u[col_fecha],
+            "Tercero": fila_u.get(col_tercero_unificada),
+            "Comentario": fila_u[col_detalle_unificada],
+            "Monto Contabilidad": fila_u[col_monto],
+            "Fecha Tesorería": fila_m[col_fecha],
+            "Detalle": fila_m[col_detalle_michu],
+            "Monto Tesorería": fila_m[col_monto],
+            "Diferencia": round(fila_u[col_monto] - fila_m[col_monto], 2),
+            "Score Nombre": -score_neg,
+            "Días": dias,
+        })
+
+    revisar = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=usados_u).reset_index(drop=True),
+            falta_michu.drop(index=usados_m).reset_index(drop=True),
+            revisar)
+
+
 def cruzar_caja(
     df_caja_unificada,
     df_caja_michu,
@@ -242,47 +744,84 @@ def cruzar_caja(
     col_monto="Monto",
     col_detalle_unificada="Comentario",
     col_detalle_michu="Detalle",
+    col_tercero_unificada="TERCERO",
     tolerancia_pesos=5,
     tolerancia_pct=0.001,
+    tolerancia_pct_amplia=0.05,
     tolerancia_dias=3,
     max_combinacion=4,
     ventana_dias_combinacion=5,
+    score_similitud=80,
+    score_revisar=75,
 ):
     """
     Cruza df_caja_unificada (sistema) contra df_caja_michu (tesorería).
 
-    PASO 1 - Ingresos agrupados: suma de "ingreso" (tesorería) vs "ingreso
-    efectivo" (sistema).
-    PASO 2 - Agrupamiento por nombre: filas cuyo detalle no dice "pago",
-    "devolucion" ni "ingreso" se agrupan por nombre normalizado y se
-    cruzan sus sumas.
-    PASO 3 - Uno a uno: por Monto (con tolerancia) + Fecha (con
-    tolerancia_dias).
-    PASO 4 - Combinaciones: varias líneas de un lado (hasta
-    max_combinacion) que suman el monto de una línea del otro lado,
-    dentro de una ventana de ventana_dias_combinacion días. Es greedy y
-    más propenso a falsos positivos, por eso queda taggeado aparte como
-    "Agrupado (Combinación)".
+    SEPARACIONES PREVIAS (no participan del cruce, van a su propia salida)
+      - Comisiones: sólo existen en tesorería.
+      - Diferencia de arqueo: es el descuadre del conteo diario, nunca
+        tiene contrapartida contable.
+      - Neteos: pares pago/devolución del mismo tercero dentro de
+        contabilidad, que se anulan entre sí, sin ventana de fechas.
+
+    PASOS FIJOS
+      1. Ingresos agrupados por mes: suma de "ingreso" (tesorería) vs
+         "ingreso efectivo" (sistema).
+      2. Agrupamiento por nombre: filas cuyo detalle no dice "pago",
+         "devolucion" ni "ingreso" se agrupan por nombre normalizado de
+         cada lado y se cruzan sus sumas.
+      3. Uno a uno por monto + fecha, con la tolerancia estricta.
+
+    CICLO (se repite hasta que una vuelta completa no agregue nada)
+      4. Suma por día, en las dos direcciones: el remanente de un lado
+         agrupado por fecha contra una línea suelta del otro.
+      5. Suma por tercero del remanente de contabilidad vs una línea
+         suelta de tesorería.
+      6. Suma por detalle parecido (score_similitud) del remanente de
+         tesorería vs una línea suelta del sistema.
+      7. Grupo contra grupo: contabilidad agrupada por tercero contra
+         tesorería agrupada por detalle parecido, comparando las dos
+         sumas (los pasos 5 y 6 resuelven N contra 1; éste, N contra M).
+      8. Combinaciones: varias líneas de un lado suman una del otro.
+      9. Uno a uno con tolerancia de importe ampliada, dentro de la
+         ventana de fechas -> "Diferencia de Importe".
+     10. Uno a uno por importe, ya SIN ventana de fechas: la fecha queda
+         sólo como desempate entre candidatos del mismo importe ->
+         "Coincidencia de Importe".
+
+    Los pasos 5 y 6 parten cada grupo por cercanía de fechas, para no
+    sumar movimientos de meses distintos del mismo tercero o concepto.
+
+    El orden importa: los pasos que exigen coincidencia exacta corren
+    antes que el que afloja la tolerancia, para que un match flojo no se
+    robe una línea que pertenecía a un grupo que cerraba exacto. Pero el
+    paso 4 a veces sólo puede ver su grupo después de que el paso 6 se
+    llevó una línea ajena que caía el mismo día, así que en vez de elegir
+    un orden se itera hasta que la cosa se estabiliza.
+
+    SALIDA
+      Los faltantes se depuran al final: los pares donde el nombre
+      coincide de los dos lados y la fecha también, pero el importe no,
+      salen de falta y van a "revisar".
 
     Returns
     -------
     dict con match_caja_unificada, match_tesoreria, falta_unificada,
-    falta_tesoreria, comisiones y warnings (lista de strings con
-    inconsistencias detectadas, ej. ingresos que no cuadran).
+    falta_tesoreria, comisiones, diferencia_arqueo, neteos, revisar y
+    warnings.
     """
 
     unif = df_caja_unificada.copy().reset_index(drop=True)
     michu = df_caja_michu.copy().reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # Comisiones: se sacan de tesorería antes de cruzar y van aparte,
-    # sin participar del match.
+    # Separaciones previas
     # ------------------------------------------------------------------
-    mask_comision = michu[col_detalle_michu].apply(
-        lambda t: "comision" in _normalizar_texto(t)
+    michu, comisiones = _separar_por_texto(michu, col_detalle_michu, "comision")
+    michu, diferencia_arqueo = _separar_por_texto(michu, col_detalle_michu, "diferencia arqueo")
+    unif, neteos = _separar_neteos(
+        unif, col_fecha, col_monto, col_tercero_unificada, tolerancia_pesos,
     )
-    comisiones = michu[mask_comision].reset_index(drop=True)
-    michu = michu[~mask_comision].reset_index(drop=True)
 
     unif["_id"] = unif.index
     michu["_id"] = michu.index
@@ -297,7 +836,10 @@ def cruzar_caja(
     unif["_monto_norm"] = unif[col_monto].astype(float).round(2)
     michu["_monto_norm"] = michu[col_monto].astype(float).round(2)
 
-    match_id_counter = 1
+    claves_tercero = _claves_por_tercero(unif, col_tercero_unificada)
+    claves_detalle = _claves_por_similitud(michu, col_detalle_michu, score_similitud)
+
+    contador = 1
     tipo_por_id = {}
     warnings = []
 
@@ -347,18 +889,29 @@ def cruzar_caja(
         if len(grupo_michu) > 0 and len(grupo_unif) > 0:
             tol = _tolerancia_dinamica(max(abs(suma_michu), abs(suma_unif)), tolerancia_pesos, tolerancia_pct)
             if abs(suma_michu - suma_unif) <= tol:
-                michu.loc[grupo_michu.index, "_matched"] = True
-                michu.loc[grupo_michu.index, "id"] = match_id_counter
-                unif.loc[grupo_unif.index, "_matched"] = True
-                unif.loc[grupo_unif.index, "id"] = match_id_counter
-                tipo_por_id[match_id_counter] = "Agrupado (Ingreso)"
-                match_id_counter += 1
+                _marcar(michu, grupo_michu.index, contador)
+                _marcar(unif, grupo_unif.index, contador)
+                tipo_por_id[contador] = "Agrupado (Ingreso)"
+                contador += 1
             else:
                 warnings.append(
                     f"Ingresos no cuadran en {mes[0]}-{mes[1]:02d}: tesorería suma {suma_michu:.2f} vs "
                     f"sistema 'Ingreso efectivo' suma {suma_unif:.2f} (diferencia "
                     f"{suma_michu - suma_unif:.2f}, tolerancia {tol:.2f}). No se marcaron como matcheados."
                 )
+        elif len(grupo_michu) > 0:
+            warnings.append(
+                f"Ingresos sin contrapartida en {mes[0]}-{mes[1]:02d}: tesorería tiene "
+                f"{len(grupo_michu)} línea(s) de ingreso por {suma_michu:.2f} y el sistema no trae "
+                "ninguna línea 'Ingreso efectivo' ese mes. Puede faltar una cuenta en la "
+                "exportación del mayor."
+            )
+        elif len(grupo_unif) > 0:
+            warnings.append(
+                f"Ingresos sin contrapartida en {mes[0]}-{mes[1]:02d}: el sistema trae "
+                f"{len(grupo_unif)} línea(s) de 'Ingreso efectivo' por {suma_unif:.2f} y tesorería "
+                "no registra ingresos ese mes."
+            )
 
     # ------------------------------------------------------------------
     # PASO 2: agrupamiento por nombre, en ambos lados
@@ -394,105 +947,67 @@ def cruzar_caja(
         if rango_dias > tolerancia_dias:
             continue
 
-        unif.loc[grupo_u.index, "_matched"] = True
-        unif.loc[grupo_u.index, "id"] = match_id_counter
-        michu.loc[grupo_m.index, "_matched"] = True
-        michu.loc[grupo_m.index, "id"] = match_id_counter
-        tipo_por_id[match_id_counter] = "Agrupado (Nombre)"
-        match_id_counter += 1
+        _marcar(unif, grupo_u.index, contador)
+        _marcar(michu, grupo_m.index, contador)
+        tipo_por_id[contador] = "Agrupado (Nombre)"
+        contador += 1
 
     # ------------------------------------------------------------------
-    # PASO 3: resto de conceptos, uno a uno por Monto (con tolerancia) +
-    #         Fecha (con tolerancia_dias)
+    # PASO 3: uno a uno con la tolerancia estricta
     # ------------------------------------------------------------------
-    restante_unif = unif[~unif["_matched"]].sort_values("_fecha_norm")
-    restante_michu = michu[~michu["_matched"]].copy()
+    contador = _paso_uno_a_uno(
+        unif, michu, tipo_por_id, contador,
+        tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+    )
 
-    for _, fila_u in restante_unif.iterrows():
-        if restante_michu.empty:
+    # ------------------------------------------------------------------
+    # PASOS 4 a 10, en ciclo hasta estabilizar
+    # ------------------------------------------------------------------
+    while True:
+        antes = contador
+
+        contador = _paso_suma_por_dia(
+            michu, unif, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_suma_por_dia(
+            unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_suma_por_clave(
+            unif, michu, claves_tercero, "Agrupado (Tercero)",
+            tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_suma_por_clave(
+            michu, unif, claves_detalle, "Agrupado (Detalle)",
+            tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_grupo_contra_grupo(
+            unif, michu, claves_tercero, claves_detalle,
+            "Agrupado (Tercero vs Detalle)",
+            tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_combinaciones(
+            unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct,
+            max_combinacion, ventana_dias_combinacion,
+        )
+        contador = _paso_uno_a_uno(
+            unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct_amplia, tolerancia_dias,
+            etiqueta="Diferencia de Importe",
+        )
+        contador = _paso_uno_a_uno(
+            unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+            etiqueta="Coincidencia de Importe", ignorar_fecha=True,
+        )
+
+        if contador == antes:
             break
-
-        monto_u = fila_u["_monto_norm"]
-        fecha_u = fila_u["_fecha_norm"]
-        tol = _tolerancia_dinamica(monto_u, tolerancia_pesos, tolerancia_pct)
-
-        candidatos = restante_michu[(restante_michu["_monto_norm"] - monto_u).abs() <= tol]
-        if candidatos.empty:
-            continue
-
-        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
-        candidatos = candidatos[dif_dias <= tolerancia_dias]
-        if candidatos.empty:
-            continue
-
-        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
-        dif_monto = (candidatos["_monto_norm"] - monto_u).abs()
-        orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
-            ["dif_dias", "dif_monto"]
-        )
-        fila_m = candidatos.loc[orden.index[0]]
-        id_michu_elegido = fila_m["_id"]
-
-        dm = round(abs(monto_u - fila_m["_monto_norm"]), 2)
-        dd = abs((fecha_u - fila_m["_fecha_norm"]).days)
-        if dm == 0 and dd == 0:
-            tipo = "Exacto"
-        elif dm > 0 and dd == 0:
-            tipo = "Tolerancia Importe"
-        elif dm == 0 and dd > 0:
-            tipo = "Tolerancia Fecha"
-        else:
-            tipo = "Tolerancia Importe y Fecha"
-
-        unif.loc[unif["_id"] == fila_u["_id"], "_matched"] = True
-        unif.loc[unif["_id"] == fila_u["_id"], "id"] = match_id_counter
-        michu.loc[michu["_id"] == id_michu_elegido, "_matched"] = True
-        michu.loc[michu["_id"] == id_michu_elegido, "id"] = match_id_counter
-        tipo_por_id[match_id_counter] = tipo
-        match_id_counter += 1
-
-        restante_michu = restante_michu[restante_michu["_id"] != id_michu_elegido]
-
-    # ------------------------------------------------------------------
-    # PASO 4: combinaciones (una línea de un lado = varias del otro)
-    # ------------------------------------------------------------------
-    restante_unif = unif[~unif["_matched"]].sort_values("_fecha_norm")
-    for _, fila_u in restante_unif.iterrows():
-        if unif.loc[unif["_id"] == fila_u["_id"], "_matched"].iloc[0]:
-            continue
-        pool_michu = michu[~michu["_matched"]]
-        combo_idx = _buscar_combinacion(
-            fila_u["_monto_norm"], fila_u["_fecha_norm"], pool_michu,
-            max_combinacion, ventana_dias_combinacion, tolerancia_pesos, tolerancia_pct,
-        )
-        if combo_idx is None:
-            continue
-
-        unif.loc[unif["_id"] == fila_u["_id"], "_matched"] = True
-        unif.loc[unif["_id"] == fila_u["_id"], "id"] = match_id_counter
-        michu.loc[combo_idx, "_matched"] = True
-        michu.loc[combo_idx, "id"] = match_id_counter
-        tipo_por_id[match_id_counter] = "Agrupado (Combinación)"
-        match_id_counter += 1
-
-    restante_michu = michu[~michu["_matched"]].sort_values("_fecha_norm")
-    for _, fila_m in restante_michu.iterrows():
-        if michu.loc[michu["_id"] == fila_m["_id"], "_matched"].iloc[0]:
-            continue
-        pool_unif = unif[~unif["_matched"]]
-        combo_idx = _buscar_combinacion(
-            fila_m["_monto_norm"], fila_m["_fecha_norm"], pool_unif,
-            max_combinacion, ventana_dias_combinacion, tolerancia_pesos, tolerancia_pct,
-        )
-        if combo_idx is None:
-            continue
-
-        michu.loc[michu["_id"] == fila_m["_id"], "_matched"] = True
-        michu.loc[michu["_id"] == fila_m["_id"], "id"] = match_id_counter
-        unif.loc[combo_idx, "_matched"] = True
-        unif.loc[combo_idx, "id"] = match_id_counter
-        tipo_por_id[match_id_counter] = "Agrupado (Combinación)"
-        match_id_counter += 1
 
     unif["Tipo Match"] = unif["id"].map(tipo_por_id)
     michu["Tipo Match"] = michu["id"].map(tipo_por_id)
@@ -500,13 +1015,19 @@ def cruzar_caja(
     # ------------------------------------------------------------------
     # Armar resultados finales
     # ------------------------------------------------------------------
-    cols_out_unif = list(df_caja_unificada.columns) + ["id", "Tipo Match"]
-    cols_out_michu = list(df_caja_michu.columns) + ["id", "Tipo Match"]
+    cols_unif = list(df_caja_unificada.columns)
+    cols_michu = list(df_caja_michu.columns)
 
-    match_caja_unificada = unif[unif["_matched"]][cols_out_unif].sort_values("id").reset_index(drop=True)
-    match_tesoreria = michu[michu["_matched"]][cols_out_michu].sort_values("id").reset_index(drop=True)
-    falta_unificada = unif[~unif["_matched"]][list(df_caja_unificada.columns) + ["id"]].reset_index(drop=True)
-    falta_tesoreria = michu[~michu["_matched"]][list(df_caja_michu.columns) + ["id"]].reset_index(drop=True)
+    match_caja_unificada = unif[unif["_matched"]][cols_unif + ["id", "Tipo Match"]].sort_values("id").reset_index(drop=True)
+    match_tesoreria = michu[michu["_matched"]][cols_michu + ["id", "Tipo Match"]].sort_values("id").reset_index(drop=True)
+    falta_unificada = unif[~unif["_matched"]][cols_unif + ["id"]].reset_index(drop=True)
+    falta_tesoreria = michu[~michu["_matched"]][cols_michu + ["id"]].reset_index(drop=True)
+
+    falta_unificada, falta_tesoreria, revisar = _armar_revisar(
+        falta_unificada, falta_tesoreria, col_fecha, col_monto,
+        col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
+        score_revisar, tolerancia_dias,
+    )
 
     return {
         "match_caja_unificada": match_caja_unificada,
@@ -514,6 +1035,9 @@ def cruzar_caja(
         "falta_unificada": falta_unificada,
         "falta_tesoreria": falta_tesoreria,
         "comisiones": comisiones,
+        "diferencia_arqueo": diferencia_arqueo,
+        "neteos": neteos,
+        "revisar": revisar,
         "warnings": warnings,
     }
 
@@ -524,7 +1048,8 @@ def cruzar_caja(
 
 def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
                                         falta_unificada, falta_tesoreria,
-                                        comisiones) -> bytes:
+                                        comisiones, diferencia_arqueo=None,
+                                        neteos=None, revisar=None) -> bytes:
     """
     Exporta los DataFrames del cruce a un Excel en memoria, con:
       - columnas float con formato numérico (separador de miles, 2 decimales)
@@ -540,6 +1065,12 @@ def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
         "Falta Tesoreria": falta_tesoreria,
         "Comisiones": comisiones,
     }
+    if diferencia_arqueo is not None:
+        hojas["Diferencia Arqueo"] = diferencia_arqueo
+    if neteos is not None:
+        hojas["Neteos Contabilidad"] = neteos
+    if revisar is not None:
+        hojas["Revisar"] = revisar
 
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for nombre, df in hojas.items():
@@ -583,6 +1114,7 @@ def correr_conciliacion_tesoreria(
     col_detalle_unificada="Comentario",
     tolerancia_pesos=5,
     tolerancia_pct=0.001,
+    tolerancia_pct_amplia=0.05,
     tolerancia_dias=3,
 ):
     """
@@ -602,6 +1134,7 @@ def correr_conciliacion_tesoreria(
         col_detalle_michu="Detalle",
         tolerancia_pesos=tolerancia_pesos,
         tolerancia_pct=tolerancia_pct,
+        tolerancia_pct_amplia=tolerancia_pct_amplia,
         tolerancia_dias=tolerancia_dias,
     )
 
@@ -611,6 +1144,9 @@ def correr_conciliacion_tesoreria(
         resultado["falta_unificada"],
         resultado["falta_tesoreria"],
         resultado["comisiones"],
+        resultado["diferencia_arqueo"],
+        resultado["neteos"],
+        resultado["revisar"],
     )
 
     stats = {
@@ -618,6 +1154,9 @@ def correr_conciliacion_tesoreria(
         "falta_contabilidad": len(resultado["falta_unificada"]),
         "falta_tesoreria": len(resultado["falta_tesoreria"]),
         "comisiones": len(resultado["comisiones"]),
+        "diferencia_arqueo": len(resultado["diferencia_arqueo"]),
+        "neteos": len(resultado["neteos"]),
+        "revisar": len(resultado["revisar"]),
         "warnings": resultado["warnings"],
     }
 

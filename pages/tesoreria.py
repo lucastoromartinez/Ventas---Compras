@@ -197,6 +197,27 @@ if "resultado_tesoreria" in st.session_state:
     </div>
     """, unsafe_allow_html=True)
 
+    st.markdown(f"""
+    <div class="metric-row">
+        <div class="metric-card">
+            <div class="metric-value">{s['comisiones']}</div>
+            <div class="metric-label">Comisiones</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{s['diferencia_arqueo']}</div>
+            <div class="metric-label">Diferencia arqueo</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{s['neteos']}</div>
+            <div class="metric-label">Neteos contabilidad</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{s['revisar']}</div>
+            <div class="metric-label">A revisar</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         label="📥 Descargar reporte Tesorería",
