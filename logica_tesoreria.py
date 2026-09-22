@@ -361,17 +361,24 @@ def _marcar(df, indices, id_match):
 
 def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
                     tolerancia_pesos, tolerancia_pct, tolerancia_dias,
-                    etiqueta=None):
+                    etiqueta=None, ignorar_fecha=False):
     """
     Cruza línea contra línea por monto (con tolerancia) y fecha (con
     tolerancia_dias), eligiendo siempre el candidato más cercano en fecha
     y después en importe.
 
+    Con `ignorar_fecha` la fecha deja de filtrar y queda sólo como
+    criterio de desempate: entre varios candidatos del mismo importe se
+    elige el más cercano en el tiempo, pero ninguno se descarta por
+    lejano. Es la última pasada de todas: cuando un movimiento ya no
+    cruzó por ningún otro camino, que el importe coincida exacto es
+    señal suficiente, y fijar una ventana de días sería arbitrario.
+
     Si `etiqueta` viene dada, todos los matches se taggean con ese texto
-    (se usa en la pasada final de tolerancia ampliada, donde lo que
-    importa es que el match se revise, no el detalle de qué se relajó).
-    Si no, se clasifica como Exacto / Tolerancia Importe / Tolerancia
-    Fecha / Tolerancia Importe y Fecha, como siempre.
+    (se usa en las pasadas finales, donde lo que importa es que el match
+    se revise, no el detalle de qué se relajó). Si no, se clasifica como
+    Exacto / Tolerancia Importe / Tolerancia Fecha / Tolerancia Importe
+    y Fecha, como siempre.
     """
     restante_michu = michu[~michu["_matched"]].copy()
 
@@ -387,10 +394,11 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
         if candidatos.empty:
             continue
 
-        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
-        candidatos = candidatos[dif_dias <= tolerancia_dias]
-        if candidatos.empty:
-            continue
+        if not ignorar_fecha:
+            dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
+            candidatos = candidatos[dif_dias <= tolerancia_dias]
+            if candidatos.empty:
+                continue
 
         dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
         dif_monto = (candidatos["_monto_norm"] - monto_u).abs()
@@ -601,7 +609,11 @@ def cruzar_caja(
       6. Suma por detalle parecido (score_similitud) del remanente de
          tesorería vs una línea suelta del sistema.
       7. Combinaciones: varias líneas de un lado suman una del otro.
-      8. Uno a uno con tolerancia ampliada -> "Diferencia de Importe".
+      8. Uno a uno con tolerancia de importe ampliada, dentro de la
+         ventana de fechas -> "Diferencia de Importe".
+      9. Uno a uno por importe, ya SIN ventana de fechas: la fecha queda
+         sólo como desempate entre candidatos del mismo importe ->
+         "Coincidencia de Importe".
 
     Los pasos 5 y 6 parten cada grupo por cercanía de fechas, para no
     sumar movimientos de meses distintos del mismo tercero o concepto.
@@ -708,6 +720,19 @@ def cruzar_caja(
                     f"sistema 'Ingreso efectivo' suma {suma_unif:.2f} (diferencia "
                     f"{suma_michu - suma_unif:.2f}, tolerancia {tol:.2f}). No se marcaron como matcheados."
                 )
+        elif len(grupo_michu) > 0:
+            warnings.append(
+                f"Ingresos sin contrapartida en {mes[0]}-{mes[1]:02d}: tesorería tiene "
+                f"{len(grupo_michu)} línea(s) de ingreso por {suma_michu:.2f} y el sistema no trae "
+                "ninguna línea 'Ingreso efectivo' ese mes. Puede faltar una cuenta en la "
+                "exportación del mayor."
+            )
+        elif len(grupo_unif) > 0:
+            warnings.append(
+                f"Ingresos sin contrapartida en {mes[0]}-{mes[1]:02d}: el sistema trae "
+                f"{len(grupo_unif)} línea(s) de 'Ingreso efectivo' por {suma_unif:.2f} y tesorería "
+                "no registra ingresos ese mes."
+            )
 
     # ------------------------------------------------------------------
     # PASO 2: agrupamiento por nombre, en ambos lados
@@ -757,7 +782,7 @@ def cruzar_caja(
     )
 
     # ------------------------------------------------------------------
-    # PASOS 4 a 8, en ciclo hasta estabilizar
+    # PASOS 4 a 9, en ciclo hasta estabilizar
     # ------------------------------------------------------------------
     while True:
         antes = contador
@@ -785,6 +810,11 @@ def cruzar_caja(
             unif, michu, tipo_por_id, contador,
             tolerancia_pesos, tolerancia_pct_amplia, tolerancia_dias,
             etiqueta="Diferencia de Importe",
+        )
+        contador = _paso_uno_a_uno(
+            unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+            etiqueta="Coincidencia de Importe", ignorar_fecha=True,
         )
 
         if contador == antes:
