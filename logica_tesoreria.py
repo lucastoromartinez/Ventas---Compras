@@ -27,6 +27,7 @@ from itertools import combinations
 
 import openpyxl
 import pandas as pd
+from rapidfuzz import fuzz
 from openpyxl.utils import get_column_letter
 
 
@@ -296,6 +297,60 @@ def _separar_neteos(unif, col_fecha, col_monto, col_tercero,
 
 
 # ─────────────────────────────────────────────
+# CLAVES DE AGRUPAMIENTO
+# ─────────────────────────────────────────────
+
+def _claves_por_tercero(df, col_tercero):
+    """Clave de agrupamiento = el tercero normalizado. Vacío = no agrupa."""
+    if col_tercero not in df.columns:
+        return pd.Series("", index=df.index)
+    return df[col_tercero].apply(_normalizar_texto)
+
+
+def _claves_por_similitud(df, col_detalle, score_minimo):
+    """
+    Agrupa las filas de un mismo lado por parecido de texto: dos detalles
+    caen en el mismo grupo si su versión normalizada (sin mayúsculas, sin
+    acentos, sin puntuación y sin espacios de más) llega al score mínimo.
+
+    Hace falta en tesorería, donde el mismo concepto se escribe distinto
+    de un día para otro ("Iron Driver" / "IronDriver"). El recorrido es
+    greedy: la primera fila de cada grupo le presta su texto como clave a
+    todas las que se le parecen.
+    """
+    textos = df[col_detalle].apply(_normalizar_texto)
+    claves = pd.Series("", index=df.index, dtype=object)
+
+    libres = [i for i in df.index if textos[i] != ""]
+    while libres:
+        cabeza = libres.pop(0)
+        claves[cabeza] = textos[cabeza]
+        for otro in list(libres):
+            if fuzz.token_sort_ratio(textos[cabeza], textos[otro]) >= score_minimo:
+                claves[otro] = textos[cabeza]
+                libres.remove(otro)
+    return claves
+
+
+def _clusters_por_fecha(sub, max_gap):
+    """
+    Parte un grupo en tramos donde el salto entre fechas consecutivas no
+    supera max_gap. Sin esto, agrupar por tercero sumaría movimientos de
+    meses distintos que no tienen nada que ver entre sí.
+    """
+    sub = sub.sort_values("_fecha_norm")
+    tramos, actual = [], []
+    for idx, fila in sub.iterrows():
+        if actual and (fila["_fecha_norm"] - sub.loc[actual[-1], "_fecha_norm"]).days > max_gap:
+            tramos.append(actual)
+            actual = []
+        actual.append(idx)
+    if actual:
+        tramos.append(actual)
+    return tramos
+
+
+# ─────────────────────────────────────────────
 # PASOS DE MATCH
 # ─────────────────────────────────────────────
 
@@ -416,6 +471,63 @@ def _paso_suma_por_dia(unif, michu, tipo_por_id, contador,
     return contador
 
 
+def _paso_suma_por_clave(origen, destino, claves, etiqueta,
+                         tipo_por_id, contador,
+                         tolerancia_pesos, tolerancia_pct, tolerancia_dias):
+    """
+    Agrupa el remanente de `origen` por una clave (el tercero en
+    contabilidad, el detalle parecido en tesorería), suma cada grupo y
+    busca UNA línea suelta de `destino` que coincida con ese total.
+
+    Es el mismo mecanismo que la suma por día, con otra clave: sirve para
+    cuando un lado carga el movimiento consolidado y el otro lo tiene
+    abierto en varias líneas del mismo proveedor o concepto.
+
+    Cada grupo se parte además por cercanía de fechas (`tolerancia_dias`
+    de salto máximo entre líneas consecutivas). Sin ese corte, un tercero
+    con movimientos todos los meses sumaría el período entero.
+    """
+    restante = origen[~origen["_matched"]]
+
+    for clave, grupo in restante[claves.reindex(restante.index) != ""].groupby(
+        claves.reindex(restante.index)
+    ):
+        for tramo in _clusters_por_fecha(grupo, tolerancia_dias):
+            if len(tramo) < 2:
+                continue
+
+            suma = round(origen.loc[tramo, "_monto_norm"].sum(), 2)
+            tol = _tolerancia_dinamica(suma, tolerancia_pesos, tolerancia_pct)
+            fechas_tramo = origen.loc[tramo, "_fecha_norm"]
+
+            candidatos = destino[(~destino["_matched"]) &
+                                 ((destino["_monto_norm"] - suma).abs() <= tol)]
+            if candidatos.empty:
+                continue
+
+            dif_dias = candidatos["_fecha_norm"].apply(
+                lambda f: min(abs((f - g).days) for g in fechas_tramo)
+            )
+            candidatos = candidatos[dif_dias <= tolerancia_dias]
+            if candidatos.empty:
+                continue
+
+            dif_dias = candidatos["_fecha_norm"].apply(
+                lambda f: min(abs((f - g).days) for g in fechas_tramo)
+            )
+            dif_monto = (candidatos["_monto_norm"] - suma).abs()
+            orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
+                ["dif_dias", "dif_monto"]
+            )
+
+            _marcar(destino, [orden.index[0]], contador)
+            _marcar(origen, tramo, contador)
+            tipo_por_id[contador] = etiqueta
+            contador += 1
+
+    return contador
+
+
 def _paso_combinaciones(unif, michu, tipo_por_id, contador,
                         tolerancia_pesos, tolerancia_pct,
                         max_combinacion, ventana_dias_combinacion):
@@ -461,6 +573,7 @@ def cruzar_caja(
     tolerancia_dias=3,
     max_combinacion=4,
     ventana_dias_combinacion=5,
+    score_similitud=80,
 ):
     """
     Cruza df_caja_unificada (sistema) contra df_caja_michu (tesorería).
@@ -483,8 +596,15 @@ def cruzar_caja(
     CICLO (se repite hasta que una vuelta completa no agregue nada)
       4. Suma por día del remanente de tesorería vs una línea suelta del
          sistema.
-      5. Combinaciones: varias líneas de un lado suman una del otro.
-      6. Uno a uno con tolerancia ampliada -> "Diferencia de Importe".
+      5. Suma por tercero del remanente de contabilidad vs una línea
+         suelta de tesorería.
+      6. Suma por detalle parecido (score_similitud) del remanente de
+         tesorería vs una línea suelta del sistema.
+      7. Combinaciones: varias líneas de un lado suman una del otro.
+      8. Uno a uno con tolerancia ampliada -> "Diferencia de Importe".
+
+    Los pasos 5 y 6 parten cada grupo por cercanía de fechas, para no
+    sumar movimientos de meses distintos del mismo tercero o concepto.
 
     El orden importa: los pasos que exigen coincidencia exacta corren
     antes que el que afloja la tolerancia, para que un match flojo no se
@@ -524,6 +644,9 @@ def cruzar_caja(
     michu["_fecha_norm"] = pd.to_datetime(michu[col_fecha]).dt.date
     unif["_monto_norm"] = unif[col_monto].astype(float).round(2)
     michu["_monto_norm"] = michu[col_monto].astype(float).round(2)
+
+    claves_tercero = _claves_por_tercero(unif, col_tercero_unificada)
+    claves_detalle = _claves_por_similitud(michu, col_detalle_michu, score_similitud)
 
     contador = 1
     tipo_por_id = {}
@@ -634,13 +757,23 @@ def cruzar_caja(
     )
 
     # ------------------------------------------------------------------
-    # PASOS 4 a 6, en ciclo hasta estabilizar
+    # PASOS 4 a 8, en ciclo hasta estabilizar
     # ------------------------------------------------------------------
     while True:
         antes = contador
 
         contador = _paso_suma_por_dia(
             unif, michu, tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_suma_por_clave(
+            unif, michu, claves_tercero, "Agrupado (Tercero)",
+            tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_suma_por_clave(
+            michu, unif, claves_detalle, "Agrupado (Detalle)",
+            tipo_por_id, contador,
             tolerancia_pesos, tolerancia_pct, tolerancia_dias,
         )
         contador = _paso_combinaciones(
