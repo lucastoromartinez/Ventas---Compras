@@ -878,11 +878,19 @@ def cruzar_caja(
     Cruza df_caja_unificada (sistema) contra df_caja_michu (tesorería).
 
     SEPARACIONES PREVIAS (no participan del cruce, van a su propia salida)
-      - Comisiones: sólo existen en tesorería.
+      - Comisiones: la mayoría sólo existe en tesorería, pero algunas SÍ
+        tienen contrapartida real en contabilidad (un proveedor que
+        tesorería registra como "comisión"). Se les da una oportunidad de
+        cruzar (mismo criterio que el Paso 3) antes de separarlas; sólo
+        lo que no encuentra pareja se aparta.
       - Diferencia de arqueo: es el descuadre del conteo diario, nunca
         tiene contrapartida contable.
       - Neteos: pares pago/devolución del mismo tercero dentro de
         contabilidad, que se anulan entre sí, sin ventana de fechas.
+        Corre después de resolver comisiones con contrapartida, para que
+        un pago que en realidad correspondía a una comisión real no
+        quede "secuestrado" por su devolución, dejando esa comisión sin
+        pareja posible.
 
     PASOS FIJOS
       1. Ingresos agrupados por mes: suma de "ingreso" (tesorería) vs
@@ -935,9 +943,68 @@ def cruzar_caja(
     michu = df_caja_michu.copy().reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # Separaciones previas
+    # Comisiones: antes de separarlas a ciegas, se les da una oportunidad
+    # de cruzar. La mayoría de las líneas "comisión" de tesorería son un
+    # descuento del medio de pago que nunca aparece en contabilidad, pero
+    # algunas SÍ son un pago real a un proveedor que tesorería registra
+    # como comisión (ej. PVS, Tukipay) -mismo día, mismo importe exacto
+    # que una línea de contabilidad-. Si se separan sin chequear esto
+    # primero, el neteo o cualquier otro paso puede quedarse con la fila
+    # de contabilidad que en realidad le correspondía a esa comisión, y
+    # la comisión queda huérfana para siempre.
+    #
+    # Usa el mismo criterio estricto que el Paso 3 (uno a uno, misma
+    # tolerancia y ventana de días). Lo que encuentra pareja sale
+    # matcheado ya en este punto, con su propio id; lo que no, sigue el
+    # camino de siempre y se separa en la hoja Comisiones.
     # ------------------------------------------------------------------
-    michu, comisiones = _separar_por_texto(michu, col_detalle_michu, "comision")
+    mask_comision = michu[col_detalle_michu].apply(lambda t: "comision" in _normalizar_texto(t))
+    candidatos_comision = michu[mask_comision]
+
+    pares_comision = []
+    if not candidatos_comision.empty:
+        fechas_u = pd.to_datetime(unif[col_fecha]).dt.date
+        montos_u = unif[col_monto].astype(float).round(2)
+        fechas_c = pd.to_datetime(candidatos_comision[col_fecha]).dt.date
+        montos_c = candidatos_comision[col_monto].astype(float).round(2)
+
+        dif_monto = np.abs(montos_c.to_numpy()[:, None] - montos_u.to_numpy()[None, :])
+        tolerancias = np.maximum(
+            tolerancia_pesos, np.abs(montos_c.to_numpy()) * tolerancia_pct / 100
+        )[:, None]
+        dias = _dias_entre(fechas_c, fechas_u)
+        admisible = (dif_monto <= tolerancias) & (dias <= tolerancia_dias)
+
+        if admisible.any():
+            costos = np.where(
+                admisible, dias + dif_monto / (dif_monto[admisible].max() + 1), INADMISIBLE
+            )
+            idx_c = candidatos_comision.index.to_numpy()
+            idx_u = unif.index.to_numpy()
+            for i, j in _asignacion_optima(costos):
+                if admisible[i, j]:
+                    pares_comision.append((idx_u[j], idx_c[i]))
+
+    contador = 1
+    tipo_por_id = {}
+
+    comision_con_contrapartida_unif = unif.loc[[p[0] for p in pares_comision]].copy()
+    comision_con_contrapartida_michu = michu.loc[[p[1] for p in pares_comision]].copy()
+    for idx_u, idx_c in pares_comision:
+        comision_con_contrapartida_unif.loc[idx_u, "id"] = contador
+        comision_con_contrapartida_michu.loc[idx_c, "id"] = contador
+        tipo_por_id[contador] = "Comisión con Contrapartida"
+        contador += 1
+
+    unif = unif.drop(index=[p[0] for p in pares_comision]).reset_index(drop=True)
+    comisiones = candidatos_comision.drop(index=[p[1] for p in pares_comision])[
+        list(df_caja_michu.columns)
+    ].reset_index(drop=True)
+    michu = michu.drop(index=candidatos_comision.index).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Resto de separaciones previas
+    # ------------------------------------------------------------------
     michu, diferencia_arqueo = _separar_por_texto(michu, col_detalle_michu, "diferencia arqueo")
     unif, neteos = _separar_neteos(
         unif, col_fecha, col_monto, col_tercero_unificada, tolerancia_pesos,
@@ -959,8 +1026,6 @@ def cruzar_caja(
     claves_tercero = _claves_por_tercero(unif, col_tercero_unificada)
     claves_detalle = _claves_por_similitud(michu, col_detalle_michu, score_similitud)
 
-    contador = 1
-    tipo_por_id = {}
     margen_por_id = {}
     warnings = []
 
@@ -1144,8 +1209,20 @@ def cruzar_caja(
     cols_michu = list(df_caja_michu.columns)
 
     cols_match = ["id", "Tipo Match", "Margen Asignación"]
-    match_caja_unificada = unif[unif["_matched"]][cols_unif + cols_match].sort_values("id").reset_index(drop=True)
-    match_tesoreria = michu[michu["_matched"]][cols_michu + cols_match].sort_values("id").reset_index(drop=True)
+
+    comision_con_contrapartida_unif["Tipo Match"] = comision_con_contrapartida_unif["id"].map(tipo_por_id)
+    comision_con_contrapartida_unif["Margen Asignación"] = pd.NA
+    comision_con_contrapartida_michu["Tipo Match"] = comision_con_contrapartida_michu["id"].map(tipo_por_id)
+    comision_con_contrapartida_michu["Margen Asignación"] = pd.NA
+
+    match_caja_unificada = pd.concat([
+        unif[unif["_matched"]][cols_unif + cols_match],
+        comision_con_contrapartida_unif[cols_unif + cols_match],
+    ]).sort_values("id").reset_index(drop=True)
+    match_tesoreria = pd.concat([
+        michu[michu["_matched"]][cols_michu + cols_match],
+        comision_con_contrapartida_michu[cols_michu + cols_match],
+    ]).sort_values("id").reset_index(drop=True)
     falta_unificada = unif[~unif["_matched"]][cols_unif + ["id"]].reset_index(drop=True)
     falta_tesoreria = michu[~michu["_matched"]][cols_michu + ["id"]].reset_index(drop=True)
 
