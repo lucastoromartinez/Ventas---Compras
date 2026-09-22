@@ -211,6 +211,10 @@ if "resultado_tesoreria" in st.session_state:
             <div class="metric-value">{s['neteos']}</div>
             <div class="metric-label">Neteos contabilidad</div>
         </div>
+        <div class="metric-card">
+            <div class="metric-value">{s['revisar']}</div>
+            <div class="metric-label">A revisar</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
