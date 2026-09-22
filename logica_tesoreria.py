@@ -29,6 +29,7 @@ import unicodedata
 from io import BytesIO
 from itertools import combinations
 
+import numpy as np
 import openpyxl
 import pandas as pd
 from rapidfuzz import fuzz
@@ -247,6 +248,95 @@ def _buscar_combinacion(monto_objetivo, fecha_objetivo, pool_df, max_combinacion
 
 
 # ─────────────────────────────────────────────
+# EMPAREJAMIENTO ÓPTIMO
+# ─────────────────────────────────────────────
+
+INADMISIBLE = 1e9
+
+
+def _asignacion_optima(costos):
+    """
+    Resuelve el problema de asignación: elige el emparejamiento uno a uno
+    de costo total mínimo. `costos` es una matriz de numpy; las casillas
+    que no se pueden emparejar vienen con INADMISIBLE.
+
+    Existe porque recorrer las filas en orden y darle a cada una su mejor
+    candidato libre -lo que hacíamos antes- puede emparejar una fila con
+    alguien que no era su pareja y dejar sin cruzar a la fila que sí lo
+    necesitaba, aunque su pareja correcta estuviera en la muestra. Basta
+    con que la primera fila llegue antes y el candidato le sirva a las
+    dos. Acá eso no puede pasar: se minimiza el costo del conjunto, no el
+    de cada fila por separado, así que ninguna fila se queda con una
+    pareja ajena si eso deja a otra sin la suya.
+
+    Como el costo de una casilla inadmisible es enorme frente a la suma
+    de todos los costos reales, el óptimo también maximiza la cantidad de
+    pares válidos. Igual conviene filtrar el resultado contra la máscara
+    de admisibilidad, porque cuando no alcanzan los candidatos el
+    algoritmo devuelve igual una asignación completa.
+
+    Es el método húngaro con potenciales (Jonker-Volgenant), O(n³).
+    """
+    costos = np.asarray(costos, dtype=float)
+    filas, columnas = costos.shape
+    if filas == 0 or columnas == 0:
+        return []
+
+    transpuesta = filas > columnas
+    if transpuesta:
+        costos = costos.T
+        filas, columnas = costos.shape
+
+    INF = float("inf")
+    u = np.zeros(filas + 1)
+    v = np.zeros(columnas + 1)
+    p = np.zeros(columnas + 1, dtype=int)
+    camino = np.zeros(columnas + 1, dtype=int)
+
+    for i in range(1, filas + 1):
+        p[0] = i
+        j0 = 0
+        minimos = np.full(columnas + 1, INF)
+        usado = np.zeros(columnas + 1, dtype=bool)
+
+        while True:
+            usado[j0] = True
+            i0 = p[j0]
+            libres = ~usado[1:]
+            actual = costos[i0 - 1] - u[i0] - v[1:]
+            mejora = libres & (actual < minimos[1:])
+            minimos[1:][mejora] = actual[mejora]
+            camino[1:][mejora] = j0
+
+            candidatos = np.where(libres, minimos[1:], INF)
+            j1 = int(np.argmin(candidatos)) + 1
+            delta = candidatos[j1 - 1]
+
+            u[p[usado]] += delta
+            v[usado] -= delta
+            minimos[~usado] -= delta
+
+            j0 = j1
+            if p[j0] == 0:
+                break
+
+        while j0:
+            j1 = camino[j0]
+            p[j0] = p[j1]
+            j0 = j1
+
+    pares = [(int(p[j]) - 1, j - 1) for j in range(1, columnas + 1) if p[j] > 0]
+    return [(c, f) for f, c in pares] if transpuesta else pares
+
+
+def _dias_entre(fechas_a, fechas_b):
+    """Matriz de distancias en días entre dos listas de fechas."""
+    a = np.array([f.toordinal() for f in fechas_a])
+    b = np.array([f.toordinal() for f in fechas_b])
+    return np.abs(a[:, None] - b[None, :]).astype(float)
+
+
+# ─────────────────────────────────────────────
 # SEPARACIONES PREVIAS AL CRUCE
 # ─────────────────────────────────────────────
 
@@ -270,42 +360,50 @@ def _separar_neteos(unif, col_fecha, col_monto, col_tercero, tolerancia_pesos):
 
     No usa ventana de fechas: si el tercero es el mismo y los importes
     son opuestos al peso, que la devolución haya salido dos semanas
-    después no la hace menos devolución. La fecha entra sólo como
-    criterio de prioridad -se arman todos los pares posibles y se toman
-    primero los más cercanos en el tiempo-, porque recorrer las filas en
-    orden de archivo hacía que un pago viejo se quedara con la
-    devolución de otro y dejara huérfano al par correcto del mismo día.
+    después no la hace menos devolución. La fecha entra como costo, y el
+    emparejamiento se resuelve de forma óptima global para que un pago
+    viejo no se quede con la devolución de otro dejando huérfano al par
+    correcto del mismo día.
 
     Devuelve (resto, neteos). Si el archivo no trae la columna de
     tercero, no netea nada: sin tercero el criterio sería demasiado laxo.
     """
+    vacio = unif.iloc[0:0].reset_index(drop=True)
     if col_tercero not in unif.columns:
-        return unif.reset_index(drop=True), unif.iloc[0:0].reset_index(drop=True)
+        return unif.reset_index(drop=True), vacio
 
     fechas = pd.to_datetime(unif[col_fecha]).dt.date
     montos = unif[col_monto].astype(float).round(2)
     terceros = unif[col_tercero].apply(_normalizar_texto)
 
-    candidatos = []
-    for i in unif.index:
-        if montos[i] >= 0 or terceros[i] == "":
-            continue
-        for j in unif.index:
-            if montos[j] <= 0 or terceros[j] != terceros[i]:
-                continue
-            if abs(montos[i] + montos[j]) <= tolerancia_pesos:
-                candidatos.append((abs((fechas[i] - fechas[j]).days), i, j))
-    candidatos.sort()
+    con_tercero = terceros != ""
+    salidas = unif.index[con_tercero & (montos < 0)]
+    entradas = unif.index[con_tercero & (montos > 0)]
+    if len(salidas) == 0 or len(entradas) == 0:
+        return unif.reset_index(drop=True), vacio
+
+    suma = np.abs(
+        montos.loc[salidas].to_numpy()[:, None] + montos.loc[entradas].to_numpy()[None, :]
+    )
+    mismo_tercero = (
+        terceros.loc[salidas].to_numpy()[:, None] == terceros.loc[entradas].to_numpy()[None, :]
+    )
+    admisible = mismo_tercero & (suma <= tolerancia_pesos)
+    if not admisible.any():
+        return unif.reset_index(drop=True), vacio
+
+    dias = _dias_entre(fechas.loc[salidas], fechas.loc[entradas])
+    costos = np.where(admisible, dias, INADMISIBLE)
 
     usados = set()
-    for _, i, j in candidatos:
-        if i in usados or j in usados:
-            continue
-        usados.update({i, j})
+    for i, j in _asignacion_optima(costos):
+        if admisible[i, j]:
+            usados.update({salidas[i], entradas[j]})
 
     neteos = unif.loc[sorted(usados)].reset_index(drop=True)
     resto = unif.drop(index=usados).reset_index(drop=True)
     return resto, neteos
+
 
 
 # ─────────────────────────────────────────────
@@ -376,15 +474,18 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
                     etiqueta=None, ignorar_fecha=False):
     """
     Cruza línea contra línea por monto (con tolerancia) y fecha (con
-    tolerancia_dias), eligiendo siempre el candidato más cercano en fecha
-    y después en importe.
+    tolerancia_dias), resolviendo el emparejamiento de forma óptima
+    global: entre todos los cruces posibles se elige el conjunto que
+    minimiza la suma de las distancias, así ninguna línea se queda con
+    una pareja ajena dejando a otra sin la suya. El costo de cada cruce
+    es la distancia en días, y la diferencia de importe desempata.
 
-    Con `ignorar_fecha` la fecha deja de filtrar y queda sólo como
-    criterio de desempate: entre varios candidatos del mismo importe se
-    elige el más cercano en el tiempo, pero ninguno se descarta por
-    lejano. Es la última pasada de todas: cuando un movimiento ya no
-    cruzó por ningún otro camino, que el importe coincida exacto es
-    señal suficiente, y fijar una ventana de días sería arbitrario.
+    Con `ignorar_fecha` la fecha deja de filtrar y queda sólo dentro del
+    costo: entre varios candidatos del mismo importe se prefiere el más
+    cercano en el tiempo, pero ninguno se descarta por lejano. Es la
+    última pasada de todas: cuando un movimiento ya no cruzó por ningún
+    otro camino, que el importe coincida exacto es señal suficiente, y
+    fijar una ventana de días sería arbitrario.
 
     Si `etiqueta` viene dada, todos los matches se taggean con ese texto
     (se usa en las pasadas finales, donde lo que importa es que el match
@@ -392,39 +493,43 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
     Exacto / Tolerancia Importe / Tolerancia Fecha / Tolerancia Importe
     y Fecha, como siempre.
     """
-    restante_michu = michu[~michu["_matched"]].copy()
+    pendientes_u = unif[~unif["_matched"]]
+    pendientes_m = michu[~michu["_matched"]]
+    if pendientes_u.empty or pendientes_m.empty:
+        return contador
 
-    for _, fila_u in unif[~unif["_matched"]].sort_values("_fecha_norm").iterrows():
-        if restante_michu.empty:
-            break
+    montos_u = pendientes_u["_monto_norm"].to_numpy(dtype=float)
+    montos_m = pendientes_m["_monto_norm"].to_numpy(dtype=float)
 
-        monto_u = fila_u["_monto_norm"]
-        fecha_u = fila_u["_fecha_norm"]
-        tol = _tolerancia_dinamica(monto_u, tolerancia_pesos, tolerancia_pct)
+    dif_monto = np.abs(montos_u[:, None] - montos_m[None, :])
+    tolerancias = np.maximum(
+        tolerancia_pesos, np.abs(montos_u) * tolerancia_pct / 100
+    )[:, None]
+    dias = _dias_entre(pendientes_u["_fecha_norm"], pendientes_m["_fecha_norm"])
 
-        candidatos = restante_michu[(restante_michu["_monto_norm"] - monto_u).abs() <= tol]
-        if candidatos.empty:
+    admisible = dif_monto <= tolerancias
+    if not ignorar_fecha:
+        admisible &= dias <= tolerancia_dias
+    if not admisible.any():
+        return contador
+
+    # El desempate por importe se normaliza a menos de un día, para que
+    # nunca le gane a la cercanía de fechas.
+    escala = dif_monto[admisible].max() + 1
+    costos = np.where(admisible, dias + dif_monto / escala, INADMISIBLE)
+
+    indices_u = pendientes_u.index.to_numpy()
+    indices_m = pendientes_m.index.to_numpy()
+
+    for i, j in _asignacion_optima(costos):
+        if not admisible[i, j]:
             continue
-
-        if not ignorar_fecha:
-            dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
-            candidatos = candidatos[dif_dias <= tolerancia_dias]
-            if candidatos.empty:
-                continue
-
-        dif_dias = candidatos["_fecha_norm"].apply(lambda f: abs((f - fecha_u).days))
-        dif_monto = (candidatos["_monto_norm"] - monto_u).abs()
-        orden = pd.DataFrame({"dif_dias": dif_dias, "dif_monto": dif_monto}).sort_values(
-            ["dif_dias", "dif_monto"]
-        )
-        fila_m = candidatos.loc[orden.index[0]]
-        id_michu_elegido = fila_m["_id"]
 
         if etiqueta is not None:
             tipo = etiqueta
         else:
-            dm = round(abs(monto_u - fila_m["_monto_norm"]), 2)
-            dd = abs((fecha_u - fila_m["_fecha_norm"]).days)
+            dm = round(float(dif_monto[i, j]), 2)
+            dd = int(dias[i, j])
             if dm == 0 and dd == 0:
                 tipo = "Exacto"
             elif dm > 0 and dd == 0:
@@ -434,14 +539,13 @@ def _paso_uno_a_uno(unif, michu, tipo_por_id, contador,
             else:
                 tipo = "Tolerancia Importe y Fecha"
 
-        _marcar(unif, unif["_id"] == fila_u["_id"], contador)
-        _marcar(michu, michu["_id"] == id_michu_elegido, contador)
+        _marcar(unif, [indices_u[i]], contador)
+        _marcar(michu, [indices_m[j]], contador)
         tipo_por_id[contador] = tipo
         contador += 1
 
-        restante_michu = restante_michu[restante_michu["_id"] != id_michu_elegido]
-
     return contador
+
 
 
 def _paso_suma_por_dia(origen, destino, tipo_por_id, contador,
