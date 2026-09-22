@@ -536,6 +536,78 @@ def _paso_suma_por_clave(origen, destino, claves, etiqueta,
     return contador
 
 
+def _armar_grupos(df, claves, tolerancia_dias):
+    """
+    Arma los grupos de un lado: agrupa el remanente por clave y parte cada
+    grupo por cercanía de fechas. Devuelve sólo los grupos de 2 o más
+    líneas, porque los de una sola ya los cubre el cruce uno a uno.
+    """
+    restante = df[~df["_matched"]]
+    claves_restante = claves.reindex(restante.index)
+
+    grupos = []
+    for clave, grupo in restante[claves_restante != ""].groupby(
+        claves_restante[claves_restante != ""]
+    ):
+        for tramo in _clusters_por_fecha(grupo, tolerancia_dias):
+            if len(tramo) >= 2:
+                grupos.append((clave, tramo))
+    return grupos
+
+
+def _paso_grupo_contra_grupo(unif, michu, claves_unif, claves_michu, etiqueta,
+                             tipo_por_id, contador,
+                             tolerancia_pesos, tolerancia_pct, tolerancia_dias):
+    """
+    Cruza un grupo contra otro grupo: contabilidad agrupada por tercero
+    contra tesorería agrupada por detalle parecido, comparando las sumas
+    de los dos lados.
+
+    Los pasos de suma por clave anteriores resuelven N contra 1 -varias
+    líneas de un lado contra una sola del otro-. Este resuelve N contra
+    M: el caso en que los DOS lados tienen el movimiento abierto, pero
+    abierto distinto (contabilidad en tres pagos al mismo proveedor,
+    tesorería en cinco entregas del mismo concepto). Por eso exige 2 o
+    más líneas de cada lado: lo de una sola línea ya pasó por los pasos
+    anteriores.
+
+    Como cada grupo ya viene acotado por fecha, para cruzarlos alcanza
+    con que alguna fecha de un lado caiga a tolerancia_dias de alguna del
+    otro.
+    """
+    grupos_unif = _armar_grupos(unif, claves_unif, tolerancia_dias)
+    grupos_michu = _armar_grupos(michu, claves_michu, tolerancia_dias)
+
+    for _, tramo_u in grupos_unif:
+        if unif.loc[tramo_u, "_matched"].any():
+            continue
+
+        suma_u = round(unif.loc[tramo_u, "_monto_norm"].sum(), 2)
+        tol = _tolerancia_dinamica(suma_u, tolerancia_pesos, tolerancia_pct)
+        fechas_u = unif.loc[tramo_u, "_fecha_norm"]
+
+        for _, tramo_m in grupos_michu:
+            if michu.loc[tramo_m, "_matched"].any():
+                continue
+
+            suma_m = round(michu.loc[tramo_m, "_monto_norm"].sum(), 2)
+            if abs(suma_u - suma_m) > tol:
+                continue
+
+            fechas_m = michu.loc[tramo_m, "_fecha_norm"]
+            cerca = min(abs((fu - fm).days) for fu in fechas_u for fm in fechas_m)
+            if cerca > tolerancia_dias:
+                continue
+
+            _marcar(unif, tramo_u, contador)
+            _marcar(michu, tramo_m, contador)
+            tipo_por_id[contador] = etiqueta
+            contador += 1
+            break
+
+    return contador
+
+
 def _paso_combinaciones(unif, michu, tipo_por_id, contador,
                         tolerancia_pesos, tolerancia_pct,
                         max_combinacion, ventana_dias_combinacion):
@@ -608,10 +680,13 @@ def cruzar_caja(
          suelta de tesorería.
       6. Suma por detalle parecido (score_similitud) del remanente de
          tesorería vs una línea suelta del sistema.
-      7. Combinaciones: varias líneas de un lado suman una del otro.
-      8. Uno a uno con tolerancia de importe ampliada, dentro de la
+      7. Grupo contra grupo: contabilidad agrupada por tercero contra
+         tesorería agrupada por detalle parecido, comparando las dos
+         sumas (los pasos 5 y 6 resuelven N contra 1; éste, N contra M).
+      8. Combinaciones: varias líneas de un lado suman una del otro.
+      9. Uno a uno con tolerancia de importe ampliada, dentro de la
          ventana de fechas -> "Diferencia de Importe".
-      9. Uno a uno por importe, ya SIN ventana de fechas: la fecha queda
+     10. Uno a uno por importe, ya SIN ventana de fechas: la fecha queda
          sólo como desempate entre candidatos del mismo importe ->
          "Coincidencia de Importe".
 
@@ -782,7 +857,7 @@ def cruzar_caja(
     )
 
     # ------------------------------------------------------------------
-    # PASOS 4 a 9, en ciclo hasta estabilizar
+    # PASOS 4 a 10, en ciclo hasta estabilizar
     # ------------------------------------------------------------------
     while True:
         antes = contador
@@ -798,6 +873,12 @@ def cruzar_caja(
         )
         contador = _paso_suma_por_clave(
             michu, unif, claves_detalle, "Agrupado (Detalle)",
+            tipo_por_id, contador,
+            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
+        )
+        contador = _paso_grupo_contra_grupo(
+            unif, michu, claves_tercero, claves_detalle,
+            "Agrupado (Tercero vs Detalle)",
             tipo_por_id, contador,
             tolerancia_pesos, tolerancia_pct, tolerancia_dias,
         )
