@@ -974,6 +974,9 @@ def netear_falta_sistema(
     netean, no representan una diferencia real y no hace falta buscarlos.
 
     Resolución 1 a 1 por proveedor: cada fila se usa como máximo en un par.
+    Si una fila tiene más de un candidato, se desempata por la fecha más
+    próxima (Fecha_arca); a igual fecha, por menor diferencia de importe y
+    luego por orden de aparición.
     """
 
     df = falta_sistema.copy().reset_index(drop=True)
@@ -982,31 +985,47 @@ def netear_falta_sistema(
     c_cuit  = "cuit_arca"
     c_total = "Imp. Total_arca"
 
+    c_fecha = "Fecha_arca"
+
     df["_id"]    = df.index
     df["_total"] = pd.to_numeric(df[c_total], errors="coerce").fillna(0.0).round(2)
+    if c_fecha in df.columns:
+        df["_fecha"] = pd.to_datetime(df[c_fecha], errors="coerce", dayfirst=True)
+    else:
+        df["_fecha"] = pd.NaT
 
     usados: set[int] = set()
+    SIN_FECHA = 10**6  # días: los pares sin fecha quedan al final
 
     for _, grupo in df.groupby(c_cuit):
         idxs    = grupo["_id"].tolist()
         totales = grupo.set_index("_id")["_total"]
+        fechas  = grupo.set_index("_id")["_fecha"]
 
+        candidatos = []
         for a in range(len(idxs)):
             id_a = idxs[a]
-            if id_a in usados:
-                continue
             for b in range(a + 1, len(idxs)):
                 id_b = idxs[b]
-                if id_b in usados:
+                dif_importe = abs(totales[id_a] + totales[id_b])
+                if dif_importe > tol_pesos:
                     continue
-                if abs(totales[id_a] + totales[id_b]) <= tol_pesos:
-                    usados.add(id_a)
-                    usados.add(id_b)
-                    break
+                if pd.notna(fechas[id_a]) and pd.notna(fechas[id_b]):
+                    dif_dias = abs((fechas[id_a] - fechas[id_b]).days)
+                else:
+                    dif_dias = SIN_FECHA
+                candidatos.append((dif_dias, dif_importe, id_a, id_b))
+
+        candidatos.sort()
+        for _, _, id_a, id_b in candidatos:
+            if id_a in usados or id_b in usados:
+                continue
+            usados.add(id_a)
+            usados.add(id_b)
 
     falta_sistema_new = (
         df[~df["_id"].isin(usados)]
-        .drop(columns=["_id", "_total"], errors="ignore")
+        .drop(columns=["_id", "_total", "_fecha"], errors="ignore")
         .reset_index(drop=True)
     )
 
