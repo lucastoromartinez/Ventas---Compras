@@ -179,11 +179,14 @@ if "resultado_compras" in st.session_state:
     </div>
     """, unsafe_allow_html=True)
 
+    if not stats.get("sociedad"):
+        st.warning("No se pudo detectar la sociedad por el CUIT del receptor; el reporte se descarga como reporte_cruce.xlsx.")
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         label="📥 Descargar reporte completo",
         data=r["buf_reporte"],
-        file_name="reporte_cruce.xlsx",
+        file_name=f"reporte_{stats.get('sociedad') or 'cruce'}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
