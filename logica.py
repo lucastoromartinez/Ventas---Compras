@@ -18,6 +18,41 @@ def load_excel_file(file) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
+# SOCIEDAD (por CUIT del receptor)
+# ─────────────────────────────────────────────
+
+SOCIEDADES_POR_CUIT = {
+    "30716161591": "ersa",
+    "30718257510": "easa",
+    "30716981076": "9dD",
+    "30717516288": "ronda",
+    "30719170699": "patagonia",
+}
+
+
+def detectar_sociedad(df_arca: pd.DataFrame) -> str | None:
+    """
+    Detecta la sociedad a partir del CUIT del receptor del Excel de ARCA
+    (columna "Nro. Doc. Receptor" o cualquier columna que contenga "receptor").
+    Devuelve el nombre de la sociedad más frecuente, o None si no se reconoce.
+    """
+    columnas = [c for c in df_arca.columns if "receptor" in str(c).lower()]
+    columnas.sort(key=lambda c: "doc" not in str(c).lower())
+
+    for col in columnas:
+        cuits = (
+            df_arca[col].astype(str)
+            .str.replace(r"\D", "", regex=True)
+            .map(SOCIEDADES_POR_CUIT)
+            .dropna()
+        )
+        if not cuits.empty:
+            return cuits.value_counts().idxmax()
+
+    return None
+
+
+# ─────────────────────────────────────────────
 # DEPURACIÓN SISTEMA
 # ─────────────────────────────────────────────
 
@@ -1082,6 +1117,7 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     falta_sistema_final = netear_falta_sistema(falta_sistema3, tol_pesos=tol_pesos)
 
     stats = {
+        "sociedad":          detectar_sociedad(df_arca),
         "match":             len(match),
         "revisar":           len(revisar3),
         "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
