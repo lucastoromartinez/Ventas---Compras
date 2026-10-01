@@ -6,18 +6,23 @@ cargado por Tesorería) contra el mayor contable unificado del sistema:
   1. Carga la Caja Central hoja por hoja, ubicando SALDO INICIAL, encabezado
      Detalle/Monto, SALDO FINAL y la fila de DIFERENCIA de arqueo.
   2. Depura la Caja Unificada del sistema (Monto = Debe - Haber).
-  3. Aparta lo que nunca tiene contrapartida del otro lado: comisiones y
-     diferencias de arqueo (tesorería), y los pares pago/devolución del
-     mismo tercero que se anulan entre sí (contabilidad), sin importar
-     cuántos días pasaron entre el pago y su devolución.
+  3. Cruza las comisiones de tesorería que contabilidad sí registró
+     ("Comision Registrada") y aparta el resto, junto con las diferencias
+     de arqueo (tesorería) y los pares pago/devolución del mismo tercero
+     que se anulan entre sí (contabilidad), sin importar cuántos días
+     pasaron entre el pago y su devolución.
   4. Cruza ambos lados: primero los pasos que exigen coincidencia exacta
      (ingresos agrupados por mes, agrupamiento por nombre, uno a uno por
      monto+fecha, suma por día, combinaciones) y recién al final el que
      afloja la tolerancia de importe, repitiendo el ciclo hasta que no
      aparezcan matches nuevos.
-  5. Separa de los faltantes los casos donde el nombre coincide de los
-     dos lados pero el importe no: son diferencias contra una contraparte
-     identificada, no faltantes, y van a su propia hoja.
+  5. Separa de los faltantes los pares con una contraparte identificada
+     pero con alguna diferencia: el nombre coincide de los dos lados y el
+     importe no, o el importe parece el mismo con un error de carga
+     (mismo importe fuera de la ventana de fechas, dígito de más o de
+     menos, dígito cambiado, dígitos transpuestos, coma corrida, signo
+     invertido o diferencia igual a un movimiento ya conciliado). No son
+     faltantes: van a la hoja "Revisar", cada uno con su tipo.
   6. Exporta el resultado (match, faltantes de cada lado y lo apartado) a
      un Excel en memoria, con formato numérico/fecha y ancho de columna
      autoajustado.
@@ -33,6 +38,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 from rapidfuzz import fuzz
+from rapidfuzz.distance import DamerauLevenshtein
 from openpyxl.utils import get_column_letter
 
 
@@ -406,6 +412,33 @@ def _separar_neteos(unif, col_fecha, col_monto, col_tercero, tolerancia_pesos):
 
 
 
+def _pares_comision(comisiones, unif, col_fecha, col_monto, tolerancia_pesos, tolerancia_dias):
+    """
+    Busca, para cada comisión de tesorería, un apunte de contabilidad con el
+    mismo importe (a tolerancia_pesos) y fecha cercana (a tolerancia_dias).
+    Resuelve el emparejamiento de forma óptima global, igual que los neteos.
+
+    Existe porque no todas las comisiones son exclusivas de tesorería:
+    algunas se contabilizan como pago al procesador (PVS, TUKIPAY). Esas
+    tienen contrapartida y deben cruzar; sólo las que no la encuentran se
+    apartan en la hoja Comisiones.
+
+    Devuelve una lista de pares (índice en comisiones, índice en unif).
+    """
+    if comisiones.empty or unif.empty:
+        return []
+    m_c = comisiones[col_monto].astype(float).round(2).to_numpy()
+    m_u = unif[col_monto].astype(float).round(2).to_numpy()
+    dias = _dias_entre(pd.to_datetime(comisiones[col_fecha]).dt.date,
+                       pd.to_datetime(unif[col_fecha]).dt.date)
+    admisible = (np.abs(m_c[:, None] - m_u[None, :]) <= tolerancia_pesos) & (dias <= tolerancia_dias)
+    if not admisible.any():
+        return []
+    costos = np.where(admisible, dias, INADMISIBLE)
+    return [(comisiones.index[i], unif.index[j])
+            for i, j in _asignacion_optima(costos) if admisible[i, j]]
+
+
 # ─────────────────────────────────────────────
 # CLAVES DE AGRUPAMIENTO
 # ─────────────────────────────────────────────
@@ -757,9 +790,14 @@ def _paso_combinaciones(unif, michu, tipo_por_id, contador,
     return contador
 
 
+COLUMNAS_REVISAR = ["Tipo Error", "Fecha Contabilidad", "Tercero", "Comentario",
+                    "Monto Contabilidad", "Fecha Tesorería", "Detalle",
+                    "Monto Tesorería", "Diferencia", "Días", "Observación"]
+
+
 def _armar_revisar(falta_unif, falta_michu, col_fecha, col_monto,
                    col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
-                   score_revisar, tolerancia_dias):
+                   score_revisar, tolerancia_dias, tolerancia_pesos=5):
     """
     Entre lo que quedó en falta, busca los pares donde el NOMBRE coincide
     de los dos lados y la fecha también, pero el importe no.
@@ -779,9 +817,7 @@ def _armar_revisar(falta_unif, falta_michu, col_fecha, col_monto,
 
     Devuelve (falta_unif, falta_michu, revisar) ya depurados.
     """
-    columnas = ["Fecha Contabilidad", "Tercero", "Comentario", "Monto Contabilidad",
-                "Fecha Tesorería", "Detalle", "Monto Tesorería", "Diferencia",
-                "Score Nombre", "Días"]
+    columnas = COLUMNAS_REVISAR
     if falta_unif.empty or falta_michu.empty:
         return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
 
@@ -822,7 +858,12 @@ def _armar_revisar(falta_unif, falta_michu, col_fecha, col_monto,
         usados_u.add(i)
         usados_m.add(j)
         fila_u, fila_m = falta_unif.loc[i], falta_michu.loc[j]
+        observacion = f"El nombre coincide (similitud {-score_neg:.0f}%) pero el importe no"
+        error = _error_de_importe(fila_u[col_monto], fila_m[col_monto], tolerancia_pesos)
+        if error is not None:
+            observacion += f". Posible {error[0].lower()}: {error[1].lower()}"
         filas.append({
+            "Tipo Error": "Mismo nombre, distinto importe",
             "Fecha Contabilidad": fila_u[col_fecha],
             "Tercero": fila_u.get(col_tercero_unificada),
             "Comentario": fila_u[col_detalle_unificada],
@@ -831,14 +872,201 @@ def _armar_revisar(falta_unif, falta_michu, col_fecha, col_monto,
             "Detalle": fila_m[col_detalle_michu],
             "Monto Tesorería": fila_m[col_monto],
             "Diferencia": round(fila_u[col_monto] - fila_m[col_monto], 2),
-            "Score Nombre": -score_neg,
             "Días": dias,
+            "Observación": observacion,
         })
 
     revisar = pd.DataFrame(filas, columns=columnas)
     return (falta_unif.drop(index=usados_u).reset_index(drop=True),
             falta_michu.drop(index=usados_m).reset_index(drop=True),
             revisar)
+
+
+# ─────────────────────────────────────────────
+# REVISAR IMPORTES
+# ─────────────────────────────────────────────
+
+def _digitos(monto):
+    """Importe en centavos y sin signo, como texto: 4627748 -> '462774800'."""
+    return str(int(round(abs(float(monto)) * 100)))
+
+
+def _error_de_importe(monto_u, monto_m, tolerancia_pesos):
+    """
+    Clasifica la diferencia entre dos importes como un error de carga
+    típico. Devuelve (tipo, descripción) o None si no encaja en ninguno.
+
+    Se evalúa en este orden, del error más evidente al menos evidente:
+      - Signo invertido: mismo importe con signo opuesto.
+      - Coma corrida: uno es el otro multiplicado por 10, 100 o 1000.
+      - Dígito de más o de menos: los dígitos difieren en una inserción
+        o eliminación (4.627.748 contra 46.277.748).
+      - Dígitos transpuestos: dos dígitos contiguos intercambiados
+        (1.234.500 contra 1.243.500).
+      - Dígito cambiado: un solo dígito distinto (7.788.380 contra
+        7.798.380).
+    La coma corrida se mira antes que el dígito de más porque agregar un
+    cero al final cumple las dos definiciones, y "coma corrida" es la
+    explicación correcta.
+    """
+    mu, mm = float(monto_u), float(monto_m)
+    if mu == 0 or mm == 0:
+        return None
+
+    if np.sign(mu) != np.sign(mm):
+        if abs(mu + mm) <= tolerancia_pesos:
+            return "Signo invertido", "Mismo importe con signo opuesto"
+        return None
+
+    au, am = abs(mu), abs(mm)
+    for factor in (10, 100, 1000):
+        if abs(au - am * factor) <= tolerancia_pesos * factor:
+            return "Coma corrida", f"Contabilidad es {factor} veces tesorería"
+        if abs(am - au * factor) <= tolerancia_pesos * factor:
+            return "Coma corrida", f"Tesorería es {factor} veces contabilidad"
+
+    du, dm = _digitos(mu), _digitos(mm)
+    if du == dm or DamerauLevenshtein.distance(du, dm) != 1:
+        return None
+
+    if len(du) != len(dm):
+        lado = "contabilidad" if len(du) < len(dm) else "tesorería"
+        return "Dígito de más o de menos", f"A {lado} le falta un dígito"
+
+    distintos = [k for k in range(len(du)) if du[k] != dm[k]]
+    if len(distintos) == 2:
+        return "Dígitos transpuestos", "Dos dígitos contiguos intercambiados"
+    return "Dígito cambiado", "Un solo dígito distinto"
+
+
+def _armar_revisar_importes(falta_unif, falta_michu, match_unif, match_michu,
+                            col_fecha, col_monto, col_detalle_unificada,
+                            col_tercero_unificada, col_detalle_michu,
+                            tolerancia_pesos, tolerancia_dias):
+    """
+    Entre lo que quedó en falta después de "revisar", busca pares que
+    parecen el mismo movimiento con un error de carga. No son matches,
+    porque hay una diferencia real que alguien tiene que corregir o
+    confirmar, pero tampoco son faltantes. Salen de falta y se suman a
+    la hoja "Revisar", con el tipo de error y la diferencia calculada.
+
+    Se buscan en tres niveles, de la señal más fuerte a la más débil, y
+    cada fila se usa una sola vez:
+
+      1. Errores de importe (ver `_error_de_importe`), con la fecha dentro
+         de tolerancia_dias: signo invertido, coma corrida, dígito de más
+         o de menos, dígitos transpuestos y dígito cambiado. Fuera de la
+         ventana de fechas no se buscan: sin la fecha como ancla, la
+         coincidencia de dígitos es casi siempre casual.
+      2. Posible duplicación: la diferencia entre los dos importes es
+         igual a un movimiento que ya está conciliado, a tolerancia_dias.
+         Señala que un lado cargó ese movimiento dos veces, una suelta y
+         otra sumada dentro de este importe.
+      3. Mismo importe fuera de la ventana de fechas: el importe coincide
+         exacto pero la fecha no. Reemplaza al antiguo cruce automático
+         "Coincidencia de Importe", que conciliaba estos pares sin que
+         nadie los mirara. Se resuelve de forma óptima global,
+         prefiriendo la fecha más cercana.
+
+    Devuelve (falta_unif, falta_michu, revisar_importes) ya depurados.
+    """
+    columnas = COLUMNAS_REVISAR
+    if falta_unif.empty or falta_michu.empty:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    fechas_u = pd.to_datetime(falta_unif[col_fecha]).dt.date
+    fechas_m = pd.to_datetime(falta_michu[col_fecha]).dt.date
+    montos_u = falta_unif[col_monto].astype(float).round(2)
+    montos_m = falta_michu[col_monto].astype(float).round(2)
+
+    usados_u, usados_m, filas = set(), set(), []
+
+    def agregar(i, j, tipo, observacion):
+        usados_u.add(i)
+        usados_m.add(j)
+        fila_u, fila_m = falta_unif.loc[i], falta_michu.loc[j]
+        filas.append({
+            "Tipo Error": tipo,
+            "Fecha Contabilidad": fila_u[col_fecha],
+            "Tercero": fila_u.get(col_tercero_unificada),
+            "Comentario": fila_u[col_detalle_unificada],
+            "Monto Contabilidad": fila_u[col_monto],
+            "Fecha Tesorería": fila_m[col_fecha],
+            "Detalle": fila_m[col_detalle_michu],
+            "Monto Tesorería": fila_m[col_monto],
+            "Diferencia": round(montos_u[i] - montos_m[j], 2),
+            "Días": abs((fechas_u[i] - fechas_m[j]).days),
+            "Observación": observacion,
+        })
+
+    # Nivel 1: errores de importe dentro de la ventana de fechas
+    prioridad = {"Signo invertido": 0, "Coma corrida": 1, "Dígito de más o de menos": 2,
+                 "Dígitos transpuestos": 3, "Dígito cambiado": 4}
+    candidatos = []
+    for i in falta_unif.index:
+        for j in falta_michu.index:
+            dias = abs((fechas_u[i] - fechas_m[j]).days)
+            if dias > tolerancia_dias:
+                continue
+            error = _error_de_importe(montos_u[i], montos_m[j], tolerancia_pesos)
+            if error is not None:
+                candidatos.append((dias, prioridad[error[0]], i, j, error))
+    for dias, _, i, j, (tipo, descripcion) in sorted(candidatos, key=lambda c: c[:2]):
+        if i not in usados_u and j not in usados_m:
+            agregar(i, j, tipo, descripcion)
+
+    # Nivel 2: la diferencia es un movimiento ya conciliado
+    conciliados = []
+    # Tesorería primero: su detalle suele describir mejor el movimiento.
+    for df, col_det, lado in ((match_michu, col_detalle_michu, "tesorería"),
+                              (match_unif, col_detalle_unificada, "contabilidad")):
+        for _, fila in df.iterrows():
+            conciliados.append((pd.to_datetime(fila[col_fecha]).date(),
+                                round(float(fila[col_monto]), 2), fila[col_det], lado))
+    candidatos = []
+    for i in falta_unif.index:
+        if i in usados_u:
+            continue
+        for j in falta_michu.index:
+            if j in usados_m or np.sign(montos_u[i]) != np.sign(montos_m[j]):
+                continue
+            dias = abs((fechas_u[i] - fechas_m[j]).days)
+            if dias > tolerancia_dias:
+                continue
+            diferencia = round(montos_u[i] - montos_m[j], 2)
+            if abs(diferencia) <= tolerancia_pesos:
+                continue
+            for fecha_c, monto_c, detalle_c, lado_c in conciliados:
+                if (abs(monto_c - diferencia) <= tolerancia_pesos and
+                        abs((fecha_c - fechas_u[i]).days) <= tolerancia_dias):
+                    duplica = "contabilidad" if abs(montos_u[i]) > abs(montos_m[j]) else "tesorería"
+                    candidatos.append((dias, i, j,
+                        f"Posible duplicación en {duplica}: la diferencia coincide con "
+                        f"'{detalle_c}' por {monto_c:,.2f} del {fecha_c:%d/%m/%Y}, "
+                        f"ya conciliado ({lado_c})"))
+                    break
+    for dias, i, j, observacion in sorted(candidatos, key=lambda c: c[0]):
+        if i not in usados_u and j not in usados_m:
+            agregar(i, j, "Diferencia igual a movimiento conciliado", observacion)
+
+    # Nivel 3: mismo importe, fuera de la ventana de fechas
+    libres_u = [i for i in falta_unif.index if i not in usados_u]
+    libres_m = [j for j in falta_michu.index if j not in usados_m]
+    if libres_u and libres_m:
+        mu = montos_u.loc[libres_u].to_numpy()
+        mm = montos_m.loc[libres_m].to_numpy()
+        admisible = np.abs(mu[:, None] - mm[None, :]) <= tolerancia_pesos
+        if admisible.any():
+            dias = _dias_entre(fechas_u.loc[libres_u], fechas_m.loc[libres_m])
+            for a, b in _asignacion_optima(np.where(admisible, dias, INADMISIBLE)):
+                if admisible[a, b]:
+                    agregar(libres_u[a], libres_m[b], "Mismo importe fuera de ventana",
+                            f"Importe exacto con {int(dias[a, b])} días de diferencia")
+
+    revisar_importes = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=list(usados_u)).reset_index(drop=True),
+            falta_michu.drop(index=list(usados_m)).reset_index(drop=True),
+            revisar_importes)
 
 
 def cruzar_caja(
@@ -862,7 +1090,11 @@ def cruzar_caja(
     Cruza df_caja_unificada (sistema) contra df_caja_michu (tesorería).
 
     SEPARACIONES PREVIAS (no participan del cruce, van a su propia salida)
-      - Comisiones: sólo existen en tesorería.
+      - Comisiones: las que contabilidad registró (mismo importe, a
+        tolerancia_dias) cruzan como "Comision Registrada"; el resto sólo
+        existe en tesorería y se aparta. Este cruce corre antes de los
+        neteos, para que un pago de comisión no se netee contra una
+        devolución posterior.
       - Diferencia de arqueo: es el descuadre del conteo diario, nunca
         tiene contrapartida contable.
       - Neteos: pares pago/devolución del mismo tercero dentro de
@@ -889,9 +1121,9 @@ def cruzar_caja(
       8. Combinaciones: varias líneas de un lado suman una del otro.
       9. Uno a uno con tolerancia de importe ampliada, dentro de la
          ventana de fechas -> "Diferencia de Importe".
-     10. Uno a uno por importe, ya SIN ventana de fechas: la fecha queda
-         sólo como desempate entre candidatos del mismo importe ->
-         "Coincidencia de Importe".
+
+    El cruce sólo por importe, sin ventana de fechas, ya no concilia
+    solo: esos pares van a "Revisar" (ver SALIDA).
 
     Los pasos 5 y 6 parten cada grupo por cercanía de fechas, para no
     sumar movimientos de meses distintos del mismo tercero o concepto.
@@ -906,7 +1138,10 @@ def cruzar_caja(
     SALIDA
       Los faltantes se depuran al final: los pares donde el nombre
       coincide de los dos lados y la fecha también, pero el importe no,
-      salen de falta y van a "revisar".
+      salen de falta y van a "revisar" con el tipo "Mismo nombre,
+      distinto importe". Después, los pares que parecen el mismo
+      movimiento con un error de carga (ver `_armar_revisar_importes`)
+      salen de falta y se suman a la misma hoja, cada uno con su tipo.
 
     Returns
     -------
@@ -923,9 +1158,28 @@ def cruzar_caja(
     # ------------------------------------------------------------------
     michu, comisiones = _separar_por_texto(michu, col_detalle_michu, "comision")
     michu, diferencia_arqueo = _separar_por_texto(michu, col_detalle_michu, "diferencia arqueo")
-    unif, neteos = _separar_neteos(
-        unif, col_fecha, col_monto, col_tercero_unificada, tolerancia_pesos,
+
+    # Comisiones registradas: se cruzan ANTES de los neteos, para que un
+    # pago de comisión no se netee contra una devolución posterior. Las
+    # que tienen pareja vuelven al cruce y se marcan en el paso 0.
+    pares_comision = _pares_comision(comisiones, unif, col_fecha, col_monto,
+                                     tolerancia_pesos, tolerancia_dias)
+    unif["_par_comision"] = pd.NA
+    comisiones["_par_comision"] = pd.NA
+    for k, (i_c, i_u) in enumerate(pares_comision):
+        comisiones.loc[i_c, "_par_comision"] = k
+        unif.loc[i_u, "_par_comision"] = k
+    con_par_c = comisiones["_par_comision"].notna()
+    con_par_u = unif["_par_comision"].notna()
+    michu["_par_comision"] = pd.NA
+    michu = pd.concat([michu, comisiones[con_par_c]], ignore_index=True)
+    comisiones = comisiones[~con_par_c].drop(columns="_par_comision").reset_index(drop=True)
+
+    unif_libre, neteos = _separar_neteos(
+        unif[~con_par_u], col_fecha, col_monto, col_tercero_unificada, tolerancia_pesos,
     )
+    neteos = neteos.drop(columns="_par_comision")
+    unif = pd.concat([unif_libre, unif[con_par_u]], ignore_index=True)
 
     unif["_id"] = unif.index
     michu["_id"] = michu.index
@@ -946,6 +1200,15 @@ def cruzar_caja(
     contador = 1
     tipo_por_id = {}
     warnings = []
+
+    # ------------------------------------------------------------------
+    # PASO 0: comisiones registradas (pares ya resueltos arriba)
+    # ------------------------------------------------------------------
+    for k in range(len(pares_comision)):
+        _marcar(unif, unif.index[unif["_par_comision"] == k], contador)
+        _marcar(michu, michu.index[michu["_par_comision"] == k], contador)
+        tipo_por_id[contador] = "Comision Registrada"
+        contador += 1
 
     # ------------------------------------------------------------------
     # PASO 1: bloque de "ingresos" agrupados, por mes
@@ -1065,7 +1328,7 @@ def cruzar_caja(
     )
 
     # ------------------------------------------------------------------
-    # PASOS 4 a 10, en ciclo hasta estabilizar
+    # PASOS 4 a 9, en ciclo hasta estabilizar
     # ------------------------------------------------------------------
     while True:
         antes = contador
@@ -1104,11 +1367,6 @@ def cruzar_caja(
             tolerancia_pesos, tolerancia_pct_amplia, tolerancia_dias,
             etiqueta="Diferencia de Importe",
         )
-        contador = _paso_uno_a_uno(
-            unif, michu, tipo_por_id, contador,
-            tolerancia_pesos, tolerancia_pct, tolerancia_dias,
-            etiqueta="Coincidencia de Importe", ignorar_fecha=True,
-        )
 
         if contador == antes:
             break
@@ -1130,8 +1388,15 @@ def cruzar_caja(
     falta_unificada, falta_tesoreria, revisar = _armar_revisar(
         falta_unificada, falta_tesoreria, col_fecha, col_monto,
         col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
-        score_revisar, tolerancia_dias,
+        score_revisar, tolerancia_dias, tolerancia_pesos,
     )
+
+    falta_unificada, falta_tesoreria, revisar_importes = _armar_revisar_importes(
+        falta_unificada, falta_tesoreria, match_caja_unificada, match_tesoreria,
+        col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
+        col_detalle_michu, tolerancia_pesos, tolerancia_dias,
+    )
+    revisar = pd.concat([revisar, revisar_importes], ignore_index=True)
 
     return {
         "match_caja_unificada": match_caja_unificada,
@@ -1165,8 +1430,11 @@ def generar_excel_en_memoria_tesoreria(match_caja_unificada, match_tesoreria,
     hojas = {
         "Match Contabilidad": match_caja_unificada,
         "Match Tesoreria": match_tesoreria,
-        "Falta Contabilidad": falta_unificada,
-        "Falta Tesoreria": falta_tesoreria,
+        # Cada hoja lista lo que le falta a ese lado: "Falta Contabilidad"
+        # son los movimientos de tesorería que contabilidad no registró, y
+        # "Falta Tesoreria" los asientos contables que tesorería no tiene.
+        "Falta Contabilidad": falta_tesoreria,
+        "Falta Tesoreria": falta_unificada,
         "Comisiones": comisiones,
     }
     if diferencia_arqueo is not None:
@@ -1255,8 +1523,8 @@ def correr_conciliacion_tesoreria(
 
     stats = {
         "match": len(resultado["match_caja_unificada"]),
-        "falta_contabilidad": len(resultado["falta_unificada"]),
-        "falta_tesoreria": len(resultado["falta_tesoreria"]),
+        "falta_contabilidad": len(resultado["falta_tesoreria"]),
+        "falta_tesoreria": len(resultado["falta_unificada"]),
         "comisiones": len(resultado["comisiones"]),
         "diferencia_arqueo": len(resultado["diferencia_arqueo"]),
         "neteos": len(resultado["neteos"]),
