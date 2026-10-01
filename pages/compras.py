@@ -1,5 +1,5 @@
 import streamlit as st
-from logica import correr_cruce
+from logica import correr_cruce, SOCIEDADES_POR_CUIT
 
 st.set_page_config(
     page_title="Cruce de Compras",
@@ -179,14 +179,27 @@ if "resultado_compras" in st.session_state:
     </div>
     """, unsafe_allow_html=True)
 
-    if not stats.get("sociedad"):
-        st.warning("No se pudo detectar la sociedad por el CUIT del receptor; el reporte se descarga como reporte_cruce.xlsx.")
+    sociedad = stats.get("sociedad")
+    if not sociedad:
+        st.warning(
+            "No se encontró el CUIT de ninguna sociedad en el Excel de ARCA "
+            "(se buscó en 'Nro. Doc. Receptor', en los encabezados y en el resto de las columnas). "
+            "Seleccioná la sociedad para nombrar el reporte."
+        )
+        with st.expander("Columnas recibidas del Excel ARCA"):
+            st.write(stats.get("columnas_arca", []))
+        sociedad = st.selectbox(
+            "Sociedad",
+            options=sorted(set(SOCIEDADES_POR_CUIT.values()), key=str.lower),
+            index=None,
+            placeholder="Elegí la sociedad",
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
         label="📥 Descargar reporte completo",
         data=r["buf_reporte"],
-        file_name=f"reporte_{stats.get('sociedad') or 'cruce'}.xlsx",
+        file_name=f"reporte_{sociedad or 'cruce'}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )

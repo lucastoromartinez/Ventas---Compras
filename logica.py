@@ -30,26 +30,52 @@ SOCIEDADES_POR_CUIT = {
 }
 
 
+def _cuit_digitos(valor) -> str:
+    """Deja solo los dígitos de un CUIT (tolera guiones, espacios y '.0' final)."""
+    txt = str(valor).strip()
+    txt = re.sub(r"\.0+$", "", txt)
+    return re.sub(r"\D", "", txt)
+
+
+def _norm_texto(valor) -> str:
+    txt = unicodedata.normalize("NFKD", str(valor))
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    return txt.lower()
+
+
+def _sociedad_mas_frecuente(valores) -> str | None:
+    sociedades = pd.Series([SOCIEDADES_POR_CUIT.get(_cuit_digitos(v)) for v in valores]).dropna()
+    if sociedades.empty:
+        return None
+    return sociedades.value_counts().idxmax()
+
+
 def detectar_sociedad(df_arca: pd.DataFrame) -> str | None:
     """
-    Detecta la sociedad a partir del CUIT del receptor del Excel de ARCA
-    (columna "Nro. Doc. Receptor" o cualquier columna que contenga "receptor").
+    Detecta la sociedad a partir del CUIT del receptor del Excel de ARCA.
+    Orden de búsqueda:
+      1. Columnas que contengan "receptor" (prioriza "Nro. Doc. Receptor").
+      2. Encabezados del archivo (fila de título "... - CUIT 30-xxxxxxxx-x").
+      3. Cualquier celda que no sea de columnas del emisor.
     Devuelve el nombre de la sociedad más frecuente, o None si no se reconoce.
     """
-    columnas = [c for c in df_arca.columns if "receptor" in str(c).lower()]
-    columnas.sort(key=lambda c: "doc" not in str(c).lower())
+    columnas = [c for c in df_arca.columns if "receptor" in _norm_texto(c)]
+    columnas.sort(key=lambda c: "doc" not in _norm_texto(c))
 
     for col in columnas:
-        cuits = (
-            df_arca[col].astype(str)
-            .str.replace(r"\D", "", regex=True)
-            .map(SOCIEDADES_POR_CUIT)
-            .dropna()
-        )
-        if not cuits.empty:
-            return cuits.value_counts().idxmax()
+        sociedad = _sociedad_mas_frecuente(df_arca[col].dropna())
+        if sociedad:
+            return sociedad
 
-    return None
+    patron_cuit = re.compile(r"\d{2}-?\d{8}-?\d")
+    encontrados = [m for c in df_arca.columns for m in patron_cuit.findall(str(c))]
+    sociedad = _sociedad_mas_frecuente(encontrados)
+    if sociedad:
+        return sociedad
+
+    resto = [c for c in df_arca.columns if "emisor" not in _norm_texto(c)]
+    valores = df_arca[resto].astype(str).to_numpy().ravel() if resto else []
+    return _sociedad_mas_frecuente(valores)
 
 
 # ─────────────────────────────────────────────
@@ -1118,6 +1144,7 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
 
     stats = {
         "sociedad":          detectar_sociedad(df_arca),
+        "columnas_arca":     [str(c) for c in df_arca.columns],
         "match":             len(match),
         "revisar":           len(revisar3),
         "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
