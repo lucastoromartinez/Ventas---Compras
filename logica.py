@@ -1143,8 +1143,6 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     falta_sistema_final = netear_falta_sistema(falta_sistema3, tol_pesos=tol_pesos)
 
     stats = {
-        "sociedad":          detectar_sociedad(df_arca),
-        "columnas_arca":     [str(c) for c in df_arca.columns],
         "match":             len(match),
         "revisar":           len(revisar3),
         "duplicados":        int((revisar1["comentario"] == "Duplicado").sum()),
