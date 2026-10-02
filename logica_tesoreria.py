@@ -453,6 +453,18 @@ PALABRAS_NO_RECAUDACION = ("prestamo", "sueldo", "devolucion")
 
 TERCERO_AREA_MARKETING = "area marketing"
 
+# Terceros genéricos: cuentas donde contabilidad carga pagos a distintas
+# personas o conceptos, que tesorería registra con el nombre real. Se
+# comparan normalizados (minúsculas, sin acentos ni puntuación).
+TERCEROS_GENERICOS = (
+    "area marketing",
+    "gastos varios",
+    "gastos varios usd",
+    "gastos avellaneda",
+    "gastos paseo ronda",
+    "gastos paseo ronda usd",
+)
+
 
 def _es_ingreso_recaudacion(texto):
     """True si el detalle es un ingreso de recaudación: dice "ingreso" y
@@ -1402,6 +1414,84 @@ def _armar_revisar_importes(falta_unif, falta_michu, match_unif, match_michu,
             revisar_importes)
 
 
+def _armar_revisar_genericos(falta_unif, falta_michu, col_fecha, col_monto,
+                             col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
+                             tolerancia_pesos, tolerancia_pct=0.05, ventana_dias=7):
+    """
+    Asientos de un tercero genérico (TERCEROS_GENERICOS) que coinciden con
+    una línea de tesorería salvo por una diferencia menor de importe. Ej.:
+    asiento a GASTOS VARIOS del 13/07 por −433.400 contra "Habilitaciones"
+    del 08/07 por −433.380: el mismo pago, redondeado.
+
+    El cruce no los une porque la diferencia supera la tolerancia estricta
+    y la tolerancia amplia (0,05 %) sólo se aplica dentro de 3 días; y la
+    revisión por nombre no los ve porque el tercero no dice quién es.
+
+    Condiciones: mismo signo, a lo sumo `ventana_dias` de distancia y
+    diferencia mayor que `tolerancia_pesos` y de hasta `tolerancia_pct` %
+    del importe. Emparejamiento óptimo global por cercanía de fechas y, a
+    igual distancia, por menor diferencia.
+
+    Devuelve (falta_unif, falta_michu, revisar_genericos).
+    """
+    columnas = COLUMNAS_REVISAR
+    if (falta_unif.empty or falta_michu.empty
+            or col_tercero_unificada not in falta_unif.columns):
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    terceros = falta_unif[col_tercero_unificada].apply(_normalizar_texto)
+    genericos = falta_unif.index[terceros.isin(TERCEROS_GENERICOS)]
+    if len(genericos) == 0:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    mu = falta_unif.loc[genericos, col_monto].astype(float).round(2).to_numpy()
+    mm = falta_michu[col_monto].astype(float).round(2).to_numpy()
+    fu = pd.to_datetime(falta_unif.loc[genericos, col_fecha]).dt.date
+    fm = pd.to_datetime(falta_michu[col_fecha]).dt.date
+    dias = _dias_entre(fu, fm)
+    dif = np.abs(mu[:, None] - mm[None, :])
+    tope = np.maximum(tolerancia_pesos, np.abs(mu) * tolerancia_pct / 100)[:, None]
+    admisible = ((np.sign(mu)[:, None] == np.sign(mm)[None, :])
+                 & (dias <= ventana_dias) & (dif > tolerancia_pesos) & (dif <= tope))
+    if not admisible.any():
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    escala = dif[admisible].max() + 1
+    costos = np.where(admisible, dias + dif / escala, INADMISIBLE)
+
+    usados_u, usados_m, filas = [], [], []
+    for i, j in _asignacion_optima(costos):
+        if not admisible[i, j]:
+            continue
+        iu, jm = genericos[i], falta_michu.index[j]
+        fila_u, fila_m = falta_unif.loc[iu], falta_michu.loc[jm]
+        diferencia = round(mu[i] - mm[j], 2)
+        porcentaje = f"{abs(diferencia) / abs(mu[i]) * 100:.3f}".replace(".", ",")
+        usados_u.append(iu)
+        usados_m.append(jm)
+        filas.append({
+            "Tipo Error": "Tercero genérico, diferencia menor",
+            "Fecha Contabilidad": fila_u[col_fecha],
+            "Tercero": fila_u[col_tercero_unificada],
+            "Comentario": fila_u[col_detalle_unificada],
+            "Monto Contabilidad": fila_u[col_monto],
+            "Fecha Tesorería": fila_m[col_fecha],
+            "Detalle": fila_m[col_detalle_michu],
+            "Monto Tesorería": fila_m[col_monto],
+            "Diferencia": diferencia,
+            "Días": int(dias[i, j]),
+            "Observación": f"Asiento a {str(fila_u[col_tercero_unificada]).strip()} con "
+                           f"{_fmt_ar(abs(diferencia))} de diferencia ({porcentaje} %) y "
+                           f"{_texto_dias(int(dias[i, j]))} de distancia. "
+                           f"Posible pago redondeado.",
+        })
+
+    revisar = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=usados_u).reset_index(drop=True),
+            falta_michu.drop(index=usados_m).reset_index(drop=True),
+            revisar)
+
+
 def _armar_revisar_duplicados(falta_unif, match_unif, match_michu,
                               col_fecha, col_monto, col_detalle_unificada,
                               col_tercero_unificada, col_detalle_michu, tolerancia_pesos):
@@ -1550,6 +1640,10 @@ def cruzar_caja(
       `_armar_revisar_sumas_nombre`). Después, los pares que parecen el mismo
       movimiento con un error de carga (ver `_armar_revisar_importes`)
       salen de falta y se suman a la misma hoja, cada uno con su tipo.
+      Después, los asientos de terceros genéricos (GASTOS VARIOS, AREA
+      MARKETING...) que coinciden con una línea de tesorería a 7 días con
+      una diferencia de hasta 0,05 % van como "Tercero genérico,
+      diferencia menor".
       Por último, los asientos en falta iguales en fecha, tercero e
       importe a uno ya conciliado van a "revisar" como "Posible asiento
       duplicado".
@@ -1831,13 +1925,19 @@ def cruzar_caja(
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
         col_detalle_michu, tolerancia_pesos, tolerancia_dias,
     )
+    falta_unificada, falta_tesoreria, revisar_genericos = _armar_revisar_genericos(
+        falta_unificada, falta_tesoreria, col_fecha, col_monto,
+        col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
+        tolerancia_pesos, tolerancia_pct_amplia,
+    )
+
     falta_unificada, revisar_duplicados = _armar_revisar_duplicados(
         falta_unificada, match_caja_unificada, match_tesoreria,
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
         col_detalle_michu, tolerancia_pesos,
     )
-    revisar = pd.concat([revisar, revisar_sumas, revisar_importes, revisar_duplicados],
-                        ignore_index=True)
+    revisar = pd.concat([revisar, revisar_sumas, revisar_importes, revisar_genericos,
+                         revisar_duplicados], ignore_index=True)
 
     return {
         "match_caja_unificada": match_caja_unificada,
