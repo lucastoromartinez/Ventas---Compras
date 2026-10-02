@@ -18,7 +18,9 @@ cargado por Tesorería) contra el mayor contable unificado del sistema:
      aparezcan matches nuevos.
   5. Separa de los faltantes los pares con una contraparte identificada
      pero con alguna diferencia: el nombre coincide de los dos lados y el
-     importe no, o el importe parece el mismo con un error de carga
+     importe no, la suma de varias líneas del mismo nombre coincide con
+     una del otro lado aunque esté fuera de la ventana de fechas, o el
+     importe parece el mismo con un error de carga
      (mismo importe fuera de la ventana de fechas, dígito de más o de
      menos, dígito cambiado, dígitos transpuestos, coma corrida, signo
      invertido o diferencia igual a un movimiento ya conciliado). No son
@@ -939,6 +941,141 @@ def _error_de_importe(monto_u, monto_m, tolerancia_pesos):
     return "Dígito cambiado", "Un solo dígito distinto"
 
 
+def _armar_revisar_sumas_nombre(falta_unif, falta_michu, col_fecha, col_monto,
+                                col_detalle_unificada, col_tercero_unificada,
+                                col_detalle_michu, tolerancia_pesos,
+                                ventana_dias=30, score_minimo=85, max_lineas=4):
+    """
+    Entre lo que quedó en falta, busca una línea de un lado que coincide con
+    la SUMA de varias líneas del otro lado a nombre de la misma persona o
+    proveedor, aunque estén fuera de la ventana de fechas del cruce.
+
+    Es el caso de un pago que tesorería registra en una sola línea y
+    contabilidad en varios asientos de otra fecha (o al revés): por ejemplo,
+    un pago de tesorería del 19/08 por −2.114.930 y dos asientos del 08/09 al
+    mismo tercero por −170.000 y −1.944.933. Los pasos de suma del cruce no
+    lo ven porque exigen 3 días de cercanía.
+
+    Se corre en las dos direcciones. Para cada línea suelta:
+      - Candidatas del otro lado: mismo signo, a lo sumo `ventana_dias` de
+        distancia y nombre parecido (WRatio >= `score_minimo` entre el
+        tercero, o el comentario si no hay tercero, y el detalle de
+        tesorería).
+      - Se prueban subconjuntos de 2 a `max_lineas` candidatas; vale el que
+        suma la línea con tolerancia de `tolerancia_pesos`. Entre varios, el
+        de menor distancia máxima en días.
+    Cada fila se usa una sola vez. Cada hallazgo es UNA fila de "revisar":
+    del lado agrupado van la primera fecha, los textos unidos y la suma, y
+    la observación detalla cada línea.
+
+    Devuelve (falta_unif, falta_michu, revisar_sumas) ya depurados.
+    """
+    columnas = COLUMNAS_REVISAR
+    if falta_unif.empty or falta_michu.empty:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    fechas_u = pd.to_datetime(falta_unif[col_fecha]).dt.date
+    fechas_m = pd.to_datetime(falta_michu[col_fecha]).dt.date
+    montos_u = falta_unif[col_monto].astype(float).round(2)
+    montos_m = falta_michu[col_monto].astype(float).round(2)
+
+    def nombre_u(i):
+        if col_tercero_unificada in falta_unif.columns:
+            tercero = _normalizar_texto(falta_unif.at[i, col_tercero_unificada])
+            if tercero:
+                return tercero
+        return _normalizar_texto(falta_unif.at[i, col_detalle_unificada])
+
+    nombres_u = {i: nombre_u(i) for i in falta_unif.index}
+    nombres_m = {j: _normalizar_texto(falta_michu.at[j, col_detalle_michu]) for j in falta_michu.index}
+
+    usados_u, usados_m, filas = set(), set(), []
+
+    def describir_u(i):
+        asiento = falta_unif.get("ASIENTOVISIBLE")
+        ref = f"asiento {int(asiento[i])}" if asiento is not None and pd.notna(asiento[i]) else "asiento"
+        return f"{ref}: {montos_u[i]:,.2f} del {fechas_u[i]:%d/%m/%Y}"
+
+    def describir_m(j):
+        return f"'{falta_michu.at[j, col_detalle_michu]}': {montos_m[j]:,.2f} del {fechas_m[j]:%d/%m/%Y}"
+
+    def unir(textos):
+        vistos = []
+        for t in textos:
+            t = "" if pd.isna(t) else str(t).strip()
+            if t and t not in vistos:
+                vistos.append(t)
+        return " / ".join(vistos)
+
+    # direccion: (indices sueltos, indices a agrupar, montos, fechas, nombres)
+    direcciones = (
+        ("michu", list(falta_michu.index), list(falta_unif.index)),
+        ("unif", list(falta_unif.index), list(falta_michu.index)),
+    )
+    for suelto_lado, sueltos, grupo_idx in direcciones:
+        if suelto_lado == "michu":
+            m_s, f_s, n_s, u_s = montos_m, fechas_m, nombres_m, usados_m
+            m_g, f_g, n_g, u_g = montos_u, fechas_u, nombres_u, usados_u
+        else:
+            m_s, f_s, n_s, u_s = montos_u, fechas_u, nombres_u, usados_u
+            m_g, f_g, n_g, u_g = montos_m, fechas_m, nombres_m, usados_m
+
+        for s_idx in sueltos:
+            if s_idx in u_s or not n_s[s_idx]:
+                continue
+            candidatas = [
+                g for g in grupo_idx
+                if g not in u_g and n_g[g]
+                and np.sign(m_g[g]) == np.sign(m_s[s_idx])
+                and abs((f_g[g] - f_s[s_idx]).days) <= ventana_dias
+                and fuzz.WRatio(n_s[s_idx], n_g[g]) >= score_minimo
+            ]
+            mejor = None
+            for k in range(2, min(max_lineas, len(candidatas)) + 1):
+                for combo in combinations(candidatas, k):
+                    if abs(sum(m_g[g] for g in combo) - m_s[s_idx]) > tolerancia_pesos:
+                        continue
+                    dias = max(abs((f_g[g] - f_s[s_idx]).days) for g in combo)
+                    if mejor is None or dias < mejor[0]:
+                        mejor = (dias, combo)
+            if mejor is None:
+                continue
+
+            dias, combo = mejor
+            u_s.add(s_idx)
+            u_g.update(combo)
+            if suelto_lado == "michu":
+                idx_u, idx_m = list(combo), [s_idx]
+                detalle_grupo = "; ".join(describir_u(i) for i in idx_u)
+                lado_grupo = f"{len(idx_u)} asientos de contabilidad"
+            else:
+                idx_u, idx_m = [s_idx], list(combo)
+                detalle_grupo = "; ".join(describir_m(j) for j in idx_m)
+                lado_grupo = f"{len(idx_m)} movimientos de tesorería"
+            total_u = round(sum(montos_u[i] for i in idx_u), 2)
+            total_m = round(sum(montos_m[j] for j in idx_m), 2)
+            filas.append({
+                "Tipo Error": "Mismo nombre, suma fuera de ventana",
+                "Fecha Contabilidad": min(falta_unif.loc[idx_u, col_fecha]),
+                "Tercero": unir(falta_unif.loc[idx_u, col_tercero_unificada])
+                    if col_tercero_unificada in falta_unif.columns else None,
+                "Comentario": unir(falta_unif.loc[idx_u, col_detalle_unificada]),
+                "Monto Contabilidad": total_u,
+                "Fecha Tesorería": min(falta_michu.loc[idx_m, col_fecha]),
+                "Detalle": unir(falta_michu.loc[idx_m, col_detalle_michu]),
+                "Monto Tesorería": total_m,
+                "Diferencia": round(total_u - total_m, 2),
+                "Días": dias,
+                "Observación": f"Suma de {lado_grupo} del mismo nombre ({detalle_grupo}), "
+                               f"hasta {dias} días de distancia",
+            })
+
+    revisar_sumas = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=list(usados_u)).reset_index(drop=True),
+            falta_michu.drop(index=list(usados_m)).reset_index(drop=True),
+            revisar_sumas)
+
+
 def _armar_revisar_importes(falta_unif, falta_michu, match_unif, match_michu,
                             col_fecha, col_monto, col_detalle_unificada,
                             col_tercero_unificada, col_detalle_michu,
@@ -1139,7 +1276,9 @@ def cruzar_caja(
       Los faltantes se depuran al final: los pares donde el nombre
       coincide de los dos lados y la fecha también, pero el importe no,
       salen de falta y van a "revisar" con el tipo "Mismo nombre,
-      distinto importe". Después, los pares que parecen el mismo
+      distinto importe". Después, las sumas de varias líneas del mismo
+      nombre que coinciden con una del otro lado a hasta 30 días (ver
+      `_armar_revisar_sumas_nombre`). Después, los pares que parecen el mismo
       movimiento con un error de carga (ver `_armar_revisar_importes`)
       salen de falta y se suman a la misma hoja, cada uno con su tipo.
 
@@ -1391,12 +1530,18 @@ def cruzar_caja(
         score_revisar, tolerancia_dias, tolerancia_pesos,
     )
 
+    falta_unificada, falta_tesoreria, revisar_sumas = _armar_revisar_sumas_nombre(
+        falta_unificada, falta_tesoreria, col_fecha, col_monto,
+        col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
+        tolerancia_pesos,
+    )
+
     falta_unificada, falta_tesoreria, revisar_importes = _armar_revisar_importes(
         falta_unificada, falta_tesoreria, match_caja_unificada, match_tesoreria,
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
         col_detalle_michu, tolerancia_pesos, tolerancia_dias,
     )
-    revisar = pd.concat([revisar, revisar_importes], ignore_index=True)
+    revisar = pd.concat([revisar, revisar_sumas, revisar_importes], ignore_index=True)
 
     return {
         "match_caja_unificada": match_caja_unificada,
