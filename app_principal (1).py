@@ -13,6 +13,7 @@ PAGES = {
     "conciliaciones": st.Page("pages/conciliaciones.py",  title="Conciliaciones", icon="🏦"),
     "lector_pdfs":    st.Page("pages/lector_pdfs.py",     title="Lector PDFs",    icon="📷"),
     "rappi":          st.Page("pages/rappi.py",           title="Rappi",          icon="🛵"),
+    "pedidosya":      st.Page("pages/pedidosya.py",       title="Pedidos Ya",     icon="🍔"),
     "impuestos":      st.Page("pages/impuestos.py",       title="Impuestos",      icon="👮"),
 }
 st.session_state["_pages"] = PAGES

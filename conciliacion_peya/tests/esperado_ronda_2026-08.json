@@ -1,0 +1,187 @@
+{
+ "saldo": -1556352.77,
+ "lineas": [
+  {
+   "concepto": "Diferencia de redondeo en acreditaciones registradas",
+   "importe": -0.28
+  },
+  {
+   "concepto": "Factura 0026-02607861 registrada como 0026-02607681 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Ventas HIO 04-2026 registradas de menos",
+   "importe": 273200.0
+  },
+  {
+   "concepto": "Ventas Atalaya 05-2026 registradas de menos",
+   "importe": 170800.0
+  },
+  {
+   "concepto": "Ventas HIO 07-2026 registradas de menos",
+   "importe": 33400.0
+  },
+  {
+   "concepto": "Ventas Atalaya 07-2026 registradas de menos",
+   "importe": 121500.0
+  },
+  {
+   "concepto": "Ventas 08-2026 HIO (online TC)",
+   "importe": 26867071.0
+  },
+  {
+   "concepto": "Ventas 08-2026 HIO (efectivo PY)",
+   "importe": 1170080.02
+  },
+  {
+   "concepto": "Ventas 08-2026 Atalaya (TC online)",
+   "importe": 5622550.0
+  },
+  {
+   "concepto": "Ventas 08-2026 Atalaya (efectivo)",
+   "importe": 424220.0
+  },
+  {
+   "concepto": "Diferencia HIO reporte método vs documento",
+   "importe": -400.0
+  },
+  {
+   "concepto": "Ventas 01/09 al 06/09 HIO (online TC)",
+   "importe": 7578666.0
+  },
+  {
+   "concepto": "Ventas 01/09 al 06/09 HIO (efectivo PY)",
+   "importe": 504009.0
+  },
+  {
+   "concepto": "Ventas 01/09 al 06/09 Atalaya (TC online)",
+   "importe": 1482000.0
+  },
+  {
+   "concepto": "Ventas 01/09 al 06/09 Atalaya (efectivo)",
+   "importe": 70084.0
+  },
+  {
+   "concepto": "Acreditacion 17/08-23/08",
+   "importe": -5152076.67
+  },
+  {
+   "concepto": "Acreditacion 24/08-30/08",
+   "importe": -4645414.72
+  },
+  {
+   "concepto": "Acreditacion 31/08-06/09",
+   "importe": -6812833.5
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02473007",
+   "importe": -2444314.35
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02576372",
+   "importe": -3252566.45
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02688572",
+   "importe": -2542203.56
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02711503",
+   "importe": -2048852.53
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02738173",
+   "importe": -1982094.19
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02770257",
+   "importe": -3028870.32
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02788589",
+   "importe": -3729170.27
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02810625",
+   "importe": -2602118.04
+  },
+  {
+   "concepto": "Ventas con pago por fuera de la aplicación ya cobradas",
+   "importe": -8528013.59
+  },
+  {
+   "concepto": "Diferencia Descuentos facturados en semana distinta",
+   "importe": 133511.82
+  },
+  {
+   "concepto": "Aminoración descuento comercial (liq. 11/05-17/05)",
+   "importe": 28037.47
+  },
+  {
+   "concepto": "Diferencia HIO match (Descuento PeYa a usuarios no restado)",
+   "importe": -5121327.58
+  },
+  {
+   "concepto": "Diferencia HIO match 2do cruce (fecha+local+importe)",
+   "importe": -29105.0
+  },
+  {
+   "concepto": "Falta HIO sobra PeYa",
+   "importe": 15327022.69
+  },
+  {
+   "concepto": "Falta PeYa sobra HIO",
+   "importe": -5090030.08
+  },
+  {
+   "concepto": "NC Complemento Reintegro HIO 50% (Pedidos Facturados Cancelados)",
+   "importe": -651669.5
+  },
+  {
+   "concepto": "ND Pedidos Reintegrados 50% No Registrados HIO",
+   "importe": 350057.0
+  },
+  {
+   "concepto": "Diferencia Atalaya match (Descuento PeYa a usuarios no restado)",
+   "importe": -786643.19
+  },
+  {
+   "concepto": "Falta Atalaya sobra PeYa",
+   "importe": 2421389.32
+  },
+  {
+   "concepto": "Falta PeYa sobra Atalaya",
+   "importe": -2501677.73
+  },
+  {
+   "concepto": "NC Complemento Reintegro Atalaya 50% (Pedidos Facturados Cancelados)",
+   "importe": -223430.0
+  },
+  {
+   "concepto": "ND Pedidos Reintegrados 50% No Registrados Atalaya",
+   "importe": 151566.0
+  }
+ ],
+ "abierto": [],
+ "hojas": {
+  "conciliacion": 48,
+  "Diferencias por mes": 39,
+  "Recaudacion": 53,
+  "Venta HIO": 3394,
+  "Venta Atalaya": 2188,
+  "PeYa Lista Pedidos": 5596,
+  "Liquidaciones": 28,
+  "Match HIO 1": 3162,
+  "Match HIO 2 (Lado PeYa)": 42,
+  "Match HIO 2 (Lado HIO)": 42,
+  "Falta HIO (sobra PeYa)": 362,
+  "Falta PeYa (sobra HIO)": 151,
+  "Reintegros HIO": 50,
+  "Dif HIO método vs documento": 1,
+  "Match Atalaya": 1910,
+  "Falta Atalaya (sobra PeYa)": 120,
+  "Falta PeYa (sobra Atalaya)": 261,
+  "Reintegros Atalaya": 33
+ },
+ "final": -0.0
+}

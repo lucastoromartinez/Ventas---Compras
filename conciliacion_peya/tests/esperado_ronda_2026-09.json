@@ -1,0 +1,194 @@
+{
+ "saldo": -26068909.25,
+ "lineas": [
+  {
+   "concepto": "Diferencia de redondeo en acreditaciones registradas",
+   "importe": -0.33
+  },
+  {
+   "concepto": "Factura 0026-02854640 registrada como 0026-02854650 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Ventas 09-2026 HIO (online TC)",
+   "importe": 35775662.0
+  },
+  {
+   "concepto": "Ventas 09-2026 HIO (efectivo PY)",
+   "importe": 2304189.01
+  },
+  {
+   "concepto": "Ventas 09-2026 Atalaya (TC online)",
+   "importe": 6475600.0
+  },
+  {
+   "concepto": "Ventas 09-2026 Atalaya (efectivo)",
+   "importe": 435984.0
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 HIO (online TC)",
+   "importe": 8202854.0
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 HIO (efectivo PY)",
+   "importe": 267448.0
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 Atalaya (TC online)",
+   "importe": 1051200.0
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 Atalaya (efectivo)",
+   "importe": 95500.0
+  },
+  {
+   "concepto": "Acreditacion 14/09-20/09",
+   "importe": -6578239.05
+  },
+  {
+   "concepto": "Acreditacion 21/09-27/09",
+   "importe": -5791843.03
+  },
+  {
+   "concepto": "Acreditacion 28/09-04/10",
+   "importe": -8698453.11
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02904758",
+   "importe": -3952557.74
+  },
+  {
+   "concepto": "Ventas con pago por fuera de la aplicación ya cobradas",
+   "importe": -11077694.59
+  },
+  {
+   "concepto": "Aminoración descuento comercial (liq. anteriores)",
+   "importe": 28037.47
+  },
+  {
+   "concepto": "Acreditación duplicada: 'Acreditación PY 08-2026' asiento 187030 del 30/09/2026",
+   "importe": 10185521.64
+  },
+  {
+   "concepto": "Ventas HIO 04-2026 registradas de menos",
+   "importe": 273200.0
+  },
+  {
+   "concepto": "Ventas Atalaya 05-2026 registradas de menos",
+   "importe": 170800.0
+  },
+  {
+   "concepto": "Ventas HIO 07-2026 registradas de menos",
+   "importe": 33400.0
+  },
+  {
+   "concepto": "Ventas Atalaya 07-2026 registradas de menos",
+   "importe": 121500.0
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02473007",
+   "importe": -2444314.35
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02576372",
+   "importe": -3252566.45
+  },
+  {
+   "concepto": "Factura 0026-02688572 registrada como 0026-26885272 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Factura 0026-02738173 registrada como 0026-02738176 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Factura 0026-02770257 registrada como 0000-02770257 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Diferencia liquidación 11/05-17/05 sin comprobante",
+   "importe": 133511.82
+  },
+  {
+   "concepto": "Factura 0026-02607861 tipeada 0026-02607681 en el mayor",
+   "importe": 0.01
+  },
+  {
+   "concepto": "Diferencia HIO reporte método vs documento — ticket BD1G / 9468",
+   "importe": -400.0
+  },
+  {
+   "concepto": "Residuo del cierre anterior (redondeo)",
+   "importe": -0.29
+  },
+  {
+   "concepto": "Diferencia HIO match (Descuento PeYa a usuarios no restado)",
+   "importe": -7056712.21
+  },
+  {
+   "concepto": "Diferencia HIO match 2do cruce (fecha+local+importe)",
+   "importe": -29105.0
+  },
+  {
+   "concepto": "Falta HIO sobra PeYa",
+   "importe": 16565462.69
+  },
+  {
+   "concepto": "Falta PeYa sobra HIO",
+   "importe": -5456102.58
+  },
+  {
+   "concepto": "NC Complemento Reintegro HIO 50% (Pedidos Facturados Cancelados)",
+   "importe": -995452.21
+  },
+  {
+   "concepto": "ND Pedidos Reintegrados 50% No Registrados HIO",
+   "importe": 390048.0
+  },
+  {
+   "concepto": "ND HIO Reintegro 100%",
+   "importe": 6588.12
+  },
+  {
+   "concepto": "Diferencia Atalaya match (Descuento PeYa a usuarios no restado)",
+   "importe": -976288.8
+  },
+  {
+   "concepto": "Falta Atalaya sobra PeYa",
+   "importe": 3407813.32
+  },
+  {
+   "concepto": "Falta PeYa sobra Atalaya",
+   "importe": -3472477.73
+  },
+  {
+   "concepto": "NC Complemento Reintegro Atalaya 50% (Pedidos Facturados Cancelados)",
+   "importe": -200406.5
+  },
+  {
+   "concepto": "ND Pedidos Reintegrados 50% No Registrados Atalaya",
+   "importe": 127203.14
+  }
+ ],
+ "abierto": [],
+ "hojas": {
+  "conciliacion": 50,
+  "Diferencias por mes": 46,
+  "Recaudacion": 69,
+  "Venta HIO": 1325,
+  "Venta Atalaya": 358,
+  "PeYa Lista Pedidos": 1665,
+  "Liquidaciones": 5,
+  "Match HIO 1": 1274,
+  "Match HIO 2 (Lado PeYa)": 3,
+  "Match HIO 2 (Lado HIO)": 3,
+  "Falta HIO (sobra PeYa)": 54,
+  "Falta PeYa (sobra HIO)": 31,
+  "Reintegros HIO": 23,
+  "Match Atalaya": 313,
+  "Falta Atalaya (sobra PeYa)": 21,
+  "Falta PeYa (sobra Atalaya)": 45,
+  "Reintegros Atalaya": 3
+ },
+ "final": -0.0
+}

@@ -70,6 +70,7 @@ div[class*="st-key-card_"]:hover .card-visual { transform: translateY(-3px); }
 .st-key-card_concil:hover .card-visual  { border-color: #ff6b35; }
 .st-key-card_pdfs:hover .card-visual    { border-color: #c084fc; }
 .st-key-card_rappi:hover .card-visual   { border-color: #FF441F; }
+.st-key-card_pedidosya:hover .card-visual { border-color: #FA0050; }
 .st-key-card_impuestos:hover .card-visual { border-color: #f5c518; }
 
 .footer {
@@ -115,6 +116,7 @@ card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad",
 
 row2 = st.columns(3, gap="medium")
 card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "conciliaciones", "pages/conciliaciones.py")
+card(row2[2], "pedidosya", "🍔", "Pedidos Ya", "Conciliación cuenta recaudación", "pedidosya", "pages/pedidosya.py")
 
 row3 = st.columns(3, gap="medium")
 card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs", "pages/lector_pdfs.py")

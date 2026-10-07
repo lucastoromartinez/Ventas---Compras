@@ -1,0 +1,167 @@
+# Configuración por entidad
+#
+# Lo que cambia entre entidades: qué sistemas internos se cruzan, con qué
+# clave, cómo se llaman las ventas en el mayor y cómo se abre el histórico.
+# Los criterios (ecuación de liquidación, reintegros, signos, descuento no
+# restado) son los mismos para todas y viven en references/criterios.md.
+#
+# Los scripts leen este archivo con --entidad <clave>. Para agregar una
+# entidad nueva se copia un bloque; los scripts no se tocan.
+
+easa:
+  nombre: "EASA"
+  local_peya: "411335"            # el número que traen los ZIP y las facturas
+  razon_social: "ENTRETENIMIENTOS AVELLANEDA"
+  apertura_historico: mes         # hoja "Diferencias por mes": solo por mes
+
+  sistemas:
+    - id: dean
+      nombre: "Dean & Dennys"
+      tipo: dean                   # lector: Dean (Nº Transacción, Online/Efectivo)
+      archivo: dean                # argumento --dean
+      sucursal_peya: "Dean & Dennys"   # cómo aparece en la Lista de PeYa
+      # Dean SIEMPRE integra: un solo cruce, por identificador exacto.
+      # Buscar por fecha+monto acá produce matches espurios (criterios.md §3)
+      cruce_secundario: false
+      mayor: "D&D"                 # texto que identifica sus ventas en el mayor
+      etiqueta_online: "Ventas D&D {rango} (online TC)"
+      etiqueta_efectivo: "Ventas D&D {rango} (efectivo)"
+      etiqueta_corta: "D&D"
+      lineas:
+        match: "Diferencia D&D match (Pago en App mal integrado)"
+        falta_sistema: "Falta Dean (PeYa liquidó, Dean no facturó)"
+        falta_peya: "Falta PeYa sobra Dean (Dean facturó, PeYa no liquidó)"
+        nc: "NC Complemento Reintegro Dean 50% (Pedidos Facturados Cancelados)"
+        nd50: "ND Pedidos Reintegrados 50% No Registrados Dean"
+        nd100: "ND Pedidos D&D Reintegros 100%"
+      hojas:
+        venta: "Venta Dean"
+        match: "Match Dean PeYa"
+        falta_sistema: "Falta Dean"
+        falta_peya: "Falta PeYa (sobra Dean)"
+        reintegros: "Reintegros Dean"
+
+    - id: hio
+      nombre: "HIOffice"
+      tipo: hio                    # lector: documento + método de pago
+      archivo: hio                 # --hio-documento + --hio-metodo
+      sucursal_peya: "Nacha|Hell"  # regex sobre Sucursal de la Lista
+      cruce_secundario: fecha_local_bruta
+      mayor: "HIO"
+      etiqueta_online: "Ventas {rango} HIO"
+      etiqueta_efectivo: "Ventas {rango} HIO PY efectivo"
+      etiqueta_corta: "HIO"
+      # mapeo establecimiento HIO -> local (y Sucursal PeYa -> local)
+      locales:
+        Nacha: {hio: "Nacha", peya: "Nacha", nombre: "Nacha Tex Mex"}
+        Hells: {hio: "Hell", peya: "Hell", nombre: "Hell´s Pizza"}
+      lineas:
+        match: "Diferencia HIO match (Pago en App mal integrado)"
+        match2: "Diferencia HIO match Integrador Apagado (Facturado por la Bruta)"
+        falta_sistema: "Falta HIO sobra PeYa"
+        falta_peya: "Falta PeYa sobra HIO"
+        nc: "NC HIO x Complemento"
+        nd50: "ND HIO Reintegro 50%"
+        nd100: "ND HIO Reintegro 100%"
+      hojas:
+        venta: "Venta Combinada HIO"
+        match: "Match HIO 1"
+        match2_peya: "Match HIO 2 (Lado PeYa)"
+        match2_sistema: "Match HIO 2 (Lado HIO)"
+        falta_sistema: "Falta HIO (sobra PeYa)"
+        falta_peya: "Falta PeYa (sobra HIO)"
+        reintegros: "Reintegros HIO"
+
+ronda:
+  nombre: "RONDA"
+  local_peya: "409994"
+  razon_social: "PASEO RONDA"
+  # Ronda tiene 9 locales: el total agregado esconde los desvíos por local
+  apertura_historico: mes_y_local
+
+  sistemas:
+    - id: hio
+      nombre: "HIOffice"
+      tipo: hio
+      archivo: hio
+      sucursal_peya: "Quotidiano|Orno|Koko|Carne|Nacha|Paolo|Creperie|Créperie|Antiche"
+      cruce_secundario: fecha_local_base
+      mayor: "HIO"
+      etiqueta_online: "Ventas {rango} HIO (online TC)"
+      etiqueta_efectivo: "Ventas {rango} HIO (efectivo PY)"
+      etiqueta_corta: "HIO"
+      locales:
+        Quotidiano: {hio: "Quotidiano", peya: "Quotidiano", nombre: "Il Quotidiano"}
+        Orno:       {hio: "Orno",       peya: "Orno",       nombre: "Orno"}
+        Koko:       {hio: "Koko",       peya: "Koko",       nombre: "Koko Bao Bar"}
+        Carne:      {hio: "Carne",      peya: "Carne",      nombre: "Carne"}
+        Nacha:      {hio: "Nacha",      peya: "Nacha",      nombre: "Nacha Tex Mex"}
+        Paolo:      {hio: "Paolo",      peya: "Paolo",      nombre: "Paolo Foccaceria"}
+        Creperie:   {hio: "Crepperie",  peya: "Creperie",   nombre: "Créperie"}
+        Antiche:    {hio: "Antiche",    peya: "Antiche",    nombre: "Antiche Tentazioni"}
+      lineas:
+        match: "Diferencia HIO match (Descuento PeYa a usuarios no restado)"
+        match2: "Diferencia HIO match 2do cruce (fecha+local+importe)"
+        falta_sistema: "Falta HIO sobra PeYa"
+        falta_peya: "Falta PeYa sobra HIO"
+        nc: "NC Complemento Reintegro HIO 50% (Pedidos Facturados Cancelados)"
+        nd50: "ND Pedidos Reintegrados 50% No Registrados HIO"
+        nd100: "ND HIO Reintegro 100%"
+      hojas:
+        venta: "Venta HIO"
+        match: "Match HIO 1"
+        match2_peya: "Match HIO 2 (Lado PeYa)"
+        match2_sistema: "Match HIO 2 (Lado HIO)"
+        falta_sistema: "Falta HIO (sobra PeYa)"
+        falta_peya: "Falta PeYa (sobra HIO)"
+        reintegros: "Reintegros HIO"
+
+    - id: atalaya
+      nombre: "Atalaya"
+      tipo: atalaya                # lector: tickets con Fecha, Medio Pago, CON IVA
+      archivo: atalaya             # --atalaya
+      sucursal_peya: "Atalaya"
+      # Atalaya NO trae localizador: el único cruce es fecha + importe, con el
+      # criterio de facturación según método de pago (criterios.md §9)
+      cruce_secundario: fecha_facturacion
+      # desde el 11/09/2026 Atalaya factura la BASE redondeada hacia abajo a la
+      # centena (19.596 -> 19.500): segunda pasada del cruce con ese redondeo
+      redondeo_ticket: 100
+      mayor: "Atalaya"
+      etiqueta_online: "Ventas {rango} Atalaya (TC online)"
+      etiqueta_efectivo: "Ventas {rango} Atalaya (efectivo)"
+      etiqueta_corta: "Atalaya"
+      locales:
+        Atalaya: {peya: "Atalaya", nombre: "Atalaya"}
+      lineas:
+        match: "Diferencia Atalaya match (Descuento PeYa a usuarios no restado)"
+        falta_sistema: "Falta Atalaya sobra PeYa"
+        falta_peya: "Falta PeYa sobra Atalaya"
+        nc: "NC Complemento Reintegro Atalaya 50% (Pedidos Facturados Cancelados)"
+        nd50: "ND Pedidos Reintegrados 50% No Registrados Atalaya"
+        nd100: "ND Atalaya Reintegro 100%"
+      hojas:
+        venta: "Venta Atalaya"
+        match: "Match Atalaya"
+        falta_sistema: "Falta Atalaya (sobra PeYa)"
+        falta_peya: "Falta PeYa (sobra Atalaya)"
+        reintegros: "Reintegros Atalaya"
+
+# ---------------------------------------------------------------------------
+# Criterios de importe para el cruce sin identificador
+# ---------------------------------------------------------------------------
+# fecha_local_bruta     fecha + local + "Monto bruto de la venta"
+# fecha_local_base      fecha + local + BASE
+# fecha_facturacion     fecha + criterio de facturación según método de pago
+#
+# BASE = Monto bruto
+#      − Descuento comercial neto otorgado x PeYa × 1,21
+#      − Descuento otorgado por el local
+#      − Cupón otorgado por el local
+#
+# CORRECTO = BASE − Descuento neto otorgado PeYa a usuarios × 1,21
+#
+# fecha_facturacion usa CORRECTO para los pagos fuera de la app y BASE para los
+# pagos en la app, porque así es como se está facturando hoy: el descuento de
+# PeYa a usuarios no se resta en los pagos en la app. La diferencia entre las
+# dos fórmulas es la sobrefacturación, y va como línea propia.
