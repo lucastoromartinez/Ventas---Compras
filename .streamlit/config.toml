@@ -1,0 +1,23 @@
+# Tema visual de toda la app. Colores institucionales de Enter.
+[theme]
+base = "light"
+primaryColor = "#0516BB"
+backgroundColor = "#F5F6F8"
+secondaryBackgroundColor = "#ECEEF2"
+textColor = "#16202E"
+linkColor = "#0516BB"
+borderColor = "#DCE0E6"
+showWidgetBorder = true
+baseRadius = "8px"
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap, monospace"
+headingFontWeights = 600
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F6F8"
+borderColor = "#E3E6EB"
+
+[client]
+# Oculta las opciones de desarrollo (Deploy, etc.) del menú superior.
+toolbarMode = "minimal"

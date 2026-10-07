@@ -1,392 +1,267 @@
+import pandas as pd
 import streamlit as st
+
+from estilos import aplicar_estilos, encabezado
 from logica_pedidosya import correr_conciliacion_peya
 
-st.set_page_config(
-    page_title="Pedidos Ya",
-    page_icon="🍔",
-    layout="centered",
+aplicar_estilos()
+encabezado(
+    "Conciliación cuenta recaudación Pedidos Ya",
+    "Parte del saldo del mayor y lo lleva a cero, explicando cada importe con un concepto "
+    "trazable a su registro original.",
+    "Conciliaciones / Pedidos Ya",
 )
 
-ACENTO = "#FA0050"
-
-st.markdown(f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] {{ font-family: 'IBM Plex Sans', sans-serif; }}
-.stApp {{ background-color: #0f0f0f; color: #e8e8e8; }}
-
-.header-block {{
-    border-left: 3px solid {ACENTO};
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2rem;
-}}
-.header-block h1 {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}}
-.header-block p {{
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}}
-.upload-label {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: {ACENTO};
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}}
-[data-testid="stFileUploader"] {{
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.8rem; transition: border-color 0.2s;
-}}
-[data-testid="stFileUploader"]:hover {{ border-color: {ACENTO}; }}
-
-.stButton > button {{
-    background: {ACENTO} !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-}}
-.stButton > button:disabled {{ background: #2a2a2a !important; color: #555 !important; }}
-
-.metric-row {{ display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }}
-.metric-card {{
-    flex: 1; min-width: 80px; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}}
-.metric-card .metric-value {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.3rem; font-weight: 600; color: {ACENTO}; line-height: 1.2;
-}}
-.metric-card .metric-label {{
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}}
-.metric-card.warn .metric-value {{ color: #facc15; }}
-.metric-card.ok   .metric-value {{ color: #4ade80; }}
-
-.liq-card {{
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.9rem 1.2rem; margin: 0.5rem 0;
-    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
-}}
-.liq-card .liq-id {{ color: {ACENTO}; font-weight: 600; font-size: 0.85rem; }}
-.liq-card .liq-detail {{ color: #888; margin-top: 0.3rem; }}
-.liq-card.warn {{ border-color: #facc1555; }}
-.liq-card.naranja {{ border-color: #fb923c66; }}
-.liq-card.naranja .liq-id {{ color: #fb923c; }}
-
-.divider {{ border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }}
-
-[data-testid="stDownloadButton"] > button {{
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-    transition: border-color 0.2s !important;
-}}
-[data-testid="stDownloadButton"] > button:hover {{
-    border-color: {ACENTO} !important; color: {ACENTO} !important;
-}}
-
-.back-btn > button {{
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}}
-.back-btn > button:hover {{ color: {ACENTO} !important; border-color: {ACENTO} !important; }}
-
-.pdf-list {{
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem 1.2rem;
-    margin: 1rem 0; max-height: 200px; overflow-y: auto;
-}}
-.pdf-item {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #888;
-    padding: 0.2rem 0; border-bottom: 1px solid #222;
-}}
-.pdf-item:last-child {{ border-bottom: none; }}
-
-div[data-testid="stTabs"] button {{
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; color: #555 !important;
-}}
-div[data-testid="stTabs"] button[aria-selected="true"] {{
-    color: {ACENTO} !important; border-bottom-color: {ACENTO} !important;
-}}
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>🍔 Pedidos Ya</h1>
-    <p>Conciliación de la cuenta recaudación PedidosYa</p>
-</div>
-""", unsafe_allow_html=True)
+ENTIDADES = {
+    "EASA": {
+        "id": "easa", "local": "411335", "sistemas": "Dean y HIOffice",
+        "reportes": [
+            ("dean", "Ventas Dean", "Excel · filtra el servicio PedidosYa"),
+            ("hio_documento", "HIO por documento", "Excel · trae el localizador"),
+            ("hio_metodo", "HIO por método de pago", "Excel · referencia de ventas"),
+        ],
+    },
+    "Ronda": {
+        "id": "ronda", "local": "409994", "sistemas": "HIOffice y Atalaya",
+        "reportes": [
+            ("hio_documento", "HIO por documento", "Excel · trae el localizador"),
+            ("hio_metodo", "HIO por método de pago", "Excel · referencia de ventas"),
+            ("atalaya", "Tickets Atalaya", "Excel · fecha, medio de pago, CON IVA"),
+        ],
+    },
+}
 
 
 def _pesos(valor):
-    if valor is None:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return "—"
     return f"$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
 
 
-def _lista_archivos(archivos):
-    if archivos:
-        items = "".join(f'<div class="pdf-item">{a.name}</div>' for a in archivos)
-        st.markdown(f'<div class="pdf-list">{items}</div>', unsafe_allow_html=True)
+# ───────────────────────── Selección ─────────────────────────
+col_ent, col_tipo, col_info = st.columns([1.1, 1.3, 3], vertical_alignment="bottom")
+with col_ent:
+    nombre_ent = st.segmented_control(
+        "Entidad", list(ENTIDADES), default="EASA", key="peya_entidad_sel",
+    ) or "EASA"
+with col_tipo:
+    tipo = st.segmented_control(
+        "Tipo de cierre", ["Inicial", "Mensual"], default="Mensual", key="peya_tipo_sel",
+        help="Inicial: sin conciliación anterior, procesa todo el rango de ZIP. "
+             "Mensual: arrastra pendientes e histórico de la conciliación del mes anterior.",
+    ) or "Mensual"
+ent = ENTIDADES[nombre_ent]
+with col_info:
+    st.caption(f"Local PeYa {ent['local']} · Sistemas: {ent['sistemas']}")
+
+pre = f"peya_{ent['id']}"
+mensual = tipo == "Mensual"
 
 
-def _uploader(etiqueta, clave, tipos, multiple=False):
-    st.markdown(f'<div class="upload-label">{etiqueta}</div>', unsafe_allow_html=True)
-    return st.file_uploader(
-        clave, type=tipos, accept_multiple_files=multiple,
-        label_visibility="collapsed", key=clave,
+# ───────────────────────── Insumos ─────────────────────────
+def _insumo(clave, titulo, detalle, tipos, multiple=False):
+    with st.container(border=True):
+        st.markdown(f"**{titulo}**")
+        st.caption(detalle)
+        valor = st.file_uploader(
+            titulo, type=tipos, accept_multiple_files=multiple,
+            label_visibility="collapsed", key=f"{pre}_{clave}",
+        )
+        if valor:
+            texto = f"{len(valor)} archivo{'s' if len(valor) != 1 else ''}" if multiple else "Cargado"
+            st.badge(texto, icon=":material/check:", color="green")
+        else:
+            st.badge("Pendiente", icon=":material/upload:", color="gray")
+    return valor
+
+
+insumos = [
+    ("zips", "Estados de cuenta PeYa", "ZIP semanales, sin huecos", ["zip"], True, "los ZIP de estado de cuenta"),
+    ("facturas", "Facturas PEDIDOSYA / PAGOS YA", "PDF · pto. vta. 0026 y 0013", ["pdf"], True, "las facturas PDF"),
+    ("mayor", "Mayor cuenta recaudación", "Excel · completo desde el origen", ["xlsx"], False, "el mayor de recaudación"),
+] + [
+    (clave, titulo, detalle, ["xlsx"], False, f"el reporte {titulo}") for clave, titulo, detalle in ent["reportes"]
+]
+if mensual:
+    insumos.append(("anterior", "Conciliación del mes anterior", "Excel generado por este módulo",
+                    ["xlsx"], False, "la conciliación del mes anterior"))
+
+st.markdown('<div class="section-title">Insumos</div>', unsafe_allow_html=True)
+archivos, faltantes = {}, []
+for inicio in range(0, len(insumos), 2):
+    cols = st.columns(2, gap="medium")
+    for col, (clave, titulo, detalle, tipos, multiple, falta) in zip(cols, insumos[inicio:inicio + 2]):
+        with col:
+            archivos[clave] = _insumo(clave, titulo, detalle, tipos, multiple)
+        if not archivos[clave]:
+            faltantes.append(falta)
+
+if faltantes:
+    st.info("Falta cargar: " + ", ".join(faltantes) + ".", icon=":material/info:")
+
+_, col_boton = st.columns([3, 1])
+with col_boton:
+    boton = st.button(
+        f"Conciliar {nombre_ent}", type="primary", icon=":material/play_arrow:",
+        disabled=bool(faltantes), use_container_width=True, key=f"btn_{pre}",
+    )
+
+clave_estado = f"resultado_{pre}"
+if boton and not faltantes:
+    st.session_state.pop(clave_estado, None)
+    with st.status(f"Conciliando Pedidos Ya {nombre_ent}…", expanded=False) as estado:
+        try:
+            st.write("Leyendo estados de cuenta y facturas, cruzando contra sistemas y armando la cadena.")
+            excel, nombre_excel, trabajo, stats = correr_conciliacion_peya(
+                ent["id"], archivos["zips"], archivos["facturas"], archivos["mayor"],
+                archivo_dean=archivos.get("dean"),
+                archivo_hio_documento=archivos.get("hio_documento"),
+                archivo_hio_metodo=archivos.get("hio_metodo"),
+                archivo_atalaya=archivos.get("atalaya"),
+                archivo_anterior=archivos.get("anterior") if mensual else None,
+            )
+            st.session_state[clave_estado] = {
+                "excel": excel, "nombre": nombre_excel, "trabajo": trabajo, "stats": stats,
+            }
+            estado.update(label="Conciliación generada", state="complete")
+        except Exception as e:
+            estado.update(label="La conciliación no pudo completarse", state="error", expanded=True)
+            st.error(f"Error al procesar: {e}")
+
+
+# ───────────────────────── Resultado ─────────────────────────
+def _estilo_estado(valor):
+    if valor in ("Cierran", "Coincide", "Sin diferencias"):
+        return "color: #1E6B3E; font-weight: 600"
+    return "color: #8A4307; font-weight: 600"
+
+
+IMPORTE = st.column_config.TextColumn(alignment="right")
+
+
+def _tabla_controles(c):
+    v = c.get("verificacion") or {}
+    ac = c.get("acreditaciones") or {}
+    re_ = c.get("reintegros") or {}
+    fa = c.get("facturas") or {}
+    n_pend = len(ac.get("pendientes") or [])
+    n_fac = len(fa.get("pendientes") or [])
+    filas = [
+        ("Ecuación de cada liquidación", f"{c.get('liquidaciones', '—')} liquidaciones", "—",
+         "Cierran" if not c.get("liq_no_cierran") else f"{len(c['liq_no_cierran'])} no cierran"),
+        ("Verificación independiente", _pesos(v.get("peya")), _pesos(v.get("ventas_internas")),
+         "Coincide" if v.get("residuo_independiente") is not None and v.get("cruces") is not None
+         and abs(v["residuo_independiente"] - v["cruces"]) <= 1 else "Difiere"),
+        (f"Reintegros ({re_.get('casos', '—')} casos)", _pesos(re_.get("liquidaciones")), _pesos(re_.get("lineas")),
+         "Coincide" if re_.get("lineas") is not None and re_.get("liquidaciones") is not None
+         and abs(re_["lineas"] - re_["liquidaciones"]) <= 1 else "Difiere"),
+        ("Acreditaciones", _pesos(ac.get("liq")), _pesos(ac.get("mayor")),
+         f"{n_pend} pendiente{'s' if n_pend != 1 else ''}" if n_pend else "Coincide"),
+        ("Facturas contra el mayor", f"{n_fac} pendiente{'s' if n_fac != 1 else ''}",
+         f"{len(fa.get('con_diferencia') or [])} con diferencia",
+         "Sin diferencias" if not (fa.get("con_diferencia") or fa.get("huerfanas")) else "Revisar"),
+        ("Ventas internas contra mayor", "—", "—",
+         "Sin diferencias" if not c.get("ventas_vs_mayor") else f"{len(c['ventas_vs_mayor'])} diferencias"),
+    ]
+    df = pd.DataFrame(filas, columns=["Control", "Liquidaciones / PeYa", "Mayor / sistemas", "Estado"])
+    st.dataframe(
+        df.style.map(_estilo_estado, subset=["Estado"]), hide_index=True, use_container_width=True,
+        column_config={"Liquidaciones / PeYa": IMPORTE, "Mayor / sistemas": IMPORTE},
     )
 
 
-def _resultado(clave_estado, entidad_nombre):
+def _tabla_cadena(lineas, saldo_inicial):
+    """Misma cadena que la hoja 'conciliacion' del Excel, con el saldo acumulado."""
+    filas, tipos = [("Saldo del mayor", "", "", _pesos(saldo_inicial))], ["total"]
+    saldo = saldo_inicial or 0.0
+    for ln in lineas:
+        if "subtotal" in ln:
+            filas.append((ln["subtotal"], "", "", _pesos(saldo)))
+            tipos.append("total")
+            continue
+        debe, haber = ln.get("debe") or 0.0, ln.get("haber") or 0.0
+        saldo += debe - haber
+        filas.append((ln.get("concepto", ""), _pesos(debe) if debe else "", _pesos(haber) if haber else "",
+                      _pesos(saldo)))
+        tipos.append("flag" if ln.get("flag") else "")
+    filas.append(("SALDO FINAL", "", "", _pesos(saldo)))
+    tipos.append("total")
+    df = pd.DataFrame(filas, columns=["Concepto", "Debe", "Haber", "Saldo"])
+    colores = {"total": "font-weight: 600; background-color: #F1F3F6", "flag": "background-color: #FFF7ED"}
+    estilo = df.style.apply(lambda f: [colores.get(tipos[f.name], "")] * len(f), axis=1)
+    st.dataframe(
+        estilo, hide_index=True, use_container_width=True, height=min(520, 35 * (len(df) + 1) + 3),
+        column_config={"Debe": IMPORTE, "Haber": IMPORTE, "Saldo": IMPORTE},
+    )
+
+
+if clave_estado in st.session_state:
     r = st.session_state[clave_estado]
     s = r["stats"]
     c = s["controles"]
+    st.divider()
 
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-    if s["valido"]:
-        st.success(f"Conciliación {entidad_nombre} {s['periodo']} generada: cierra en cero y la verificación coincide.")
-    else:
-        st.warning(
-            f"Conciliación {entidad_nombre} {s['periodo']} generada, pero no cumple las condiciones de "
-            "cierre válido (saldo final ±1 peso y verificación independiente coincidente). Revisar los controles."
+    col_tit, col_desc = st.columns([3, 2], vertical_alignment="bottom")
+    with col_tit:
+        st.subheader(f"{nombre_ent} · {s['periodo']}")
+        st.caption(f"Cierre {s['modo']} · {s['subtitulo']}")
+    with col_desc:
+        d1, d2 = st.columns(2)
+        d1.download_button(
+            "Papeles de trabajo", data=r["trabajo"],
+            file_name=r["nombre"].replace(".xlsx", "_trabajo.zip"), mime="application/zip",
+            icon=":material/folder_zip:", use_container_width=True, key=f"dl_trabajo_{pre}",
         )
-    if s["subtitulo"]:
-        st.caption(s["subtitulo"])
+        d2.download_button(
+            "Conciliación", data=r["excel"], file_name=r["nombre"], type="primary",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:", use_container_width=True, key=f"dl_{pre}",
+        )
 
-    clase_final = "ok" if s["cierre_ok"] else "warn"
-    clase_verif = "ok" if s["verificacion_ok"] else "warn"
-    st.markdown(f"""
-    <div class="metric-row">
-        <div class="metric-card">
-            <div class="metric-value">{_pesos(c.get('saldo_mayor'))}</div>
-            <div class="metric-label">Saldo del mayor</div>
-        </div>
-        <div class="metric-card {clase_final}">
-            <div class="metric-value">{_pesos(c.get('saldo_final'))}</div>
-            <div class="metric-label">Saldo final</div>
-        </div>
-        <div class="metric-card {clase_verif}">
-            <div class="metric-value">{c.get('liquidaciones', '—')}</div>
-            <div class="metric-label">Liquidaciones</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    if s["valido"]:
+        st.success("**Cierre válido.** El saldo final está dentro de la tolerancia de 1 peso y la "
+                   "verificación independiente coincide con los cruces.", icon=":material/check_circle:")
+    else:
+        st.warning("**El cierre no cumple las condiciones de validez** (saldo final de ±1 peso y "
+                   "verificación independiente coincidente). Revisar los controles.", icon=":material/error:")
+    st.caption("Guardar el Excel de conciliación sin modificar: es el insumo del cierre del mes siguiente.")
 
     v = c.get("verificacion") or {}
-    ac = c.get("acreditaciones") or {}
-    fa = c.get("facturas") or {}
-    re_ = c.get("reintegros") or {}
-    scope = c.get("scope") or ["", ""]
-    st.markdown(f"""
-    <div class="liq-card">
-        <div class="liq-id">Verificación independiente</div>
-        <div class="liq-detail">Ventas internas: {_pesos(v.get('ventas_internas'))} &nbsp;|&nbsp; PeYa: {_pesos(v.get('peya'))}</div>
-        <div class="liq-detail">Residuo independiente: {_pesos(v.get('residuo_independiente'))} &nbsp;|&nbsp; Explicado por cruces: {_pesos(v.get('cruces'))}</div>
-    </div>
-    <div class="liq-card">
-        <div class="liq-id">Acreditaciones</div>
-        <div class="liq-detail">Liquidaciones: {_pesos(ac.get('liq'))} &nbsp;|&nbsp; Mayor: {_pesos(ac.get('mayor'))}</div>
-        <div class="liq-detail">Pendientes: {', '.join(ac.get('pendientes') or []) or '—'}</div>
-    </div>
-    <div class="liq-card">
-        <div class="liq-id">Facturas</div>
-        <div class="liq-detail">Pendientes: {len(fa.get('pendientes') or [])} &nbsp;|&nbsp; Con diferencia: {len(fa.get('con_diferencia') or [])} &nbsp;|&nbsp; Tipeadas: {len(fa.get('tipeadas') or [])} &nbsp;|&nbsp; Huérfanas: {len(fa.get('huerfanas') or [])}</div>
-    </div>
-    <div class="liq-card">
-        <div class="liq-id">Reintegros</div>
-        <div class="liq-detail">Líneas: {_pesos(re_.get('lineas'))} &nbsp;|&nbsp; Liquidaciones: {_pesos(re_.get('liquidaciones'))} &nbsp;|&nbsp; Casos: {re_.get('casos', '—')}</div>
-        <div class="liq-detail">Scope: {scope[0]} al {scope[-1]}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Saldo del mayor", _pesos(c.get("saldo_mayor")), border=True)
+    m2.metric("Saldo final", _pesos(c.get("saldo_final")), border=True)
+    m3.metric("Residuo explicado por cruces", _pesos(v.get("cruces")), border=True)
+    m4.metric("Liquidaciones procesadas", c.get("liquidaciones", "—"), border=True)
 
-    if c.get("liq_no_cierran"):
-        st.warning("Liquidaciones cuya ecuación no cierra: " + ", ".join(map(str, c["liq_no_cierran"])))
-    if c.get("ventas_vs_mayor"):
-        st.warning(f"Ventas internas vs mayor con diferencias en {len(c['ventas_vs_mayor'])} caso/s (control 2).")
-    if c.get("devengado_vs_reporte"):
-        st.warning(f"Devengado anterior vs reporte nuevo con diferencias en {len(c['devengado_vs_reporte'])} caso/s (control 2b).")
-
-    # Líneas que requieren decisión humana: el cálculo no cambia con esa decisión.
-    if s["lineas_naranja"]:
-        detalle = "".join(
-            f'<div class="liq-detail">{x["concepto"]} &nbsp;—&nbsp; {_pesos(x["importe"])}</div>'
-            for x in s["lineas_naranja"]
-        )
-        st.markdown(
-            f'<div class="liq-card naranja"><div class="liq-id">Líneas deducidas o arrastradas '
-            f'({len(s["lineas_naranja"])})</div>{detalle}</div>',
-            unsafe_allow_html=True,
-        )
-    if s["pendiente_definicion"]:
-        detalle = "".join(
-            f'<div class="liq-detail">{x["concepto"]} &nbsp;—&nbsp; {_pesos(x["importe"])}</div>'
-            for x in s["pendiente_definicion"]
-        )
-        st.markdown(
-            f'<div class="liq-card warn"><div class="liq-id">Pendiente de definición (fuera del saldo)</div>{detalle}</div>',
-            unsafe_allow_html=True,
-        )
-
-    for adv in s["advertencias"]:
-        st.warning(adv)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.download_button(
-        label="📥 Descargar conciliación (.xlsx)",
-        data=r["excel"],
-        file_name=r["nombre"],
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key=f"dl_{clave_estado}",
+    revisar = (
+        [{"Concepto": x["concepto"], "Importe": x["importe"], "Tipo": "Deducida o arrastrada"}
+         for x in s["lineas_naranja"]]
+        + [{"Concepto": x["concepto"], "Importe": x["importe"], "Tipo": "Pendiente de definición"}
+           for x in s["pendiente_definicion"]]
     )
-    st.caption("Guardar este Excel sin modificar: es el insumo del cierre del mes siguiente.")
-    st.download_button(
-        label="📥 Descargar papeles de trabajo y controles (.zip)",
-        data=r["trabajo"],
-        file_name=r["nombre"].replace(".xlsx", "_trabajo.zip"),
-        mime="application/zip",
-        use_container_width=True,
-        key=f"dl_trabajo_{clave_estado}",
-    )
-    with st.expander("Log del proceso"):
+    t_ctl, t_rev, t_cad, t_log = st.tabs([
+        ":material/fact_check: Controles",
+        f":material/flag: A revisar ({len(revisar)})",
+        ":material/format_list_numbered: Cadena de conceptos",
+        ":material/terminal: Registro del proceso",
+    ])
+    with t_ctl:
+        _tabla_controles(c)
+        for adv in s["advertencias"]:
+            st.warning(adv, icon=":material/warning:")
+    with t_rev:
+        if revisar:
+            st.caption("Líneas que requieren una decisión. El cálculo no cambia con esa decisión; "
+                       "lo pendiente de definición queda fuera del saldo.")
+            df_rev = pd.DataFrame(revisar)
+            df_rev["Importe"] = df_rev["Importe"].map(_pesos)
+            st.dataframe(df_rev, hide_index=True, use_container_width=True,
+                         column_config={"Importe": IMPORTE})
+        else:
+            st.caption("No hay líneas deducidas, arrastradas ni pendientes de definición.")
+    with t_cad:
+        _tabla_cadena(s.get("cadena") or [], c.get("saldo_mayor"))
+        if s["nota_final"]:
+            st.caption(s["nota_final"])
+    with t_log:
         st.code(s["log"] or "(sin salida)", language="text")
-
-
-def _pestania_entidad(entidad, nombre, descripcion, reportes):
-    """reportes: lista de (clave, etiqueta, descripción para 'falta cargar')."""
-    pre = f"peya_{entidad}"
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown(f'<div class="liq-card"><div class="liq-detail">{descripcion}</div></div>',
-                unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    zips = _uploader("Estados de cuenta PeYa (ZIP semanales, sin huecos)", f"{pre}_zips", ["zip"], True)
-    _lista_archivos(zips)
-    facturas = _uploader("Facturas PEDIDOSYA / PAGOS YA (PDFs)", f"{pre}_facturas", ["pdf"], True)
-    _lista_archivos(facturas)
-
-    if zips or facturas:
-        st.markdown(f"""
-        <div class="metric-row">
-            <div class="metric-card ok">
-                <div class="metric-value">{len(zips or [])}</div>
-                <div class="metric-label">Estados de cuenta</div>
-            </div>
-            <div class="metric-card ok">
-                <div class="metric-value">{len(facturas or [])}</div>
-                <div class="metric-label">Facturas</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-
-    mayor = _uploader("Mayor cuenta recaudación PeYa — completo desde el origen (Excel)",
-                      f"{pre}_mayor", ["xlsx"])
-    archivos = {}
-    for clave, etiqueta, _ in reportes:
-        archivos[clave] = _uploader(etiqueta, f"{pre}_{clave}", ["xlsx"])
-
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-
-    mensual = st.checkbox(
-        "Cierre mensual (con la conciliación del mes anterior)", value=True, key=f"{pre}_es_mensual",
-        help="Sin conciliación anterior se corre un cierre inicial sobre todo el rango de ZIPs.",
-    )
-    anterior = None
-    if mensual:
-        anterior = _uploader("Conciliación del mes anterior (Excel generado por este módulo)",
-                             f"{pre}_anterior", ["xlsx"])
-
-    faltantes = [
-        desc for desc, valor in [
-            ("los ZIP de estado de cuenta", zips),
-            ("las facturas PDF", facturas),
-            ("el mayor de recaudación", mayor),
-            *[(desc, archivos[clave]) for clave, _, desc in reportes],
-            *([("la conciliación del mes anterior", anterior)] if mensual else []),
-        ] if not valor
-    ]
-    if faltantes:
-        st.info("Falta cargar: " + ", ".join(faltantes) + ".")
-
-    boton = st.button(
-        f"CONCILIAR PEDIDOS YA — {nombre}",
-        disabled=bool(faltantes),
-        use_container_width=True,
-        key=f"btn_{pre}",
-    )
-
-    clave_estado = f"resultado_{pre}"
-    if boton and not faltantes:
-        st.session_state.pop(clave_estado, None)
-        with st.spinner(f"Conciliando PedidosYa {nombre}..."):
-            try:
-                excel, nombre_excel, trabajo, stats = correr_conciliacion_peya(
-                    entidad, zips, facturas, mayor,
-                    archivo_dean=archivos.get("dean"),
-                    archivo_hio_documento=archivos.get("hio_documento"),
-                    archivo_hio_metodo=archivos.get("hio_metodo"),
-                    archivo_atalaya=archivos.get("atalaya"),
-                    archivo_anterior=anterior,
-                )
-                st.session_state[clave_estado] = {
-                    "excel": excel, "nombre": nombre_excel, "trabajo": trabajo, "stats": stats,
-                }
-            except Exception as e:
-                st.error(f"Error al procesar: {e}")
-
-    if clave_estado in st.session_state:
-        _resultado(clave_estado, nombre)
-
-
-tab_easa, tab_ronda = st.tabs(["🏢  EASA", "🏢  Ronda"])
-
-with tab_easa:
-    _pestania_entidad(
-        "easa", "EASA",
-        "Parte del saldo del mayor de la cuenta recaudación PedidosYa (local 411335) y lo lleva a cero: "
-        "ajustes de registración, devengamiento, pendientes al cierre y cruces contra Dean "
-        "(por Nº de transacción) y HIOffice (por localizador y, lo que no tiene, por fecha, local y monto bruto).",
-        [
-            ("dean", "Ventas Dean (Excel)", "el reporte de Dean"),
-            ("hio_documento", "Reporte HIO por documento (Excel)", "el reporte HIO por documento"),
-            ("hio_metodo", "Reporte HIO por método de pago (Excel)", "el reporte HIO por método de pago"),
-        ],
-    )
-
-with tab_ronda:
-    _pestania_entidad(
-        "ronda", "RONDA",
-        "Parte del saldo del mayor de la cuenta recaudación PedidosYa (local 409994) y lo lleva a cero: "
-        "ajustes de registración, devengamiento, pendientes al cierre y cruces contra HIOffice "
-        "(por localizador y por fecha, local y BASE) y Atalaya (por fecha y criterio de facturación). "
-        "El histórico de diferencias se abre por mes y por local.",
-        [
-            ("hio_documento", "Reporte HIO por documento (Excel)", "el reporte HIO por documento"),
-            ("hio_metodo", "Reporte HIO por método de pago (Excel)", "el reporte HIO por método de pago"),
-            ("atalaya", "Tickets Atalaya (Excel)", "el reporte de Atalaya"),
-        ],
-    )

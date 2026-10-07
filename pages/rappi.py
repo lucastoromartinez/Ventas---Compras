@@ -1,164 +1,20 @@
 import streamlit as st
+from estilos import aplicar_estilos, encabezado
 from logica_rappi import correr_rappi, correr_rappi_resumen_facturas
 from logica_atalaya import correr_atalaya
 from logica_conciliacion_rappi import correr_conciliacion_rappi_easa
 from logica_conciliacion_rappi_ronda import correr_conciliacion_rappi_ronda
 
-st.set_page_config(
-    page_title="Rappi",
-    page_icon="🛵",
-    layout="centered",
+aplicar_estilos()
+
+encabezado(
+    "Rappi",
+    "Liquidaciones y conciliación de ventas Rappi.",
+    "Conciliaciones / Rappi",
 )
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-
-.header-block {
-    border-left: 3px solid #FF441F;
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2rem;
-}
-.header-block h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}
-.header-block p {
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.upload-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #FF441F;
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-[data-testid="stFileUploader"] {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.8rem; transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #FF441F; }
-
-.stButton > button {
-    background: #FF441F !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-    width: 100% !important; margin-top: 1rem !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-.stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
-
-.counter-box {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1.2rem;
-    text-align: center; margin: 1.5rem 0;
-}
-.counter-box .counter-num {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2.5rem; font-weight: 600;
-    color: #FF441F; line-height: 1;
-}
-.counter-box .counter-label {
-    font-size: 0.75rem; color: #555;
-    text-transform: uppercase; letter-spacing: 1px;
-    margin-top: 0.4rem; font-family: 'IBM Plex Mono', monospace;
-}
-
-.metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; flex-wrap: wrap; }
-.metric-card {
-    flex: 1; min-width: 80px; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}
-.metric-card .metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600; color: #FF441F; line-height: 1;
-}
-.metric-card .metric-label {
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.metric-card.warn .metric-value { color: #facc15; }
-.metric-card.ok   .metric-value { color: #4ade80; }
-
-.liq-card {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.9rem 1.2rem; margin: 0.5rem 0;
-    font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
-}
-.liq-card .liq-id { color: #FF441F; font-weight: 600; font-size: 0.85rem; }
-.liq-card .liq-detail { color: #888; margin-top: 0.3rem; }
-.liq-card.warn { border-color: #facc1555; }
-
-.divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
-
-[data-testid="stDownloadButton"] > button {
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-    transition: border-color 0.2s !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #FF441F !important; color: #FF441F !important;
-}
-
-.back-btn > button {
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}
-.back-btn > button:hover { color: #FF441F !important; border-color: #FF441F !important; }
-
-.pdf-list {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem 1.2rem;
-    margin: 1rem 0; max-height: 200px; overflow-y: auto;
-}
-.pdf-item {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #888;
-    padding: 0.2rem 0; border-bottom: 1px solid #222;
-}
-.pdf-item:last-child { border-bottom: none; }
-.pdf-item::before { content: "📄 "; }
-
-div[data-testid="stTabs"] button {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; color: #555 !important;
-}
-div[data-testid="stTabs"] button[aria-selected="true"] {
-    color: #FF441F !important; border-bottom-color: #FF441F !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>🛵 Rappi</h1>
-    <p>Liquidaciones y conciliación de ventas Rappi</p>
-</div>
-""", unsafe_allow_html=True)
-
 tab_liquidaciones, tab_conciliacion, tab_atalaya = st.tabs(
-    ["📑  Liquidaciones Rappi", "🧾  Conciliación Rappi", "🏪  Atalaya"]
+    [":material/description: Liquidaciones Rappi", ":material/fact_check: Conciliación Rappi", ":material/storefront: Atalaya"]
 )
 
 
@@ -219,7 +75,7 @@ with tab_liquidaciones:
             st.info("Cargá al menos una factura PDF de Rappi.")
 
         boton_rappi = st.button(
-            "CRUZAR FACTURAS vs LIQUIDACIONES",
+            "Cruzar facturas contra liquidaciones",
             disabled=not todo_ok,
             use_container_width=True,
             key="btn_rappi"
@@ -259,7 +115,7 @@ with tab_liquidaciones:
                 st.markdown(f"""
                 <div class="{clase}">
                     <div class="liq-id">ID Pago: {d['id_pago']}</div>
-                    <div class="liq-detail">✅ {d['match']} match &nbsp;|&nbsp; ⚠️ {d['falta']} sin factura</div>
+                    <div class="liq-detail">{d['match']} con factura &nbsp;·&nbsp; {d['falta']} sin factura</div>
                     <div class="liq-detail">Facturas: {facturas_str}</div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -270,7 +126,8 @@ with tab_liquidaciones:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar resultados Rappi (.zip)",
+                label="Descargar resultados Rappi (.zip)",
+                icon=":material/download:",
                 data=r["zip"],
                 file_name="resultados_rappi.zip",
                 mime="application/zip",
@@ -298,7 +155,7 @@ with tab_liquidaciones:
             st.info("Cargá al menos una factura PDF de Rappi.")
 
         boton_rappi_simple = st.button(
-            "GENERAR RESUMEN DE FACTURAS",
+            "Generar resumen de facturas",
             disabled=not archivos_pdf_simple,
             use_container_width=True,
             key="btn_rappi_simple"
@@ -328,7 +185,8 @@ with tab_liquidaciones:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar resumen de facturas (.xlsx)",
+                label="Descargar resumen de facturas (.xlsx)",
+                icon=":material/download:",
                 data=r["buf"],
                 file_name="resumen_facturas.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -343,7 +201,7 @@ with tab_liquidaciones:
 with tab_conciliacion:
     st.markdown("<br>", unsafe_allow_html=True)
 
-    tab_easa, tab_ronda = st.tabs(["🏢  EASA", "🏢  Ronda"])
+    tab_easa, tab_ronda = st.tabs(["EASA", "Ronda"])
 
     with tab_easa:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -432,7 +290,7 @@ with tab_conciliacion:
             st.info("Falta cargar: " + ", ".join(faltantes) + ".")
 
         boton_conc = st.button(
-            "CONCILIAR RAPPI — EASA",
+            "Conciliar Rappi — EASA",
             disabled=bool(faltantes),
             use_container_width=True,
             key="btn_conciliacion_easa"
@@ -512,7 +370,8 @@ with tab_conciliacion:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar conciliación Rappi EASA (.zip)",
+                label="Descargar conciliación Rappi EASA (.zip)",
+                icon=":material/download:",
                 data=r["zip"],
                 file_name=f"conciliacion_rappi_easa_{c['mes']:02d}_{c['anio']}.zip",
                 mime="application/zip",
@@ -609,7 +468,7 @@ with tab_conciliacion:
             st.info("Falta cargar: " + ", ".join(faltantes_ronda) + ".")
 
         boton_ronda = st.button(
-            "CONCILIAR RAPPI — RONDA",
+            "Conciliar Rappi — Ronda",
             disabled=bool(faltantes_ronda),
             use_container_width=True,
             key="btn_conciliacion_ronda"
@@ -694,7 +553,8 @@ with tab_conciliacion:
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar conciliación Rappi Ronda (.zip)",
+                label="Descargar conciliación Rappi Ronda (.zip)",
+                icon=":material/download:",
                 data=r["zip"],
                 file_name=f"conciliacion_rappi_ronda_{s['mes_numero']:02d}_{s['anio']}.zip",
                 mime="application/zip",
@@ -737,7 +597,7 @@ with tab_atalaya:
         st.info("Cargá el extracto Excel de Atalaya.")
 
     boton_atalaya = st.button(
-        "CRUZAR RAPPI vs ATALAYA",
+        "Cruzar Rappi contra Atalaya",
         disabled=not todo_ok_atalaya,
         use_container_width=True,
         key="btn_atalaya"
@@ -777,7 +637,8 @@ with tab_atalaya:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar cruce Rappi vs Atalaya (.xlsx)",
+            label="Descargar cruce Rappi vs Atalaya (.xlsx)",
+            icon=":material/download:",
             data=r["buf"],
             file_name="cruce_rappi_atalaya.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -1,108 +1,16 @@
 from io import BytesIO
 
 import streamlit as st
+from estilos import aplicar_estilos, encabezado
 from logica import correr_cruce, detectar_sociedad, load_excel_file, SOCIEDADES_POR_CUIT
 
-st.set_page_config(
-    page_title="Cruce de Compras",
-    page_icon="🧾",
-    layout="centered",
+aplicar_estilos()
+
+encabezado(
+    "Compras",
+    "Comprobantes recibidos: ARCA contra sistema interno.",
+    "Comprobantes / Compras",
 )
-
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-.header-block {
-    border-left: 3px solid #00ff87;
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2.5rem;
-}
-.header-block h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}
-.header-block p {
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.upload-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #00ff87;
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-[data-testid="stFileUploader"] {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.5rem; transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #00ff87; }
-.stButton > button {
-    background: #00ff87 !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-    width: 100% !important; margin-top: 1rem !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-.stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
-.metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.metric-card {
-    flex: 1; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}
-.metric-card .metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600; color: #00ff87; line-height: 1;
-}
-.metric-card .metric-label {
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.metric-card.warn .metric-value  { color: #ffaa00; }
-.metric-card.error .metric-value { color: #ff4444; }
-.divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
-[data-testid="stDownloadButton"] > button {
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-    transition: border-color 0.2s !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #00ff87 !important; color: #00ff87 !important;
-}
-.back-btn > button {
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}
-.back-btn > button:hover { color: #00ff87 !important; border-color: #00ff87 !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>Cruce de Compras</h1>
-    <p>ARCA &nbsp;×&nbsp; Sistema Interno</p>
-</div>
-""", unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -164,7 +72,7 @@ if not ambos_cargados:
 elif not sociedad:
     st.info("Seleccioná la sociedad para habilitar el cruce.")
 
-boton = st.button("CRUZAR COMPROBANTES", disabled=not listo, use_container_width=True)
+boton = st.button("Cruzar comprobantes", disabled=not listo, use_container_width=True)
 
 if boton and listo:
     with st.spinner("Procesando..."):
@@ -226,7 +134,8 @@ if "resultado_compras" in st.session_state:
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.download_button(
-        label="📥 Descargar reporte completo",
+        label="Descargar reporte completo",
+        icon=":material/download:",
         data=r["buf_reporte"],
         file_name=f"reporte_{r.get('sociedad') or 'cruce'}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
