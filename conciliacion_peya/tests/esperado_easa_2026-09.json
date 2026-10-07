@@ -1,0 +1,222 @@
+{
+ "saldo": 33522248.07,
+ "lineas": [
+  {
+   "concepto": "Diferencia de redondeo en acreditaciones registradas",
+   "importe": -0.4
+  },
+  {
+   "concepto": "Diferencia de redondeo en facturas registradas",
+   "importe": 0.07
+  },
+  {
+   "concepto": "Ventas D&D 09-2026 (online TC)",
+   "importe": 24459051.5
+  },
+  {
+   "concepto": "Ventas D&D 09-2026 (efectivo)",
+   "importe": 3389168.4
+  },
+  {
+   "concepto": "Ventas 09-2026 HIO",
+   "importe": 13652281.0
+  },
+  {
+   "concepto": "Ventas 09-2026 HIO PY efectivo",
+   "importe": 1611830.0
+  },
+  {
+   "concepto": "Ventas D&D 01/10 al 04/10 (online TC)",
+   "importe": 4426039.0
+  },
+  {
+   "concepto": "Ventas D&D 01/10 al 04/10 (efectivo)",
+   "importe": 402573.4
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 HIO",
+   "importe": 2475281.0
+  },
+  {
+   "concepto": "Ventas 01/10 al 04/10 HIO PY efectivo",
+   "importe": 108335.0
+  },
+  {
+   "concepto": "Acreditacion 14/09-20/09",
+   "importe": -4881006.27
+  },
+  {
+   "concepto": "Acreditacion 21/09-27/09",
+   "importe": -4977424.19
+  },
+  {
+   "concepto": "Acreditacion 28/09-04/10",
+   "importe": -5614045.11
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02830513",
+   "importe": -4203532.96
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02874119",
+   "importe": -3149175.37
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02895087",
+   "importe": -2443013.95
+  },
+  {
+   "concepto": "Factura Pendiente 0026-02911737",
+   "importe": -2433865.93
+  },
+  {
+   "concepto": "Ventas con pago por fuera de la aplicación ya cobradas",
+   "importe": -41419620.33
+  },
+  {
+   "concepto": "Retencion 28/09-04/10",
+   "importe": -16093.4
+  },
+  {
+   "concepto": "Diferencia Descuentos facturados en semana distinta",
+   "importe": 135601.93
+  },
+  {
+   "concepto": "Cargos / Reintegros adicionales de liquidación (liq. anteriores)",
+   "importe": -45401.14
+  },
+  {
+   "concepto": "Aminoración descuento comercial (liq. anteriores)",
+   "importe": 28476.33
+  },
+  {
+   "concepto": "Ajuste sin respaldo en liquidaciones: Diferencia PY 02-2026",
+   "importe": 6517.0
+  },
+  {
+   "concepto": "Retencion IIBB 16/03-22/03 Duplicada",
+   "importe": 167988.04
+  },
+  {
+   "concepto": "Acreditación Registrada de más 09/03-15/03",
+   "importe": 31245.0
+  },
+  {
+   "concepto": "Diferencia de redondeo en acreditaciones registradas",
+   "importe": -1.13
+  },
+  {
+   "concepto": "Servicio Pago en Linea (No facturado) 09/03-15/03",
+   "importe": -31245.03
+  },
+  {
+   "concepto": "Factura 0026-02279643 pagada con diferencia",
+   "importe": -109598.3
+  },
+  {
+   "concepto": "Factura 0026-02374567 pagada con diferencia",
+   "importe": -0.36
+  },
+  {
+   "concepto": "Factura 0013-02047733 registrada como 0013-02047723 en el mayor",
+   "importe": 0.0
+  },
+  {
+   "concepto": "Ventas HIO 04-2026 registradas de menos",
+   "importe": 15890.0
+  },
+  {
+   "concepto": "Ventas D&D 05-2026 registradas de más",
+   "importe": -29997.0
+  },
+  {
+   "concepto": "Ventas D&D 08-2026 registradas de más",
+   "importe": -62346.0
+  },
+  {
+   "concepto": "Diferencia HIO reporte método vs documento",
+   "importe": -15500.0
+  },
+  {
+   "concepto": "Retencion 22/06-28/06",
+   "importe": -198490.5
+  },
+  {
+   "concepto": "Residuo del cierre anterior (redondeo)",
+   "importe": -0.61
+  },
+  {
+   "concepto": "Diferencia D&D match (Pago en App mal integrado)",
+   "importe": -4130526.75
+  },
+  {
+   "concepto": "Falta Dean (PeYa liquidó, Dean no facturó)",
+   "importe": 988979.0
+  },
+  {
+   "concepto": "Falta PeYa sobra Dean (Dean facturó, PeYa no liquidó)",
+   "importe": -30718.0
+  },
+  {
+   "concepto": "NC Complemento Reintegro Dean 50% (Pedidos Facturados Cancelados)",
+   "importe": -1199115.91
+  },
+  {
+   "concepto": "ND Pedidos Reintegrados 50% No Registrados Dean",
+   "importe": 405760.28
+  },
+  {
+   "concepto": "ND Pedidos D&D Reintegros 100%",
+   "importe": 203803.5
+  },
+  {
+   "concepto": "Diferencia HIO match (Pago en App mal integrado)",
+   "importe": -2686692.45
+  },
+  {
+   "concepto": "Diferencia HIO match Integrador Apagado (Facturado por la Bruta)",
+   "importe": -4926242.71
+  },
+  {
+   "concepto": "Falta HIO sobra PeYa",
+   "importe": 7406639.0
+  },
+  {
+   "concepto": "Falta PeYa sobra HIO",
+   "importe": -10450598.01
+  },
+  {
+   "concepto": "NC HIO x Complemento",
+   "importe": -843454.57
+  },
+  {
+   "concepto": "ND HIO Reintegro 50%",
+   "importe": 387038.86
+  },
+  {
+   "concepto": "ND HIO Reintegro 100%",
+   "importe": 72960.0
+  }
+ ],
+ "abierto": [],
+ "hojas": {
+  "conciliacion": 57,
+  "Diferencias por mes": 13,
+  "Recaudacion": 89,
+  "Venta Dean": 1478,
+  "Venta Combinada HIO": 594,
+  "PeYa Lista Pedidos": 2039,
+  "Liquidaciones": 5,
+  "Match Dean PeYa": 1463,
+  "Falta Dean": 0,
+  "Falta PeYa (sobra Dean)": 0,
+  "Reintegros Dean": 25,
+  "Match HIO 1": 569,
+  "Match HIO 2 (Lado PeYa)": 2,
+  "Match HIO 2 (Lado HIO)": 2,
+  "Falta HIO (sobra PeYa)": 5,
+  "Falta PeYa (sobra HIO)": 10,
+  "Reintegros HIO": 10
+ },
+ "final": 0.0
+}
