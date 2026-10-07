@@ -252,6 +252,8 @@ def correr_conciliacion_peya(entidad, archivos_zip, archivos_facturas, archivo_m
         "valido": cierre_ok and verificacion_ok,
         "lineas_naranja": naranja,
         "pendiente_definicion": abierto,
+        # Solo para mostrar en pantalla: la misma cadena que va al Excel.
+        "cadena": conceptos.get("lineas", []),
         "advertencias": advertencias,
         "log": log,
     }

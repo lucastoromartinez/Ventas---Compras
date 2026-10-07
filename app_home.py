@@ -1,128 +1,41 @@
 import streamlit as st
 
-st.set_page_config(
-    page_title="Sistema de Cruces",
-    page_icon="🧮",
-    layout="centered",
-)
+from estilos import aplicar_estilos, encabezado, tarjeta
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+aplicar_estilos()
+encabezado("Inicio", "Seleccione el proceso a ejecutar.")
 
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-.hero {
-    text-align: center;
-    padding: 3rem 0 2rem 0;
-}
-.hero h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -1px;
-}
-.hero p {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.8rem; color: #444;
-    margin: 0.5rem 0 0 0;
-    letter-spacing: 2px; text-transform: uppercase;
-}
-
-/* --- Cards que son, a la vez, el botón --- */
-div[class*="st-key-card_"] {
-    position: relative;
-    margin-bottom: 1.2rem;
-}
-div[class*="st-key-card_"] .card-visual {
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
-    border-radius: 10px;
-    padding: 1.6rem 1rem;
-    text-align: center;
-    pointer-events: none;
-    transition: border-color 0.15s, transform 0.15s;
-}
-div[class*="st-key-card_"] .card-icon { font-size: 2rem; margin-bottom: 0.8rem; }
-div[class*="st-key-card_"] .card-title {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.85rem; font-weight: 600;
-    color: #ffffff; margin-bottom: 0.4rem;
-}
-div[class*="st-key-card_"] .card-desc { font-size: 0.7rem; color: #666; line-height: 1.4; }
-
-div[class*="st-key-card_"] [data-testid="stElementContainer"]:has(button) {
-    position: absolute !important; inset: 0 !important;
-    margin: 0 !important; padding: 0 !important;
-    width: 100% !important; height: 100% !important;
-    z-index: 2;
-}
-div[class*="st-key-card_"] button {
-    position: absolute !important; inset: 0 !important;
-    width: 100% !important; height: 100% !important;
-    margin: 0 !important; padding: 0 !important;
-    opacity: 0 !important; cursor: pointer !important;
-    border: none !important; background: transparent !important;
-}
-div[class*="st-key-card_"]:hover .card-visual { transform: translateY(-3px); }
-.st-key-card_compras:hover .card-visual { border-color: #00ff87; }
-.st-key-card_ventas:hover .card-visual  { border-color: #00aaff; }
-.st-key-card_tesoreria:hover .card-visual { border-color: #ffb020; }
-.st-key-card_concil:hover .card-visual  { border-color: #ff6b35; }
-.st-key-card_pdfs:hover .card-visual    { border-color: #c084fc; }
-.st-key-card_rappi:hover .card-visual   { border-color: #FF441F; }
-.st-key-card_pedidosya:hover .card-visual { border-color: #FA0050; }
-.st-key-card_impuestos:hover .card-visual { border-color: #f5c518; }
-
-.footer {
-    text-align: center;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.65rem; color: #333;
-    margin-top: 3rem; letter-spacing: 1px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="hero">
-    <h1>🧮 Sistema de Cruces</h1>
-    <p>Contabilidad Enter</p>
-</div>
-""", unsafe_allow_html=True)
+# Si "_pages" no está en session_state (se entró directo a esta página sin
+# pasar por app_principal), se usa la ruta del archivo.
+PAGES = st.session_state.get("_pages", {})
 
 
-def card(col, accent, icon, title, desc, page_key, fallback_path):
-    with col:
-        with st.container(key=f"card_{accent}"):
-            st.markdown(f"""
-            <div class="card-visual">
-                <div class="card-icon">{icon}</div>
-                <div class="card-title">{title}</div>
-                <div class="card-desc">{desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            clicked = st.button(f"{title} - {desc}", key=f"nav_{accent}")
-        if clicked:
-            pages = st.session_state.get("_pages")
-            # Si "_pages" no está en session_state (ej. se entró directo a
-            # esta página por link y la sesión no pasó por app_principal),
-            # se usa el path como string en vez de romper con KeyError.
-            st.switch_page(pages[page_key] if pages else fallback_path)
+def _pagina(clave, ruta):
+    return PAGES.get(clave, ruta)
 
 
-row1 = st.columns(3, gap="medium")
-card(row1[0], "compras", "🧾", "Compras", "Comprobantes recibidos vs ARCA", "compras", "pages/compras.py")
-card(row1[1], "ventas", "📊", "Ventas", "Comprobantes emitidos vs ARCA", "ventas", "pages/ventas.py")
-card(row1[2], "tesoreria", "💰", "Tesorería", "Caja Central vs Contabilidad", "tesoreria", "pages/tesoreria.py")
+SECCIONES = [
+    ("Comprobantes", [
+        ("compras", "compras", "Compras", "Comprobantes recibidos contra ARCA", "pages/compras.py"),
+        ("ventas", "ventas", "Ventas", "Comprobantes emitidos contra ARCA", "pages/ventas.py"),
+    ]),
+    ("Conciliaciones", [
+        ("conciliaciones", "bancos", "Bancos", "Mayor contra extracto bancario", "pages/conciliaciones.py"),
+        ("tesoreria", "tesoreria", "Tesorería", "Caja Central contra contabilidad", "pages/tesoreria.py"),
+        ("rappi", "rappi", "Rappi", "Liquidaciones, conciliación y Atalaya", "pages/rappi.py"),
+        ("pedidosya", "pedidosya", "Pedidos Ya", "Conciliación cuenta recaudación", "pages/pedidosya.py"),
+    ]),
+    ("Impuestos y herramientas", [
+        ("impuestos", "impuestos", "Impuestos", "Percepciones y retenciones contra sistema", "pages/impuestos.py"),
+        ("lector_pdfs", "pdfs", "Lector de PDFs", "Liquidaciones Payway a Excel", "pages/lector_pdfs.py"),
+    ]),
+]
 
-row2 = st.columns(3, gap="medium")
-card(row2[1], "concil", "🏦", "Conciliaciones", "Mayor vs extracto bancario", "conciliaciones", "pages/conciliaciones.py")
-card(row2[2], "pedidosya", "🍔", "Pedidos Ya", "Conciliación cuenta recaudación", "pedidosya", "pages/pedidosya.py")
-
-row3 = st.columns(3, gap="medium")
-card(row3[0], "pdfs", "📷", "Lector PDFs", "Liquidaciones Payway a Excel", "lector_pdfs", "pages/lector_pdfs.py")
-card(row3[1], "rappi", "🛵", "Rappi", "Liquidaciones, conciliación y Atalaya", "rappi", "pages/rappi.py")
-card(row3[2], "impuestos", "👮", "Impuestos", "Percepciones ARCA vs sistema", "impuestos", "pages/impuestos.py")
-
-st.markdown("""
-<div class="footer">Seleccioná un proceso para comenzar</div>
-""", unsafe_allow_html=True)
+COLUMNAS = 4
+for titulo, tarjetas in SECCIONES:
+    st.markdown(f'<div class="section-title">{titulo}</div>', unsafe_allow_html=True)
+    for inicio in range(0, len(tarjetas), COLUMNAS):
+        cols = st.columns(COLUMNAS, gap="medium")
+        for col, (clave, icono, nombre, desc, ruta) in zip(cols, tarjetas[inicio:inicio + COLUMNAS]):
+            with col:
+                tarjeta(clave, icono, nombre, desc, _pagina(clave, ruta))

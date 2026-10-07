@@ -1,131 +1,21 @@
 import streamlit as st
+from estilos import aplicar_estilos, encabezado
 from logica_galicia     import correr_conciliacion_galicia
 from logica_hipotecario import correr_conciliacion_hipotecario
 from logica_cupones     import correr_conciliacion_cupones_plantilla
 from logica_fiser       import correr_conciliacion_fiser
 from logica_mercadopago import correr_conciliacion_mercadopago
 
-st.set_page_config(
-    page_title="Conciliaciones Bancarias",
-    page_icon="🏦",
-    layout="centered",
+aplicar_estilos()
+
+encabezado(
+    "Conciliaciones bancarias",
+    "Mayor contra extracto bancario y medios de pago.",
+    "Conciliaciones / Bancos",
 )
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-
-.header-block {
-    border-left: 3px solid #ff6b35;
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2rem;
-}
-.header-block h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}
-.header-block p {
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.upload-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #ff6b35;
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-.upload-label.optional { color: #888; }
-.section-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.68rem; color: #444;
-    letter-spacing: 2px; text-transform: uppercase;
-    margin: 1.2rem 0 0.8rem 0;
-}
-[data-testid="stFileUploader"] {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.5rem; transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #ff6b35; }
-.stButton > button {
-    background: #ff6b35 !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-    width: 100% !important; margin-top: 1rem !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-.stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
-.metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.metric-card {
-    flex: 1; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}
-.metric-card .metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600; color: #ff6b35; line-height: 1;
-}
-.metric-card .metric-label {
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.metric-card.error .metric-value { color: #ff4444; }
-.divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
-[data-testid="stDownloadButton"] > button {
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #ff6b35 !important; color: #ff6b35 !important;
-}
-.back-btn > button {
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}
-.back-btn > button:hover { color: #ff6b35 !important; border-color: #ff6b35 !important; }
-div[data-testid="stTabs"] button {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; color: #555 !important;
-}
-div[data-testid="stTabs"] button[aria-selected="true"] {
-    color: #ff6b35 !important; border-bottom-color: #ff6b35 !important;
-}
-.toggle-box {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem 1.2rem;
-    margin: 1rem 0;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>Conciliaciones Bancarias</h1>
-    <p>Mayor &nbsp;×&nbsp; Extracto Bancario</p>
-</div>
-""", unsafe_allow_html=True)
-
 tab_galicia, tab_hipotecario, tab_cupones, tab_fiser, tab_mp = st.tabs(
-    ["🏦  Banco Galicia", "🏦  Banco Hipotecario", "🏦  Cupones", "🏦  Fiser", "🏦  Mercado Pago"]
+    ["Banco Galicia", "Banco Hipotecario", "Cupones", "Fiser", "Mercado Pago"]
 )
 
 
@@ -169,7 +59,7 @@ with tab_galicia:
     elif con_masivos and not archivo_prov_g:
         st.info("Cargá el archivo de Proveedores Días Masivos para continuar.")
 
-    boton_g = st.button("CONCILIAR GALICIA", disabled=not todo_ok_g,
+    boton_g = st.button("Conciliar Galicia", disabled=not todo_ok_g,
                          use_container_width=True, key="btn_galicia")
 
     if boton_g and todo_ok_g:
@@ -191,7 +81,7 @@ with tab_galicia:
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
         if s.get("con_masivos"):
-            st.success("✅ Conciliación con Pagos Masivos incluidos")
+            st.success("Conciliación con Pagos Masivos incluidos")
         else:
             st.info("ℹ️ Conciliación sin Pagos Masivos")
 
@@ -221,7 +111,8 @@ with tab_galicia:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Galicia",
+            label="Descargar reporte Galicia",
+            icon=":material/download:",
             data=r["buf"],
             file_name="conciliacion_galicia.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -251,7 +142,7 @@ with tab_hipotecario:
     if not todos_h:
         st.info("Cargá los dos archivos para habilitar la conciliación.")
 
-    boton_h = st.button("CONCILIAR HIPOTECARIO", disabled=not todos_h,
+    boton_h = st.button("Conciliar Hipotecario", disabled=not todos_h,
                          use_container_width=True, key="btn_hipotecario")
 
     if boton_h and todos_h:
@@ -297,7 +188,8 @@ with tab_hipotecario:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Hipotecario",
+            label="Descargar reporte Hipotecario",
+            icon=":material/download:",
             data=r["buf"],
             file_name="conciliacion_hipotecario.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -365,7 +257,7 @@ with tab_cupones:
         if not todos_c:
             st.info("Cargá el Extracto Banco y el Reporte Nave para habilitar la conciliación.")
 
-    boton_c = st.button("CONCILIAR CUPONES", disabled=not todos_c,
+    boton_c = st.button("Conciliar cupones", disabled=not todos_c,
                          use_container_width=True, key="btn_cupones")
 
     if boton_c and todos_c:
@@ -423,7 +315,8 @@ with tab_cupones:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Cupones",
+            label="Descargar reporte Cupones",
+            icon=":material/download:",
             data=r["buf"],
             file_name="conciliacion_cupones.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -453,7 +346,7 @@ with tab_fiser:
     if not todos_f:
         st.info("Cargá el Extracto Banco y el Reporte Fiser para habilitar la conciliación.")
 
-    boton_f = st.button("CONCILIAR FISER", disabled=not todos_f,
+    boton_f = st.button("Conciliar Fiser", disabled=not todos_f,
                          use_container_width=True, key="btn_fiser")
 
     if boton_f and todos_f:
@@ -499,7 +392,8 @@ with tab_fiser:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Fiser",
+            label="Descargar reporte Fiser",
+            icon=":material/download:",
             data=r["buf"],
             file_name="conciliacion_fiser.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -561,7 +455,7 @@ with tab_mp:
     elif con_anterior_mp and not archivo_mp_anterior:
         st.info("Cargá el Detalle MP del mes anterior para continuar.")
 
-    boton_mp = st.button("CONCILIAR MERCADO PAGO", disabled=not todo_ok_mp,
+    boton_mp = st.button("Conciliar Mercado Pago", disabled=not todo_ok_mp,
                           use_container_width=True, key="btn_mp")
 
     if boton_mp and todo_ok_mp:
@@ -630,7 +524,8 @@ with tab_mp:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte Mercado Pago",
+            label="Descargar reporte Mercado Pago",
+            icon=":material/download:",
             data=r["buf"],
             file_name="conciliacion_mercadopago.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -1,160 +1,19 @@
 import streamlit as st
+from estilos import aplicar_estilos, encabezado
 from logica_ventas import correr_cruce_ventas
 from logica_ventas_registro import correr_registro_ventas
 
-st.set_page_config(
-    page_title="Ventas",
-    page_icon="📊",
-    layout="centered",
+aplicar_estilos()
+
+encabezado(
+    "Ventas",
+    "Comprobantes emitidos contra ARCA.",
+    "Comprobantes / Ventas",
 )
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-.header-block {
-    border-left: 3px solid #00aaff;
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2rem;
-}
-.header-block h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}
-.header-block p {
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.upload-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #00aaff;
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-.upload-label.secondary { color: #aaaaaa; }
-.section-title {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.7rem; color: #444;
-    letter-spacing: 2px; text-transform: uppercase;
-    margin: 1.5rem 0 1rem 0;
-}
-[data-testid="stFileUploader"] {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.5rem; transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #00aaff; }
-.stButton > button {
-    background: #00aaff !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-    width: 100% !important; margin-top: 1rem !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-.stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
-.metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.metric-card {
-    flex: 1; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}
-.metric-card .metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600; color: #00aaff; line-height: 1;
-}
-.metric-card .metric-label {
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.metric-card.error .metric-value { color: #ff4444; }
-.metric-card.warn .metric-value { color: #ffaa00; }
-.divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
-[data-testid="stDownloadButton"] > button {
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-    transition: border-color 0.2s !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #00aaff !important; color: #00aaff !important;
-}
-.back-btn > button {
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}
-.back-btn > button:hover { color: #00aaff !important; border-color: #00aaff !important; }
-div[data-testid="stTabs"] button {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; color: #555 !important;
-}
-div[data-testid="stTabs"] button[aria-selected="true"] {
-    color: #00aaff !important;
-    border-bottom-color: #00aaff !important;
-}
-div[data-testid="stSelectbox"] label { display: none; }
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div {
-    background: #1a1a1a !important;
-    border: 1px solid #2a2a2a !important;
-    border-radius: 6px !important;
-}
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div:hover,
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div:focus-within {
-    border-color: #00aaff !important;
-}
-div[data-testid="stSelectbox"] input[role="combobox"] {
-    background: transparent !important;
-    color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-}
-div[data-testid="stSelectbox"] button[aria-haspopup="listbox"] svg {
-    fill: #00aaff !important;
-}
-div[role="listbox"] {
-    background: #1a1a1a !important;
-    border: 1px solid #2a2a2a !important;
-    border-radius: 6px !important;
-}
-div[role="listbox"] div[role="option"] {
-    background: #1a1a1a !important;
-    color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-}
-div[role="listbox"] div[role="option"]:hover,
-div[role="listbox"] div[role="option"][data-focused="true"],
-div[role="listbox"] div[role="option"][aria-selected="true"] {
-    background: #2a2a2a !important;
-    color: #00aaff !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>📊 Ventas</h1>
-    <p>Comprobantes emitidos vs ARCA</p>
-</div>
-""", unsafe_allow_html=True)
-
 OPCIONES_SUBMODULO = [
-    "📊  Cruce Ventas",
-    "📊  Ventas Registro",
+    "Cruce Ventas",
+    "Ventas Registro",
 ]
 submodulo_actual = st.selectbox(
     "Submódulo", OPCIONES_SUBMODULO, label_visibility="collapsed", key="ventas_submodulo"
@@ -164,7 +23,7 @@ submodulo_actual = st.selectbox(
 # ═══════════════════════════════════════════════
 # SUBMÓDULO: CRUCE VENTAS
 # ═══════════════════════════════════════════════
-if submodulo_actual == "📊  Cruce Ventas":
+if submodulo_actual == "Cruce Ventas":
 
     def render_tab_ventas(nombre_sociedad, pv_excluir=None, key_suffix=""):
         st.markdown("<br>", unsafe_allow_html=True)
@@ -202,7 +61,7 @@ if submodulo_actual == "📊  Cruce Ventas":
             st.info("Cargá los cuatro archivos Excel para habilitar el cruce.")
 
         boton = st.button(
-            f"CRUZAR {nombre_sociedad.upper()}",
+            f"Cruzar {nombre_sociedad}",
             disabled=not todos_cargados,
             use_container_width=True,
             key=f"btn_{key_suffix}"
@@ -256,7 +115,8 @@ if submodulo_actual == "📊  Cruce Ventas":
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label=f"📥 Descargar faltantes {nombre_sociedad}",
+                label=f"Descargar faltantes {nombre_sociedad}",
+                icon=":material/download:",
                 data=r["buf"],
                 file_name=f"faltante_definitivo_{key_suffix}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -264,7 +124,7 @@ if submodulo_actual == "📊  Cruce Ventas":
                 key=f"dl_{key_suffix}"
             )
 
-    tab1, tab2, tab3 = st.tabs(["📊  9dD y ERSA", "📊  Ronda", "📊  EASA"])
+    tab1, tab2, tab3 = st.tabs(["9dD y ERSA", "Ronda", "EASA"])
 
     with tab1:
         render_tab_ventas("9dD y ERSA", pv_excluir=None, key_suffix="9dd")
@@ -279,7 +139,7 @@ if submodulo_actual == "📊  Cruce Ventas":
 # ═══════════════════════════════════════════════
 # SUBMÓDULO: VENTAS REGISTRO
 # ═══════════════════════════════════════════════
-elif submodulo_actual == "📊  Ventas Registro":
+elif submodulo_actual == "Ventas Registro":
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-title">Archivo HIO</div>', unsafe_allow_html=True)
 
@@ -305,7 +165,7 @@ elif submodulo_actual == "📊  Ventas Registro":
     if not archivo_cargado:
         st.info("Cargá el Excel de ventas HIO para habilitar el registro.")
 
-    boton_hio = st.button("PROCESAR REGISTRO", disabled=not archivo_cargado, use_container_width=True,
+    boton_hio = st.button("Procesar registro", disabled=not archivo_cargado, use_container_width=True,
                            key="btn_ventas_hio")
 
     if boton_hio and archivo_cargado:
@@ -357,7 +217,8 @@ elif submodulo_actual == "📊  Ventas Registro":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar registro de ventas",
+            label="Descargar registro de ventas",
+            icon=":material/download:",
             data=r_hio["buf"],
             file_name=f"Registro_Ventas_{stats_hio['mes']:02d}-{stats_hio['anio']}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

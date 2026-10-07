@@ -1,150 +1,24 @@
 import streamlit as st
+from estilos import aplicar_estilos, encabezado
 from logica_percepciones import correr_cruce_percepciones
 from logica_percepciones_pba import correr_cruce_percepciones_pba
 from logica_retenciones_iibb_caba import correr_cruce_retenciones
 from logica_retenciones_pba import correr_cruce_retenciones_pba
 from logica_sircreb_pba import correr_cruce_sircreb
 
-st.set_page_config(
-    page_title="Impuestos",
-    page_icon="👮",
-    layout="centered",
+aplicar_estilos()
+
+encabezado(
+    "Impuestos",
+    "Percepciones y retenciones ARCA contra sistema interno.",
+    "Impuestos",
 )
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
-.stApp { background-color: #0f0f0f; color: #e8e8e8; }
-.header-block {
-    border-left: 3px solid #f5c518;
-    padding: 0.4rem 0 0.4rem 1.2rem;
-    margin-bottom: 2rem;
-}
-.header-block h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 1.6rem; font-weight: 600;
-    color: #ffffff; margin: 0; letter-spacing: -0.5px;
-}
-.header-block p {
-    font-size: 0.82rem; color: #666;
-    margin: 0.2rem 0 0 0;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.upload-label {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.72rem; color: #f5c518;
-    letter-spacing: 1.5px; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-[data-testid="stFileUploader"] {
-    background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 0.5rem; transition: border-color 0.2s;
-}
-[data-testid="stFileUploader"]:hover { border-color: #f5c518; }
-.stButton > button {
-    background: #f5c518 !important; color: #0f0f0f !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-weight: 600 !important; font-size: 0.85rem !important;
-    letter-spacing: 1px !important; border: none !important;
-    border-radius: 4px !important; padding: 0.6rem 2rem !important;
-    width: 100% !important; margin-top: 1rem !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.85 !important; }
-.stButton > button:disabled { background: #2a2a2a !important; color: #555 !important; }
-.metric-row { display: flex; gap: 1rem; margin: 1.5rem 0; }
-.metric-card {
-    flex: 1; background: #1a1a1a; border: 1px solid #2a2a2a;
-    border-radius: 6px; padding: 1rem; text-align: center;
-}
-.metric-card .metric-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 2rem; font-weight: 600; color: #f5c518; line-height: 1;
-}
-.metric-card .metric-label {
-    font-size: 0.7rem; color: #555; text-transform: uppercase;
-    letter-spacing: 1px; margin-top: 0.4rem;
-    font-family: 'IBM Plex Mono', monospace;
-}
-.metric-card.error .metric-value { color: #ff4444; }
-.metric-card.warn .metric-value { color: #ffaa00; }
-.divider { border: none; border-top: 1px solid #1e1e1e; margin: 2rem 0; }
-[data-testid="stDownloadButton"] > button {
-    background: #1a1a1a !important; color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.8rem !important; border: 1px solid #2a2a2a !important;
-    border-radius: 4px !important; width: 100% !important;
-    transition: border-color 0.2s !important;
-}
-[data-testid="stDownloadButton"] > button:hover {
-    border-color: #f5c518 !important; color: #f5c518 !important;
-}
-.back-btn > button {
-    background: transparent !important; color: #444 !important;
-    border: 1px solid #2a2a2a !important; font-size: 0.75rem !important;
-    margin-top: 0 !important; margin-bottom: 1rem !important;
-}
-.back-btn > button:hover { color: #f5c518 !important; border-color: #f5c518 !important; }
-div[data-testid="stSelectbox"] label { display: none; }
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div {
-    background: #1a1a1a !important;
-    border: 1px solid #2a2a2a !important;
-    border-radius: 6px !important;
-}
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div:hover,
-div[data-testid="stSelectbox"] .react-aria-ComboBox > div:focus-within {
-    border-color: #f5c518 !important;
-}
-div[data-testid="stSelectbox"] input[role="combobox"] {
-    background: transparent !important;
-    color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-}
-div[data-testid="stSelectbox"] button[aria-haspopup="listbox"] svg {
-    fill: #f5c518 !important;
-}
-div[role="listbox"] {
-    background: #1a1a1a !important;
-    border: 1px solid #2a2a2a !important;
-    border-radius: 6px !important;
-}
-div[role="listbox"] div[role="option"] {
-    background: #1a1a1a !important;
-    color: #e8e8e8 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-}
-div[role="listbox"] div[role="option"]:hover,
-div[role="listbox"] div[role="option"][data-focused="true"],
-div[role="listbox"] div[role="option"][aria-selected="true"] {
-    background: #2a2a2a !important;
-    color: #f5c518 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Botón volver
-st.markdown('<div class="back-btn">', unsafe_allow_html=True)
-if st.button("← Volver al inicio"):
-    st.switch_page(
-        st.session_state["_pages"]["home"] if "_pages" in st.session_state
-        else st.Page("app_home.py", title="Inicio", icon="⚡", default=True)
-    )
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="header-block">
-    <h1>👮 Impuestos</h1>
-    <p>Percepciones y retenciones ARCA &nbsp;×&nbsp; Sistema Interno</p>
-</div>
-""", unsafe_allow_html=True)
-
 OPCIONES_SUBMODULO = [
-    "👮  Percepciones IIBB CABA",
-    "👮  Percepciones IIBB PBA",
-    "👮  Retenciones IIBB CABA",
-    "👮  Retenciones IIBB PBA",
+    "Percepciones IIBB CABA",
+    "Percepciones IIBB PBA",
+    "Retenciones IIBB CABA",
+    "Retenciones IIBB PBA",
 ]
 submodulo_actual = st.selectbox(
     "Submódulo", OPCIONES_SUBMODULO, label_visibility="collapsed", key="impuestos_submodulo"
@@ -154,7 +28,7 @@ submodulo_actual = st.selectbox(
 # ═══════════════════════════════════════════════
 # TAB PERCEPCIONES IIBB CABA
 # ═══════════════════════════════════════════════
-if submodulo_actual == "👮  Percepciones IIBB CABA":
+if submodulo_actual == "Percepciones IIBB CABA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -176,7 +50,7 @@ if submodulo_actual == "👮  Percepciones IIBB CABA":
     if not ambos_cargados:
         st.info("Cargá los dos archivos Excel para habilitar el cruce.")
 
-    boton = st.button("CRUZAR PERCEPCIONES", disabled=not ambos_cargados, use_container_width=True,
+    boton = st.button("Cruzar percepciones", disabled=not ambos_cargados, use_container_width=True,
                        key="btn_percepciones")
 
     if boton and ambos_cargados:
@@ -234,7 +108,8 @@ if submodulo_actual == "👮  Percepciones IIBB CABA":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte completo",
+            label="Descargar reporte completo",
+            icon=":material/download:",
             data=r["buf_reporte"],
             file_name="cruce_percepciones.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -246,7 +121,7 @@ if submodulo_actual == "👮  Percepciones IIBB CABA":
 # ═══════════════════════════════════════════════
 # TAB PERCEPCIONES IIBB PBA
 # ═══════════════════════════════════════════════
-elif submodulo_actual == "👮  Percepciones IIBB PBA":
+elif submodulo_actual == "Percepciones IIBB PBA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -268,7 +143,7 @@ elif submodulo_actual == "👮  Percepciones IIBB PBA":
     if not ambos_cargados_pba:
         st.info("Cargá el archivo de ARCA (.txt) y el Excel del sistema para habilitar el cruce.")
 
-    boton_pba = st.button("CRUZAR PERCEPCIONES", disabled=not ambos_cargados_pba, use_container_width=True,
+    boton_pba = st.button("Cruzar percepciones", disabled=not ambos_cargados_pba, use_container_width=True,
                            key="btn_percepciones_pba")
 
     if boton_pba and ambos_cargados_pba:
@@ -326,7 +201,8 @@ elif submodulo_actual == "👮  Percepciones IIBB PBA":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte completo",
+            label="Descargar reporte completo",
+            icon=":material/download:",
             data=r_pba["buf_reporte"],
             file_name="cruce_percepciones_pba.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -338,7 +214,7 @@ elif submodulo_actual == "👮  Percepciones IIBB PBA":
 # ═══════════════════════════════════════════════
 # TAB RETENCIONES IIBB CABA
 # ═══════════════════════════════════════════════
-elif submodulo_actual == "👮  Retenciones IIBB CABA":
+elif submodulo_actual == "Retenciones IIBB CABA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
@@ -360,7 +236,7 @@ elif submodulo_actual == "👮  Retenciones IIBB CABA":
     if not ambos_cargados_ret:
         st.info("Cargá los dos archivos Excel para habilitar el cruce.")
 
-    boton_ret = st.button("CRUZAR RETENCIONES", disabled=not ambos_cargados_ret, use_container_width=True,
+    boton_ret = st.button("Cruzar retenciones", disabled=not ambos_cargados_ret, use_container_width=True,
                            key="btn_retenciones")
 
     if boton_ret and ambos_cargados_ret:
@@ -418,7 +294,8 @@ elif submodulo_actual == "👮  Retenciones IIBB CABA":
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
-            label="📥 Descargar reporte completo",
+            label="Descargar reporte completo",
+            icon=":material/download:",
             data=r_ret["buf_reporte"],
             file_name="cruce_retenciones.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -430,7 +307,7 @@ elif submodulo_actual == "👮  Retenciones IIBB CABA":
 # ═══════════════════════════════════════════════
 # TAB RETENCIONES IIBB PBA (SIRTAC o SIRCREB)
 # ═══════════════════════════════════════════════
-elif submodulo_actual == "👮  Retenciones IIBB PBA":
+elif submodulo_actual == "Retenciones IIBB PBA":
     st.markdown("<br>", unsafe_allow_html=True)
 
     modo_ret_pba = st.radio(
@@ -465,7 +342,7 @@ elif submodulo_actual == "👮  Retenciones IIBB PBA":
         if not ambos_cargados_sirtac:
             st.info("Cargá el archivo SIRTAC (.txt) y el Excel del sistema para habilitar el cruce.")
 
-        boton_sirtac = st.button("CRUZAR RETENCIONES", disabled=not ambos_cargados_sirtac, use_container_width=True,
+        boton_sirtac = st.button("Cruzar retenciones", disabled=not ambos_cargados_sirtac, use_container_width=True,
                                   key="btn_sirtac")
 
         if boton_sirtac and ambos_cargados_sirtac:
@@ -523,7 +400,8 @@ elif submodulo_actual == "👮  Retenciones IIBB PBA":
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar reporte completo",
+                label="Descargar reporte completo",
+                icon=":material/download:",
                 data=r_sirtac["buf_reporte"],
                 file_name="cruce_sirtac.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -562,7 +440,7 @@ elif submodulo_actual == "👮  Retenciones IIBB PBA":
         if not todos_cargados_sircreb:
             st.info("Cargá el archivo SIRCREB (.txt) y los dos Excel del sistema para habilitar el cruce.")
 
-        boton_sircreb = st.button("CRUZAR RETENCIONES", disabled=not todos_cargados_sircreb, use_container_width=True,
+        boton_sircreb = st.button("Cruzar retenciones", disabled=not todos_cargados_sircreb, use_container_width=True,
                                    key="btn_sircreb")
 
         if boton_sircreb and todos_cargados_sircreb:
@@ -610,7 +488,8 @@ elif submodulo_actual == "👮  Retenciones IIBB PBA":
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
-                label="📥 Descargar reporte completo",
+                label="Descargar reporte completo",
+                icon=":material/download:",
                 data=r_sircreb["buf_reporte"],
                 file_name="cruce_sircreb.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
