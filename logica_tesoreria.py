@@ -466,6 +466,13 @@ TERCEROS_GENERICOS = (
 )
 
 
+def _es_ingreso_efectivo_sistema(texto):
+    """True si el comentario del mayor es el ingreso de recaudación del
+    sistema. Contabilidad lo carga como "Ingreso efectivo" o como
+    "Ingreso de efectivo 09-2026"; se aceptan los dos formatos."""
+    return re.search(r"ingreso (de )?efectivo", _normalizar_texto(texto)) is not None
+
+
 def _es_ingreso_recaudacion(texto):
     """True si el detalle es un ingreso de recaudación: dice "ingreso" y
     no dice ninguna de PALABRAS_NO_RECAUDACION."""
@@ -628,8 +635,7 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
     Devuelve (contador, meses_conciliados).
     """
     pend_m = michu[(~michu["_matched"]) & michu[col_detalle_michu].apply(_es_ingreso_recaudacion)]
-    pend_u = unif[(~unif["_matched"]) & unif[col_detalle_unificada].astype(str).str.lower()
-                  .str.contains("ingreso efectivo", na=False)]
+    pend_u = unif[(~unif["_matched"]) & unif[col_detalle_unificada].apply(_es_ingreso_efectivo_sistema)]
     meses_conciliados = set()
     mes_m = pend_m["_fecha_norm"].apply(lambda f: (f.year, f.month))
     mes_u = pend_u["_fecha_norm"].apply(lambda f: (f.year, f.month))
@@ -1590,7 +1596,7 @@ def cruzar_caja(
 
     PASOS FIJOS
       1. Ingresos agrupados por mes: suma de "ingreso" (tesorería) vs
-         "ingreso efectivo" (sistema).
+         "ingreso efectivo" o "ingreso de efectivo" (sistema).
       2. Agrupamiento por nombre: filas cuyo detalle no dice "pago",
          "devolucion" ni "ingreso" se agrupan por nombre normalizado de
          cada lado y se cruzan sus sumas.
@@ -1737,9 +1743,7 @@ def cruzar_caja(
         return len(numeros) > 1
 
     mask_michu_ingreso = michu[col_detalle_michu].apply(tiene_ingreso_y_mas_de_un_numero)
-    mask_unif_ingreso_efectivo = (
-        unif[col_detalle_unificada].astype(str).str.lower().str.contains("ingreso efectivo", na=False)
-    )
+    mask_unif_ingreso_efectivo = unif[col_detalle_unificada].apply(_es_ingreso_efectivo_sistema)
 
     grupo_michu_total = michu[mask_michu_ingreso]
     grupo_unif_total = unif[mask_unif_ingreso_efectivo]
