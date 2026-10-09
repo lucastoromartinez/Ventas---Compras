@@ -1667,7 +1667,8 @@ def _armar_revisar_genericos(falta_unif, falta_michu, col_fecha, col_monto,
 def _armar_revisar_sumas_genericos(falta_unif, falta_michu, col_fecha, col_monto,
                                   col_detalle_unificada, col_tercero_unificada,
                                   col_detalle_michu, tolerancia_pesos,
-                                  dias_primera=3, dias_ultima=15, max_lineas=4):
+                                  dias_primera=3, dias_ultima=15, max_lineas=4,
+                                  score_concepto=85):
     """
     Un asiento de un tercero genérico (TERCEROS_GENERICOS) que es la suma
     de varias líneas de tesorería del MISMO concepto. Ej.: asiento a GASTOS
@@ -1678,8 +1679,10 @@ def _armar_revisar_sumas_genericos(falta_unif, falta_michu, col_fecha, col_monto
     Ni el cruce ni la revisión por nombre lo ven: el tercero no dice qué se
     compró y la segunda línea queda fuera de la ventana de fechas.
 
-    Condiciones: de 2 a `max_lineas` líneas de tesorería con el mismo
-    detalle normalizado y el mismo signo que el asiento; la más cercana a
+    Condiciones: de 2 a `max_lineas` líneas de tesorería con detalles
+    parecidos entre sí (token_set_ratio >= `score_concepto` sobre el texto
+    normalizado, así "Remeras Ronda" y "Remeras" cuentan como el mismo
+    concepto) y el mismo signo que el asiento; la más cercana a
     lo sumo a `dias_primera` días del asiento y todas a lo sumo a
     `dias_ultima`; la suma igual al asiento a `tolerancia_pesos`. Entre
     varias, la de menor distancia máxima. Cada fila se usa una sola vez.
@@ -1711,8 +1714,13 @@ def _armar_revisar_sumas_genericos(falta_unif, falta_michu, col_fecha, col_monto
             and np.sign(montos_m[j]) == np.sign(montos_u[iu])
             and abs((fechas_m[j] - fechas_u[iu]).days) <= dias_ultima
         ]
-        for concepto in {conceptos[j] for j in candidatas}:
-            grupo = [j for j in candidatas if conceptos[j] == concepto]
+        grupos_vistos = set()
+        for ancla in candidatas:
+            grupo = tuple(j for j in candidatas
+                          if fuzz.token_set_ratio(conceptos[ancla], conceptos[j]) >= score_concepto)
+            if grupo in grupos_vistos:
+                continue
+            grupos_vistos.add(grupo)
             for k in range(2, min(max_lineas, len(grupo)) + 1):
                 for combo in combinations(grupo, k):
                     if abs(sum(montos_m[j] for j in combo) - montos_u[iu]) > tolerancia_pesos:
