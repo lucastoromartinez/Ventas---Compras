@@ -619,10 +619,16 @@ def _paso_area_marketing(unif, michu, col_tercero, tipo_por_id, contador,
     return contador
 
 
-# Recaudación de eventos que tesorería carga sin la palabra "ingreso"
-# (ej. "River vs Huracan 19.9", "Show Lali 26.9"). Contabilidad la incluye
-# en el "Ingreso de efectivo" del mes.
-PALABRAS_RECAUDACION_EVENTO = ("river vs", "partido", "show")
+# Positivos de tesorería sin la palabra "ingreso" que pueden ser
+# recaudación (ej. "River vs Huracan 19.9"). Se excluyen los conceptos que
+# nunca son recaudación de un local: cambio de moneda, préstamos,
+# devoluciones, sueldos, aportes y cobros a terceros.
+PALABRAS_NO_RECAUDACION_SIN_INGRESO = (
+    "usd", "dolar", "prestamo", "devolucion", "sueldo", "aporte", "cobro",
+    "reintegro", "recaudador",
+)
+# Máximo de esos positivos que se pueden sumar al agrupado de un mes.
+MAX_POSITIVOS_SIN_INGRESO = 2
 
 # Palabras que no sirven para reconocer al tercero en el detalle de un
 # ingreso de tesorería ("Ingreso venta Rutini").
@@ -637,10 +643,13 @@ MAX_AJUSTE_INGRESOS = 6
 MAX_CANDIDATAS_AJUSTE = 14
 
 
-def _es_recaudacion_evento(texto):
-    """True si el detalle es recaudación de un evento que no dice "ingreso"."""
+def _es_positivo_sin_ingreso(texto):
+    """True si el detalle no dice "ingreso" ni nombra un concepto que no es
+    recaudación. Sólo sirve como candidato: entra al agrupado del mes si con
+    él el mes cierra exacto y de una única forma."""
     t = _normalizar_texto(texto)
-    return "ingreso" not in t and any(p in t for p in PALABRAS_RECAUDACION_EVENTO)
+    return bool(t) and "ingreso" not in t and not any(
+        p in t for p in PALABRAS_NO_RECAUDACION_SIN_INGRESO)
 
 
 def _palabras_clave(texto):
@@ -725,12 +734,18 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
     Si el mes no cierra, se busca la combinación más chica (hasta
     MAX_AJUSTE_INGRESOS líneas) de estos ajustes que lo haga cerrar:
 
-      - Sumar recaudación de eventos sin la palabra "ingreso" ("River vs
-        Huracan 19.9"). Se concilian dentro del agrupado.
+      - Sumar positivos de tesorería del mes que no dicen "ingreso" y no
+        son de un concepto ajeno a la recaudación (ver
+        `_es_positivo_sin_ingreso`), como "River vs Huracan 19.9". A lo sumo
+        MAX_POSITIVOS_SIN_INGRESO por mes. Se concilian dentro del agrupado.
       - Sacar ingresos que contabilidad registró con otro concepto (ver
         `_pares_ingreso_otro_concepto`). Salen del agrupado y van, con su
         asiento, a Revisar: el mes cierra, pero el par necesita una
         persona (diferencia de importe o signo).
+
+    Para no forzar un cierre por coincidencia, el mes se concilia sólo si
+    hay UNA única combinación del tamaño mínimo que lo cierra con la
+    tolerancia estricta. Si hay más de una, queda en falta y se avisa.
 
     Devuelve (contador, meses_conciliados, revisar_ingresos). Las filas que
     van a Revisar quedan marcadas con "_revisar" en los dos DataFrames.
@@ -738,10 +753,11 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
     pend_m = michu[(~michu["_matched"]) & michu[col_detalle_michu].apply(_es_ingreso_recaudacion)]
     pend_u = unif[(~unif["_matched"]) & unif[col_detalle_unificada].apply(_es_ingreso_efectivo_sistema)]
     eventos = michu[(~michu["_matched"]) & (michu["_monto_norm"] > 0)
-                    & michu[col_detalle_michu].apply(_es_recaudacion_evento)]
+                    & michu[col_detalle_michu].apply(_es_positivo_sin_ingreso)]
     pares = _pares_ingreso_otro_concepto(pend_m, unif, col_detalle_michu, col_detalle_unificada,
                                          col_tercero_unificada, tolerancia_pesos)
     meses_conciliados = set()
+    avisos = []
     filas_revisar = []
     mes_de = lambda df: df["_fecha_norm"].apply(lambda f: (f.year, f.month))
     mes_m, mes_u, mes_e = mes_de(pend_m), mes_de(pend_u), mes_de(eventos)
@@ -760,10 +776,18 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
         for k in range(1, min(MAX_AJUSTE_INGRESOS, len(ajustes)) + 1):
             if elegido is not None:
                 break
-            for combo in combinations(ajustes, k):
-                if abs(suma_m + sum(a[1] for a in combo) - suma_u) <= tol:
-                    elegido = combo
-                    break
+            cierran = [
+                combo for combo in combinations(ajustes, k)
+                if sum(1 for a in combo if a[2]) <= MAX_POSITIVOS_SIN_INGRESO
+                and abs(suma_m + sum(a[1] for a in combo) - suma_u) <= tol
+            ]
+            if len(cierran) == 1:
+                elegido = cierran[0]
+            elif len(cierran) > 1:
+                avisos.append(
+                    f"Ingresos de {mes[0]}-{mes[1]:02d}: el mes cierra de {len(cierran)} formas "
+                    f"distintas sumando o sacando {k} línea(s); no se concilia automáticamente.")
+                break
         if elegido is None:
             continue
 
@@ -794,7 +818,7 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
                 "Observación": obs + f" Sin esta línea los ingresos de {mes[0]}-{mes[1]:02d} "
                                      "cierran contra el Ingreso de efectivo.",
             })
-    return contador, meses_conciliados, pd.DataFrame(filas_revisar, columns=COLUMNAS_REVISAR)
+    return contador, meses_conciliados, pd.DataFrame(filas_revisar, columns=COLUMNAS_REVISAR), avisos
 
 
 # ─────────────────────────────────────────────
@@ -1640,6 +1664,163 @@ def _armar_revisar_genericos(falta_unif, falta_michu, col_fecha, col_monto,
             revisar)
 
 
+def _armar_revisar_sumas_genericos(falta_unif, falta_michu, col_fecha, col_monto,
+                                  col_detalle_unificada, col_tercero_unificada,
+                                  col_detalle_michu, tolerancia_pesos,
+                                  dias_primera=3, dias_ultima=15, max_lineas=4):
+    """
+    Un asiento de un tercero genérico (TERCEROS_GENERICOS) que es la suma
+    de varias líneas de tesorería del MISMO concepto. Ej.: asiento a GASTOS
+    VARIOS del 17/09 por −386.000 contra "Remeras" del 17/09 por −330.000 y
+    "Remeras" del 30/09 por −56.000: contabilidad registró las dos compras
+    juntas el día de la primera.
+
+    Ni el cruce ni la revisión por nombre lo ven: el tercero no dice qué se
+    compró y la segunda línea queda fuera de la ventana de fechas.
+
+    Condiciones: de 2 a `max_lineas` líneas de tesorería con el mismo
+    detalle normalizado y el mismo signo que el asiento; la más cercana a
+    lo sumo a `dias_primera` días del asiento y todas a lo sumo a
+    `dias_ultima`; la suma igual al asiento a `tolerancia_pesos`. Entre
+    varias, la de menor distancia máxima. Cada fila se usa una sola vez.
+
+    Devuelve (falta_unif, falta_michu, revisar).
+    """
+    columnas = COLUMNAS_REVISAR
+    if (falta_unif.empty or falta_michu.empty
+            or col_tercero_unificada not in falta_unif.columns):
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    terceros = falta_unif[col_tercero_unificada].apply(_normalizar_texto)
+    genericos = falta_unif.index[terceros.isin(TERCEROS_GENERICOS)]
+    if len(genericos) == 0:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    fechas_u = pd.to_datetime(falta_unif[col_fecha]).dt.date
+    fechas_m = pd.to_datetime(falta_michu[col_fecha]).dt.date
+    montos_u = falta_unif[col_monto].astype(float).round(2)
+    montos_m = falta_michu[col_monto].astype(float).round(2)
+    conceptos = falta_michu[col_detalle_michu].apply(_normalizar_texto)
+
+    usados_u, usados_m, filas = [], set(), []
+    for iu in genericos:
+        mejor = None
+        candidatas = [
+            j for j in falta_michu.index
+            if j not in usados_m and conceptos[j]
+            and np.sign(montos_m[j]) == np.sign(montos_u[iu])
+            and abs((fechas_m[j] - fechas_u[iu]).days) <= dias_ultima
+        ]
+        for concepto in {conceptos[j] for j in candidatas}:
+            grupo = [j for j in candidatas if conceptos[j] == concepto]
+            for k in range(2, min(max_lineas, len(grupo)) + 1):
+                for combo in combinations(grupo, k):
+                    if abs(sum(montos_m[j] for j in combo) - montos_u[iu]) > tolerancia_pesos:
+                        continue
+                    dias = [abs((fechas_m[j] - fechas_u[iu]).days) for j in combo]
+                    if min(dias) > dias_primera:
+                        continue
+                    if mejor is None or max(dias) < mejor[0]:
+                        mejor = (max(dias), combo)
+        if mejor is None:
+            continue
+        dias, combo = mejor
+        usados_u.append(iu)
+        usados_m.update(combo)
+        fila_u = falta_unif.loc[iu]
+        detalle = "; ".join(f"{_fmt_ar(montos_m[j])} del {fechas_m[j]:%d/%m/%Y}"
+                            for j in sorted(combo, key=lambda j: fechas_m[j]))
+        filas.append({
+            "Tipo Error": "Tercero genérico, suma del mismo concepto",
+            "Fecha Contabilidad": fila_u[col_fecha],
+            "Tercero": fila_u[col_tercero_unificada],
+            "Comentario": fila_u[col_detalle_unificada],
+            "Monto Contabilidad": fila_u[col_monto],
+            "Fecha Tesorería": min(falta_michu.loc[list(combo), col_fecha]),
+            "Detalle": falta_michu.at[combo[0], col_detalle_michu],
+            "Monto Tesorería": round(sum(montos_m[j] for j in combo), 2),
+            "Diferencia": round(montos_u[iu] - sum(montos_m[j] for j in combo), 2),
+            "Días": dias,
+            "Observación": f"El asiento a {str(fila_u[col_tercero_unificada]).strip()} es la suma de "
+                           f"{len(combo)} líneas de tesorería del mismo concepto ({detalle}).",
+        })
+
+    revisar = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=usados_u).reset_index(drop=True),
+            falta_michu.drop(index=list(usados_m)).reset_index(drop=True),
+            revisar)
+
+
+def _armar_revisar_recaudadora(falta_unif, falta_michu, col_fecha, col_monto,
+                               col_detalle_unificada, col_tercero_unificada,
+                               col_detalle_michu, tolerancia_pesos, ventana_dias=30):
+    """
+    Entregas de la recaudadora que contabilidad registra como "Cobro N/F"
+    con más días de diferencia que los que admite el cruce. Ej.: "Ingreso
+    recaudacion" del 04/02 por 20.000.000 contra un Cobro N/F sin tercero
+    del 25/02 por 20.000.000. Las demás entregas cruzan el mismo día.
+
+    Corre sobre los faltantes ANTES de apartar las líneas que dicen
+    "ingreso", porque estas lo dicen pero no son recaudación de un local.
+
+    Condiciones: tesorería positiva cuyo detalle dice "recaudador" o
+    "recaudacion"; asiento positivo cuyo comentario dice "cobro"; mismo
+    importe a `tolerancia_pesos`; a lo sumo `ventana_dias` de distancia.
+    Emparejamiento óptimo global por cercanía de fechas.
+
+    Devuelve (falta_unif, falta_michu, revisar).
+    """
+    columnas = COLUMNAS_REVISAR
+    if falta_unif.empty or falta_michu.empty:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    textos_m = falta_michu[col_detalle_michu].apply(_normalizar_texto)
+    textos_u = falta_unif[col_detalle_unificada].apply(_normalizar_texto)
+    montos_m = falta_michu[col_monto].astype(float).round(2)
+    montos_u = falta_unif[col_monto].astype(float).round(2)
+    idx_m = falta_michu.index[(montos_m > 0) & textos_m.str.contains(r"recaudador|recaudacion")]
+    idx_u = falta_unif.index[(montos_u > 0) & textos_u.str.contains("cobro")]
+    if len(idx_m) == 0 or len(idx_u) == 0:
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    fu = pd.to_datetime(falta_unif.loc[idx_u, col_fecha]).dt.date
+    fm = pd.to_datetime(falta_michu.loc[idx_m, col_fecha]).dt.date
+    dias = _dias_entre(fu, fm)
+    dif = np.abs(montos_u.loc[idx_u].to_numpy()[:, None] - montos_m.loc[idx_m].to_numpy()[None, :])
+    admisible = (dif <= tolerancia_pesos) & (dias <= ventana_dias)
+    if not admisible.any():
+        return falta_unif, falta_michu, pd.DataFrame(columns=columnas)
+
+    usados_u, usados_m, filas = [], [], []
+    for i, j in _asignacion_optima(np.where(admisible, dias, INADMISIBLE)):
+        if not admisible[i, j]:
+            continue
+        iu, jm = idx_u[i], idx_m[j]
+        fila_u, fila_m = falta_unif.loc[iu], falta_michu.loc[jm]
+        usados_u.append(iu)
+        usados_m.append(jm)
+        filas.append({
+            "Tipo Error": "Recaudadora, fuera de ventana",
+            "Fecha Contabilidad": fila_u[col_fecha],
+            "Tercero": fila_u.get(col_tercero_unificada),
+            "Comentario": fila_u[col_detalle_unificada],
+            "Monto Contabilidad": fila_u[col_monto],
+            "Fecha Tesorería": fila_m[col_fecha],
+            "Detalle": fila_m[col_detalle_michu],
+            "Monto Tesorería": fila_m[col_monto],
+            "Diferencia": round(montos_u[iu] - montos_m[jm], 2),
+            "Días": int(dias[i, j]),
+            "Observación": f"Entrega de la recaudadora contra un Cobro N/F del mismo importe a "
+                           f"{_texto_dias(int(dias[i, j]))}. Confirmar que el cobro corresponde "
+                           f"a esta entrega.",
+        })
+
+    revisar = pd.DataFrame(filas, columns=columnas)
+    return (falta_unif.drop(index=usados_u).reset_index(drop=True),
+            falta_michu.drop(index=usados_m).reset_index(drop=True),
+            revisar)
+
+
 def _armar_revisar_duplicados(falta_unif, match_unif, match_michu,
                               col_fecha, col_monto, col_detalle_unificada,
                               col_tercero_unificada, col_detalle_michu, tolerancia_pesos):
@@ -1796,12 +1977,17 @@ def cruzar_caja(
       Después, los asientos de terceros genéricos (GASTOS VARIOS, AREA
       MARKETING...) que coinciden con una línea de tesorería a 7 días con
       una diferencia de hasta 0,05 % van como "Tercero genérico,
-      diferencia menor".
+      diferencia menor", y los que son la suma de 2 a 4 líneas de
+      tesorería del mismo concepto (la más cercana a 3 días, todas a 15)
+      van como "Tercero genérico, suma del mismo concepto".
       Por último, los asientos en falta iguales en fecha, tercero e
       importe a uno ya conciliado van a "revisar" como "Posible asiento
       duplicado".
       Ninguna línea que diga "ingreso" pasa por estas depuraciones: los
       ingresos se concilian por mes y, si no cuadran, quedan en falta.
+      La única excepción va primero: las entregas de la recaudadora que
+      cruzan con un Cobro N/F del mismo importe a hasta 30 días van como
+      "Recaudadora, fuera de ventana".
 
     Returns
     -------
@@ -2041,7 +2227,7 @@ def cruzar_caja(
     # ------------------------------------------------------------------
     # Segundo intento de ingresos, con los mayoristas ya conciliados
     # ------------------------------------------------------------------
-    contador, meses_ingreso, revisar_ingresos = _paso_ingresos_segundo_intento(
+    contador, meses_ingreso, revisar_ingresos, avisos_ajuste = _paso_ingresos_segundo_intento(
         unif, michu, col_detalle_unificada, col_detalle_michu,
         tipo_por_id, contador, tolerancia_pesos, tolerancia_pct,
         col_fecha=col_fecha, col_monto=col_monto,
@@ -2050,6 +2236,7 @@ def cruzar_caja(
     for mes in sorted(avisos_ingresos):
         if mes not in meses_ingreso:
             warnings.append(avisos_ingresos[mes])
+    warnings.extend(avisos_ajuste)
 
     unif["Tipo Match"] = unif["id"].map(tipo_por_id)
     michu["Tipo Match"] = michu["id"].map(tipo_por_id)
@@ -2075,6 +2262,13 @@ def cruzar_caja(
 
     falta_unificada["_orden"] = range(len(falta_unificada))
     falta_tesoreria["_orden"] = range(len(falta_tesoreria))
+
+    # La recaudadora corre antes de apartar los ingresos: sus líneas dicen
+    # "ingreso" pero no son recaudación de un local.
+    falta_unificada, falta_tesoreria, revisar_recaudadora = _armar_revisar_recaudadora(
+        falta_unificada, falta_tesoreria, col_fecha, col_monto,
+        col_detalle_unificada, col_tercero_unificada, col_detalle_michu, tolerancia_pesos,
+    )
     ing_u = _dice_ingreso(falta_unificada, col_detalle_unificada)
     ing_m = _dice_ingreso(falta_tesoreria, col_detalle_michu)
     ingresos_unif = falta_unificada[ing_u]
@@ -2109,6 +2303,11 @@ def cruzar_caja(
         tolerancia_pesos, tolerancia_pct_amplia,
     )
 
+    falta_unificada, falta_tesoreria, revisar_sumas_genericos = _armar_revisar_sumas_genericos(
+        falta_unificada, falta_tesoreria, col_fecha, col_monto,
+        col_detalle_unificada, col_tercero_unificada, col_detalle_michu, tolerancia_pesos,
+    )
+
     falta_unificada, revisar_duplicados = _armar_revisar_duplicados(
         falta_unificada, ref_match_unif, ref_match_michu,
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
@@ -2118,8 +2317,9 @@ def cruzar_caja(
                        .sort_values("_orden").drop(columns="_orden").reset_index(drop=True))
     falta_tesoreria = (pd.concat([falta_tesoreria, ingresos_michu])
                        .sort_values("_orden").drop(columns="_orden").reset_index(drop=True))
-    revisar = pd.concat([revisar_ingresos, revisar, revisar_sumas, revisar_importes,
-                         revisar_genericos, revisar_duplicados], ignore_index=True)
+    revisar = pd.concat([revisar_ingresos, revisar_recaudadora, revisar, revisar_sumas,
+                         revisar_importes, revisar_genericos, revisar_sumas_genericos,
+                         revisar_duplicados], ignore_index=True)
 
     return {
         "match_caja_unificada": match_caja_unificada,
