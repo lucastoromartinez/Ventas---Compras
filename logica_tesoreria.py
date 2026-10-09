@@ -1653,6 +1653,8 @@ def cruzar_caja(
       Por último, los asientos en falta iguales en fecha, tercero e
       importe a uno ya conciliado van a "revisar" como "Posible asiento
       duplicado".
+      Ninguna línea que diga "ingreso" pasa por estas depuraciones: los
+      ingresos se concilian por mes y, si no cuadran, quedan en falta.
 
     Returns
     -------
@@ -1912,6 +1914,27 @@ def cruzar_caja(
     falta_unificada = unif[~unif["_matched"]][cols_unif + ["id"]].reset_index(drop=True)
     falta_tesoreria = michu[~michu["_matched"]][cols_michu + ["id"]].reset_index(drop=True)
 
+    # Nada que diga "ingreso" va a Revisar, de ninguno de los dos lados:
+    # los ingresos se concilian por mes, y emparejar uno con una línea
+    # parecida sólo esconde el descuadre del mes. Se apartan antes de
+    # armar Revisar (también como referencia de lo conciliado) y vuelven
+    # a falta en su orden original.
+    def _dice_ingreso(df, col):
+        return df[col].apply(lambda t: "ingreso" in _normalizar_texto(t)).astype(bool)
+
+    falta_unificada["_orden"] = range(len(falta_unificada))
+    falta_tesoreria["_orden"] = range(len(falta_tesoreria))
+    ing_u = _dice_ingreso(falta_unificada, col_detalle_unificada)
+    ing_m = _dice_ingreso(falta_tesoreria, col_detalle_michu)
+    ingresos_unif = falta_unificada[ing_u]
+    ingresos_michu = falta_tesoreria[ing_m]
+    falta_unificada = falta_unificada[~ing_u].reset_index(drop=True)
+    falta_tesoreria = falta_tesoreria[~ing_m].reset_index(drop=True)
+    ref_match_unif = match_caja_unificada[
+        ~_dice_ingreso(match_caja_unificada, col_detalle_unificada)].reset_index(drop=True)
+    ref_match_michu = match_tesoreria[
+        ~_dice_ingreso(match_tesoreria, col_detalle_michu)].reset_index(drop=True)
+
     falta_unificada, falta_tesoreria, revisar = _armar_revisar(
         falta_unificada, falta_tesoreria, col_fecha, col_monto,
         col_detalle_unificada, col_tercero_unificada, col_detalle_michu,
@@ -1925,7 +1948,7 @@ def cruzar_caja(
     )
 
     falta_unificada, falta_tesoreria, revisar_importes = _armar_revisar_importes(
-        falta_unificada, falta_tesoreria, match_caja_unificada, match_tesoreria,
+        falta_unificada, falta_tesoreria, ref_match_unif, ref_match_michu,
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
         col_detalle_michu, tolerancia_pesos, tolerancia_dias,
     )
@@ -1936,10 +1959,14 @@ def cruzar_caja(
     )
 
     falta_unificada, revisar_duplicados = _armar_revisar_duplicados(
-        falta_unificada, match_caja_unificada, match_tesoreria,
+        falta_unificada, ref_match_unif, ref_match_michu,
         col_fecha, col_monto, col_detalle_unificada, col_tercero_unificada,
         col_detalle_michu, tolerancia_pesos,
     )
+    falta_unificada = (pd.concat([falta_unificada, ingresos_unif])
+                       .sort_values("_orden").drop(columns="_orden").reset_index(drop=True))
+    falta_tesoreria = (pd.concat([falta_tesoreria, ingresos_michu])
+                       .sort_values("_orden").drop(columns="_orden").reset_index(drop=True))
     revisar = pd.concat([revisar, revisar_sumas, revisar_importes, revisar_genericos,
                          revisar_duplicados], ignore_index=True)
 
