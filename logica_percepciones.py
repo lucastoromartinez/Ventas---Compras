@@ -78,6 +78,7 @@ def _parse_nro(s: str) -> tuple[str, str]:
 def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -> pd.DataFrame:
     """
     Depura el reporte del sistema:
+    - Descarta la fila 'Saldo anterior' del mayor (no es un movimiento).
     - Calcula 'Importe' = Debe - Haber.
     - A partir de 'Su Factura' genera 'Pto. Venta' y 'N°Comprobante'.
     - Si el archivo ya trae una columna CUIT (sin importar mayúsculas o
@@ -103,6 +104,13 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
             if k in norm_cols:
                 return norm_cols[k]
         raise KeyError(f"No se encontró ninguna columna de {candidatos}. Disponibles: {list(df.columns)}")
+
+    c_comentario = norm_cols.get("comentario")
+    if c_comentario is not None:
+        es_saldo_anterior = (
+            df[c_comentario].astype(str).str.strip().str.lower().str.startswith("saldo anterior")
+        )
+        df = df.loc[~es_saldo_anterior].reset_index(drop=True)
 
     c_debe = _resolver(["Debe"])
     c_haber = _resolver(["Haber"])
