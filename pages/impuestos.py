@@ -298,6 +298,12 @@ elif submodulo_actual == "Retenciones IIBB CABA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
+        if stats_ret.get("revisar", 0) > 0:
+            st.warning(
+                f"Hay {stats_ret['revisar']} proveedor(es) con retenciones en ARCA y en sistema que no cierran. "
+                "Revisá la hoja 'Revisar' del reporte."
+            )
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
             label="Descargar reporte completo",
