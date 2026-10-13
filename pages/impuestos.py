@@ -106,6 +106,12 @@ if submodulo_actual == "Percepciones IIBB CABA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
+        if stats.get("revisar", 0) > 0:
+            st.warning(
+                f"Hay {stats['revisar']} comprobante(s) que coinciden entre ARCA y sistema con importe "
+                "distinto. Revisá la hoja 'Revisar' del reporte."
+            )
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
             label="Descargar reporte completo",
