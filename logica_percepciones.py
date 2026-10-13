@@ -241,7 +241,8 @@ def cruce_percepciones(
 
     PASO 4 - CUIT + mismo comprobante (Pto. Venta y N°Comprobante), con
     importe distinto: es la misma percepción cargada con un importe erróneo
-    en el sistema. La diferencia queda en 'dif_importe'.
+    en el sistema. No se considera match: el par va a df_revisar, con las
+    columnas de ARCA y del sistema en una misma fila y 'Comentario' = 'Importe'.
 
     PASO 5 - Agrupado: varias percepciones de ARCA del mismo CUIT cuya suma
     coincide (con tolerancia_grupo) con una sola línea del sistema. Pasa
@@ -250,13 +251,14 @@ def cruce_percepciones(
     de menos líneas.
 
     Retorna:
-        tuple de 4 pd.DataFrame:
+        tuple de 5 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
-              'match_tipo' = 'cuit' / 'cuit_padron' / 'nombre' /
-              'comprobante_dif_importe' / 'agrupado', 'match_score' y
-              'dif_importe' = ARCA - sistema del grupo)
+              'match_tipo' = 'cuit' / 'cuit_padron' / 'nombre' / 'agrupado',
+              y 'match_score')
             - df_falta_sistema (líneas de ARCA sin match)
             - df_falta_arca (líneas de sistema sin match)
+            - df_revisar (pares ARCA / sistema del mismo comprobante con
+              importe distinto)
     """
     if padron is None:
         padron = PADRON_PROVEEDORES
@@ -335,6 +337,7 @@ def cruce_percepciones(
         return ganadores
 
     matches = []  # ([a_idx, ...], [s_idx, ...], tipo, score)
+    revisar = []  # (a_idx, s_idx, comentario)
     sistema_disponibles = set(df_sistema.index)
 
     # PASO 1: CUIT + Importe
@@ -432,7 +435,7 @@ def cruce_percepciones(
                 continue
 
             s_idx = candidatos_idx[0]
-            matches.append(([a_idx], [s_idx], "comprobante_dif_importe", 100))
+            revisar.append((a_idx, s_idx, "Importe"))
             sistema_disponibles.remove(s_idx)
             arca_matcheados.add(a_idx)
 
@@ -471,19 +474,15 @@ def cruce_percepciones(
         arca_matcheados.update(grupo)
 
     sistema_matcheados = {s for _, s_lista, _, _ in matches for s in s_lista}
+    sistema_matcheados.update(s_idx for _, s_idx, _ in revisar)
 
     filas_sistema, filas_arca = [], []
     for id_match, (a_lista, s_lista, tipo, score) in enumerate(matches, start=1):
-        dif = round(
-            df_arca.loc[a_lista, "Monto Percibido"].sum() - df_sistema.loc[s_lista, "Importe"].sum(), 2
-        )
-
         for s_idx in s_lista:
             fila_s = df_sistema.loc[s_idx].copy()
             fila_s["id_match"] = id_match
             fila_s["match_tipo"] = tipo
             fila_s["match_score"] = score
-            fila_s["dif_importe"] = dif
             filas_sistema.append(fila_s)
 
         for a_idx in a_lista:
@@ -491,10 +490,9 @@ def cruce_percepciones(
             fila_a["id_match"] = id_match
             fila_a["match_tipo"] = tipo
             fila_a["match_score"] = score
-            fila_a["dif_importe"] = dif
             filas_arca.append(fila_a)
 
-    cols_extra = ["id_match", "match_tipo", "match_score", "dif_importe"]
+    cols_extra = ["id_match", "match_tipo", "match_score"]
 
     if filas_sistema:
         df_match_sistema = pd.DataFrame(filas_sistema).reset_index(drop=True)
@@ -514,7 +512,20 @@ def cruce_percepciones(
     idx_falta_arca = [i for i in df_sistema.index if i not in sistema_matcheados]
     df_falta_arca = df_sistema.loc[idx_falta_arca].reset_index(drop=True)
 
-    return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
+    # Revisar: columnas de ARCA y del sistema en la misma fila. Las que se
+    # repiten en ambos lados llevan sufijo para no pisarse.
+    repetidas = (set(df_arca.columns) & set(df_sistema.columns)) | {"Comentario"}
+    cols_arca_rev = [f"{c} ARCA" if c in repetidas else c for c in df_arca.columns]
+    cols_sistema_rev = [f"{c} Sistema" if c in repetidas else c for c in df_sistema.columns]
+    cols_revisar = cols_arca_rev + cols_sistema_rev + ["Comentario"]
+
+    filas_revisar = [
+        list(df_arca.loc[a_idx]) + list(df_sistema.loc[s_idx]) + [comentario]
+        for a_idx, s_idx, comentario in revisar
+    ]
+    df_revisar = pd.DataFrame(filas_revisar, columns=cols_revisar)
+
+    return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar
 
 
 # ─────────────────────────────────────────────
@@ -557,9 +568,19 @@ def generar_excel_percepciones(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
+    df_revisar: pd.DataFrame | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
+    IMPORTE_FORMAT = "#,##0.00"
+    IMPORTE_COLS = {"Debe", "Haber", "Saldo", "Importe", "Monto Percibido", "Base Calculo"}
+
+    def _nombre_base(header) -> str:
+        h = str(header).strip()
+        for sufijo in (" ARCA", " Sistema"):
+            if h.endswith(sufijo):
+                return h[: -len(sufijo)]
+        return h
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -574,9 +595,15 @@ def generar_excel_percepciones(
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         for col_idx, cell in enumerate(ws[1], start=1):
-            if str(cell.value).strip() in DATE_COLS:
-                for row in range(2, ws.max_row + 1):
-                    ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
+            base = _nombre_base(cell.value)
+            if base in DATE_COLS:
+                formato = DATE_FORMAT
+            elif base in IMPORTE_COLS:
+                formato = IMPORTE_FORMAT
+            else:
+                continue
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).number_format = formato
 
         for col in ws.columns:
             max_len = max(
@@ -591,6 +618,8 @@ def generar_excel_percepciones(
         "Falta_Sistema": df_falta_sistema,
         "Falta_Arca": df_falta_arca,
     }
+    if df_revisar is not None and not df_revisar.empty:
+        hojas["Revisar"] = df_revisar
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -619,7 +648,7 @@ def correr_cruce_percepciones(
     df_sistema_dep = depurar_sistema_percepciones(df_sistema)
     df_arca_dep = depurar_arca_percepciones(df_arca)
 
-    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_percepciones(
+    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar = cruce_percepciones(
         df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
@@ -630,10 +659,11 @@ def correr_cruce_percepciones(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
+        "revisar": len(df_revisar),
     }
 
     buf_reporte = generar_excel_percepciones(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, df_revisar
     )
 
     return buf_reporte, stats
