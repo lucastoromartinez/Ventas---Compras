@@ -17,6 +17,7 @@ from proveedores import PADRON_PROVEEDORES
 def depurar_sistema_retenciones(df: pd.DataFrame, padron: dict | None = None) -> pd.DataFrame:
     """
     Depura el reporte del sistema:
+    - Descarta la fila 'Saldo anterior' del mayor (no es un movimiento).
     - Calcula 'Importe' = Debe - Haber.
     - A partir de 'Su Factura' genera 'Pto. Venta' y 'N°Comprobante'.
     - Si el archivo ya trae una columna CUIT (sin importar mayúsculas o
@@ -42,6 +43,13 @@ def depurar_sistema_retenciones(df: pd.DataFrame, padron: dict | None = None) ->
             if k in norm_cols:
                 return norm_cols[k]
         raise KeyError(f"No se encontró ninguna columna de {candidatos}. Disponibles: {list(df.columns)}")
+
+    c_comentario = norm_cols.get("comentario")
+    if c_comentario is not None:
+        es_saldo_anterior = (
+            df[c_comentario].astype(str).str.strip().str.lower().str.startswith("saldo anterior")
+        )
+        df = df.loc[~es_saldo_anterior].reset_index(drop=True)
 
     c_debe = _resolver(["Debe"])
     c_haber = _resolver(["Haber"])
@@ -188,6 +196,12 @@ def cruce_retenciones(
           CUIT de cada grupo de ARCA y lo compara contra 'Tercero' del sistema.
       2c. Si tampoco, fuzzy por nombre entre los grupos de ARCA restantes y
           'Tercero' del sistema (probando los 4 mejores candidatos).
+
+    PASO 3 (líneas del sistema sin proveedor identificado, es decir sin CUIT
+    ni por columna ni por padrón): compara el 'Importe' de la línea contra
+    el total de cada proveedor de ARCA que quedó libre. Si un único
+    proveedor cierra (con tolerancia_importe), matchea todo ese grupo como
+    'importe_proveedor_sumarizado'. Si cierran dos o más, no matchea.
 
     Retorna:
         tuple de 4 pd.DataFrame:
@@ -366,6 +380,33 @@ def cruce_retenciones(
                 matches_grupo.append((grupo_arca_c, s_idx, "nombre", score))
                 arca_libres -= set(grupo_arca_c)
                 break
+
+    # ============================================================
+    # PASO 3: líneas del sistema sin proveedor vs total por proveedor de ARCA
+    # ============================================================
+    sistema_matcheados = {s_idx for _, s_idx, _, _ in matches} | {s_idx for _, s_idx, _, _ in matches_grupo}
+    sistema_sin_proveedor = [
+        i for i in df_sistema.index
+        if i not in sistema_matcheados
+        and (pd.isna(cuit_sistema_norm.loc[i]) or not cuit_sistema_norm.loc[i])
+    ]
+
+    for s_idx in sistema_sin_proveedor:
+        importe_sistema = df_sistema.loc[s_idx, "Importe"]
+        if pd.isna(importe_sistema) or importe_sistema == 0:
+            continue
+
+        grupos_que_cierran = [
+            indices for cuit_grupo, indices in _grupos_por_cuit(arca_libres).items()
+            if pd.notna(cuit_grupo) and cuit_grupo
+            and abs(sum(df_arca.loc[i, "Monto Retenido"] for i in indices) - importe_sistema) <= tolerancia_importe
+        ]
+        if len(grupos_que_cierran) != 1:
+            continue
+
+        grupo = grupos_que_cierran[0]
+        matches_grupo.append((grupo, s_idx, "importe_proveedor", 100))
+        arca_libres -= set(grupo)
 
     # ============================================================
     # Armado de resultados finales
