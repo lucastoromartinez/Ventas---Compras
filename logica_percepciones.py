@@ -50,7 +50,7 @@ def load_excel_sistema(file) -> pd.DataFrame:
 
 def load_excel_arca(file, filas_a_revisar: int = 5) -> pd.DataFrame:
     """
-    Lee el Excel de percepciones de ARCA detectando automáticamente si los
+    Lee el Excel de percepciones de AGIP detectando automáticamente si los
     encabezados arrancan en la primera o en la segunda columna.
     """
     file.seek(0)
@@ -63,7 +63,7 @@ def load_excel_arca(file, filas_a_revisar: int = 5) -> pd.DataFrame:
             break
 
     if fila_header is None:
-        raise ValueError("No se pudo detectar una fila de encabezados válida en el Excel de ARCA.")
+        raise ValueError("No se pudo detectar una fila de encabezados válida en el Excel de AGIP.")
 
     primera_col_vacia = pd.isna(raw.iloc[fila_header].iloc[0])
 
@@ -182,12 +182,12 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
 
 
 # ─────────────────────────────────────────────
-# DEPURACIÓN ARCA
+# DEPURACIÓN AGIP
 # ─────────────────────────────────────────────
 
 def depurar_arca_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Depura el reporte de percepciones de ARCA:
+    Depura el reporte de percepciones de AGIP:
     - Normaliza 'CUIT' a texto.
     - Redondea 'Monto Percibido' a 2 decimales.
     - Separa 'N° Comprobante' en 'Pto. Venta' y 'N°Comprobante' (8 dígitos).
@@ -263,7 +263,7 @@ def cruce_percepciones(
     max_candidatos_grupo: int = 25,
 ):
     """
-    Cruza percepciones de ARCA contra el sistema en cinco fases:
+    Cruza percepciones de AGIP contra el sistema en cinco fases:
 
     PASO 1 - CUIT + Importe: candidatos con el mismo CUIT y el mismo Importe
     (con tolerancia). Si hay más de uno, desempata por Pto. Venta / N°Comprobante.
@@ -271,7 +271,7 @@ def cruce_percepciones(
     PASO 2 - Importe + CUIT vía padrón: para lo que no matcheó por CUIT
     literal (puede pasar si el mismo proveedor quedó cargado con más de un
     CUIT en el padrón), busca en proveedores.py el nombre correspondiente al
-    CUIT de ARCA y lo compara contra 'Tercero' del sistema.
+    CUIT de AGIP y lo compara contra 'Tercero' del sistema.
 
     PASO 3 - Importe + Nombre (fuzzy), para el remanente que no matcheó ni
     por CUIT ni por nombre vía padrón.
@@ -279,9 +279,9 @@ def cruce_percepciones(
     PASO 4 - CUIT + mismo comprobante (Pto. Venta y N°Comprobante), con
     importe distinto: es la misma percepción cargada con un importe erróneo
     en el sistema. No se considera match: el par va a df_revisar, con las
-    columnas de ARCA y del sistema en una misma fila y 'Comentario' = 'Importe'.
+    columnas de AGIP y del sistema en una misma fila y 'Comentario' = 'Importe'.
 
-    PASO 5 - Agrupado: varias percepciones de ARCA del mismo CUIT cuya suma
+    PASO 5 - Agrupado: varias percepciones de AGIP del mismo CUIT cuya suma
     coincide (con tolerancia_grupo) con una sola línea del sistema. Pasa
     cuando el sistema registra en un único asiento varias percepciones.
     Busca combinaciones de 2 a max_tamano_grupo líneas y se queda con la
@@ -292,9 +292,9 @@ def cruce_percepciones(
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
               'match_tipo' = 'cuit' / 'cuit_padron' / 'nombre' / 'agrupado',
               y 'match_score')
-            - df_falta_sistema (líneas de ARCA sin match)
+            - df_falta_sistema (líneas de AGIP sin match)
             - df_falta_arca (líneas de sistema sin match)
-            - df_revisar (pares ARCA / sistema del mismo comprobante con
+            - df_revisar (pares AGIP / sistema del mismo comprobante con
               importe distinto)
     """
     if padron is None:
@@ -477,7 +477,7 @@ def cruce_percepciones(
             sistema_disponibles.remove(s_idx)
             arca_matcheados.add(a_idx)
 
-    # PASO 5: varias percepciones de ARCA del mismo CUIT que suman una línea del sistema
+    # PASO 5: varias percepciones de AGIP del mismo CUIT que suman una línea del sistema
     for s_idx in sorted(sistema_disponibles):
         cuit_s = cuit_sistema_norm.loc[s_idx]
         importe_s = df_sistema.loc[s_idx, "Importe"]
@@ -550,10 +550,10 @@ def cruce_percepciones(
     idx_falta_arca = [i for i in df_sistema.index if i not in sistema_matcheados]
     df_falta_arca = df_sistema.loc[idx_falta_arca].reset_index(drop=True)
 
-    # Revisar: columnas de ARCA y del sistema en la misma fila. Las que se
+    # Revisar: columnas de AGIP y del sistema en la misma fila. Las que se
     # repiten en ambos lados llevan sufijo para no pisarse.
     repetidas = (set(df_arca.columns) & set(df_sistema.columns)) | {"Comentario"}
-    cols_arca_rev = [f"{c} ARCA" if c in repetidas else c for c in df_arca.columns]
+    cols_arca_rev = [f"{c} AGIP" if c in repetidas else c for c in df_arca.columns]
     cols_sistema_rev = [f"{c} Sistema" if c in repetidas else c for c in df_sistema.columns]
     cols_revisar = cols_arca_rev + cols_sistema_rev + ["Comentario"]
 
@@ -700,7 +700,7 @@ def generar_excel_percepciones(
 
     def _nombre_base(header) -> str:
         h = str(header).strip()
-        for sufijo in (" ARCA", " Sistema"):
+        for sufijo in (" AGIP", " Sistema"):
             if h.endswith(sufijo):
                 return h[: -len(sufijo)]
         return h
@@ -737,16 +737,16 @@ def generar_excel_percepciones(
 
     hojas = {
         "Match_Sistema": df_match_sistema,
-        "Match_Arca": df_match_arca,
+        "Match_AGIP": df_match_arca,
         "Falta_Sistema": df_falta_sistema,
-        "Falta_Arca": df_falta_arca,
+        "Falta_AGIP": df_falta_arca,
     }
     if df_revisar is not None and not df_revisar.empty:
         hojas["Revisar"] = df_revisar
     if df_neteos_sistema is not None and not df_neteos_sistema.empty:
         hojas["Neteos_Sistema"] = df_neteos_sistema
     if df_neteos_arca is not None and not df_neteos_arca.empty:
-        hojas["Neteos_Arca"] = df_neteos_arca
+        hojas["Neteos_AGIP"] = df_neteos_arca
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
