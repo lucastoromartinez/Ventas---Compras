@@ -6,7 +6,7 @@ from rapidfuzz import fuzz
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema
+from logica_percepciones import load_excel_sistema, _nombre_comparable
 from proveedores import PADRON_PROVEEDORES
 
 
@@ -229,7 +229,8 @@ def cruce_sirtac(
             if not candidatos:
                 continue
 
-            puntajes = [(i, fuzz.token_sort_ratio(nombre_s, str(df_sistema.loc[i, col_tercero_sistema])))
+            puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_s),
+                                                  _nombre_comparable(df_sistema.loc[i, col_tercero_sistema])))
                         for i in candidatos]
             mejor_idx, mejor_score = max(puntajes, key=lambda x: x[1])
 

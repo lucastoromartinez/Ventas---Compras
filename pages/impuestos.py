@@ -10,7 +10,7 @@ aplicar_estilos()
 
 encabezado(
     "Impuestos",
-    "Percepciones y retenciones ARCA contra sistema interno.",
+    "Percepciones y retenciones de IIBB contra sistema interno.",
     "Impuestos",
 )
 
@@ -33,7 +33,7 @@ if submodulo_actual == "Percepciones IIBB CABA":
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<div class="upload-label">Excel ARCA (percepciones)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Excel AGIP (percepciones)</div>', unsafe_allow_html=True)
         archivo_arca = st.file_uploader("arca_percep", type=["xlsx", "xls"],
                                          label_visibility="collapsed", key="percep_arca")
     with col2:
@@ -87,7 +87,7 @@ if submodulo_actual == "Percepciones IIBB CABA":
             </div>
             <div class="metric-card {clase_falt_a}">
                 <div class="metric-value">{stats['faltante_arca']}</div>
-                <div class="metric-label">Faltante ARCA</div>
+                <div class="metric-label">Faltante AGIP</div>
             </div>
             <div class="metric-card {clase_falt_s}">
                 <div class="metric-value">{stats['faltante_sistema']}</div>
@@ -108,7 +108,7 @@ if submodulo_actual == "Percepciones IIBB CABA":
 
         if stats.get("revisar", 0) > 0:
             st.warning(
-                f"Hay {stats['revisar']} comprobante(s) que coinciden entre ARCA y sistema con importe "
+                f"Hay {stats['revisar']} comprobante(s) que coinciden entre AGIP y sistema con importe "
                 "distinto. Revisá la hoja 'Revisar' del reporte."
             )
 
@@ -225,7 +225,7 @@ elif submodulo_actual == "Retenciones IIBB CABA":
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<div class="upload-label">Excel ARCA (retenciones)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Excel AGIP (retenciones)</div>', unsafe_allow_html=True)
         archivo_arca_ret = st.file_uploader("arca_ret", type=["xlsx", "xls"],
                                              label_visibility="collapsed", key="ret_arca")
     with col2:
@@ -279,7 +279,7 @@ elif submodulo_actual == "Retenciones IIBB CABA":
             </div>
             <div class="metric-card {clase_falt_a_ret}">
                 <div class="metric-value">{stats_ret['faltante_arca']}</div>
-                <div class="metric-label">Faltante ARCA</div>
+                <div class="metric-label">Faltante AGIP</div>
             </div>
             <div class="metric-card {clase_falt_s_ret}">
                 <div class="metric-value">{stats_ret['faltante_sistema']}</div>
@@ -300,7 +300,7 @@ elif submodulo_actual == "Retenciones IIBB CABA":
 
         if stats_ret.get("revisar", 0) > 0:
             st.warning(
-                f"Hay {stats_ret['revisar']} proveedor(es) con retenciones en ARCA y en sistema que no cierran. "
+                f"Hay {stats_ret['revisar']} proveedor(es) con retenciones en AGIP y en sistema que no cierran. "
                 "Revisá la hoja 'Revisar' del reporte."
             )
 

@@ -6,37 +6,8 @@ from rapidfuzz import fuzz, process
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
+from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro, _nombre_comparable
 from proveedores import PADRON_PROVEEDORES
-
-
-# ─────────────────────────────────────────────
-# NORMALIZACIÓN DE RAZÓN SOCIAL (para comparar por nombre)
-# ─────────────────────────────────────────────
-
-_FORMAS_SOCIETARIAS = [
-    (r"\bSOCIEDAD ANONIMA UNIPERSONAL\b", "SAU"),
-    (r"\bSOCIEDAD ANONIMA\b", "SA"),
-    (r"\bSOCIEDAD DE RESPONSABILIDAD LIMITADA\b", "SRL"),
-    (r"\bSOCIEDAD POR ACCIONES SIMPLIFICADA\b", "SAS"),
-    (r"\bS A U\b", "SAU"),
-    (r"\bS A S\b", "SAS"),
-    (r"\bS R L\b", "SRL"),
-    (r"\bS A\b", "SA"),
-]
-
-
-def _nombre_comparable(nombre) -> str:
-    """
-    Unifica la forma societaria para la comparación fuzzy: 'STYLUS SOCIEDAD
-    ANONIMA', 'STYLUS S.A.' y 'STYLUS SA' quedan todos como 'STYLUS SA'.
-    """
-    s = str(nombre).upper()
-    s = re.sub(r"[.,\-]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    for patron, reemplazo in _FORMAS_SOCIETARIAS:
-        s = re.sub(patron, reemplazo, s)
-    return s
 
 
 # ─────────────────────────────────────────────
@@ -127,12 +98,12 @@ def depurar_sistema_retenciones(df: pd.DataFrame, padron: dict | None = None) ->
 
 
 # ─────────────────────────────────────────────
-# DEPURACIÓN ARCA
+# DEPURACIÓN AGIP
 # ─────────────────────────────────────────────
 
 def depurar_arca_retenciones(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Depura el reporte de retenciones de ARCA:
+    Depura el reporte de retenciones de AGIP:
     - Normaliza 'CUIT' a texto.
     - Redondea 'Monto Retenido' a 2 decimales.
     - Separa 'N° Comprobante' en 'Pto. Venta' y 'N°Comprobante' (8 dígitos).
@@ -205,11 +176,11 @@ def cruce_retenciones(
     padron: dict | None = None,
 ):
     """
-    Cruza retenciones de ARCA contra el sistema. A diferencia de percepciones,
+    Cruza retenciones de AGIP contra el sistema. A diferencia de percepciones,
     las retenciones no siempre tienen comprobante asociado: las filas del
     sistema con 'Serie' cargada se cruzan línea a línea; las filas con
     'Serie' vacía se cruzan de forma sumarizada, agrupando varias líneas de
-    ARCA del mismo proveedor contra una sola línea del sistema cuya suma de
+    AGIP del mismo proveedor contra una sola línea del sistema cuya suma de
     'Monto Retenido' cierra el 'Importe'.
 
     PASO 1 (Serie no nula, línea a línea):
@@ -219,16 +190,16 @@ def cruce_retenciones(
       1c. Fuzzy por nombre + Importe, para el remanente (score >= score_nombre_min).
 
     PASO 2 (Serie nula, sumarizado por proveedor):
-      2a. Agrupa ARCA libres por CUIT real; matchea contra el CUIT (generado
+      2a. Agrupa AGIP libres por CUIT real; matchea contra el CUIT (generado
           vía padrón) de la fila del sistema si la suma cierra.
       2b. Si no hay grupo por CUIT, busca en el padrón el nombre asociado al
-          CUIT de cada grupo de ARCA y lo compara contra 'Tercero' del sistema.
-      2c. Si tampoco, fuzzy por nombre entre los grupos de ARCA restantes y
+          CUIT de cada grupo de AGIP y lo compara contra 'Tercero' del sistema.
+      2c. Si tampoco, fuzzy por nombre entre los grupos de AGIP restantes y
           'Tercero' del sistema (probando los 4 mejores candidatos).
 
     PASO 3 (líneas del sistema sin proveedor identificado, es decir sin CUIT
     ni por columna ni por padrón): compara el 'Importe' de la línea contra
-    el total de cada proveedor de ARCA que quedó libre. Si un único
+    el total de cada proveedor de AGIP que quedó libre. Si un único
     proveedor cierra (con tolerancia_importe), matchea todo ese grupo como
     'importe_proveedor_sumarizado'. Si cierran dos o más, no matchea.
 
@@ -236,7 +207,7 @@ def cruce_retenciones(
         tuple de 4 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
               'match_tipo' y 'match_score')
-            - df_falta_sistema (líneas de ARCA sin match)
+            - df_falta_sistema (líneas de AGIP sin match)
             - df_falta_arca (líneas de sistema sin match)
     """
     if padron is None:
@@ -407,7 +378,7 @@ def cruce_retenciones(
                 arca_libres -= set(grupo_padron)
                 continue
 
-        # 2c: fuzzy por nombre entre los grupos de ARCA restantes
+        # 2c: fuzzy por nombre entre los grupos de AGIP restantes
         grupos_nombre = _grupos_por_nombre(arca_libres)
         if not grupos_nombre:
             continue
@@ -429,7 +400,7 @@ def cruce_retenciones(
                 break
 
     # ============================================================
-    # PASO 3: líneas del sistema sin proveedor vs total por proveedor de ARCA
+    # PASO 3: líneas del sistema sin proveedor vs total por proveedor de AGIP
     # ============================================================
     sistema_matcheados = {s_idx for _, s_idx, _, _ in matches} | {s_idx for _, s_idx, _, _ in matches_grupo}
     sistema_sin_proveedor = [
@@ -527,11 +498,11 @@ def separar_diferencias(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Toma los faltantes del cruce y separa los proveedores (por CUIT) que
-    tienen líneas sin match de ambos lados: ARCA informa retenciones y el
+    tienen líneas sin match de ambos lados: AGIP informa retenciones y el
     sistema las registró, pero los importes no cierran. Esos casos salen de
     los faltantes y pasan a revisar.
 
-    df_falta_sistema son líneas de ARCA y df_falta_arca líneas del sistema.
+    df_falta_sistema son líneas de AGIP y df_falta_arca líneas del sistema.
 
     Retorna:
         - df_falta_sistema y df_falta_arca sin esos proveedores
@@ -686,16 +657,16 @@ def generar_excel_retenciones(
 
     hojas = {
         "Match_Sistema": df_match_sistema,
-        "Match_Arca": df_match_arca,
+        "Match_AGIP": df_match_arca,
         "Falta_Sistema": df_falta_sistema,
-        "Falta_Arca": df_falta_arca,
+        "Falta_AGIP": df_falta_arca,
     }
     if df_revisar is not None and not df_revisar.empty:
         hojas["Revisar"] = df_revisar
         if df_revisar_sistema is not None:
             hojas["Revisar_Sistema"] = df_revisar_sistema
         if df_revisar_arca is not None:
-            hojas["Revisar_Arca"] = df_revisar_arca
+            hojas["Revisar_AGIP"] = df_revisar_arca
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
