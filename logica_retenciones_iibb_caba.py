@@ -11,6 +11,35 @@ from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
+# NORMALIZACIÓN DE RAZÓN SOCIAL (para comparar por nombre)
+# ─────────────────────────────────────────────
+
+_FORMAS_SOCIETARIAS = [
+    (r"\bSOCIEDAD ANONIMA UNIPERSONAL\b", "SAU"),
+    (r"\bSOCIEDAD ANONIMA\b", "SA"),
+    (r"\bSOCIEDAD DE RESPONSABILIDAD LIMITADA\b", "SRL"),
+    (r"\bSOCIEDAD POR ACCIONES SIMPLIFICADA\b", "SAS"),
+    (r"\bS A U\b", "SAU"),
+    (r"\bS A S\b", "SAS"),
+    (r"\bS R L\b", "SRL"),
+    (r"\bS A\b", "SA"),
+]
+
+
+def _nombre_comparable(nombre) -> str:
+    """
+    Unifica la forma societaria para la comparación fuzzy: 'STYLUS SOCIEDAD
+    ANONIMA', 'STYLUS S.A.' y 'STYLUS SA' quedan todos como 'STYLUS SA'.
+    """
+    s = str(nombre).upper()
+    s = re.sub(r"[.,\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for patron, reemplazo in _FORMAS_SOCIETARIAS:
+        s = re.sub(patron, reemplazo, s)
+    return s
+
+
+# ─────────────────────────────────────────────
 # DEPURACIÓN SISTEMA
 # ─────────────────────────────────────────────
 
@@ -234,6 +263,21 @@ def cruce_retenciones(
     cuit_arca_norm = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
     cuit_sistema_norm = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
 
+    col_fecha_arca = _buscar_columna(df_arca, "FECHA RETENCION")
+    col_fecha_sistema = _buscar_columna(df_sistema, "FECHA")
+    fecha_arca = pd.to_datetime(df_arca[col_fecha_arca], errors="coerce") if col_fecha_arca else None
+    fecha_sistema = pd.to_datetime(df_sistema[col_fecha_sistema], errors="coerce") if col_fecha_sistema else None
+
+    def _mas_cercano_en_fecha(a_idx, candidatos_idx):
+        if fecha_arca is None or fecha_sistema is None or pd.isna(fecha_arca.loc[a_idx]):
+            return min(candidatos_idx)
+
+        def _distancia(i):
+            f = fecha_sistema.loc[i]
+            return (pd.isna(f), abs((f - fecha_arca.loc[a_idx]).days) if pd.notna(f) else 0, i)
+
+        return min(candidatos_idx, key=_distancia)
+
     idx_serie_con = set(df_sistema.index[df_sistema[col_serie].notna()])
     idx_serie_vacia = set(df_sistema.index[df_sistema[col_serie].isna()])
 
@@ -300,13 +344,16 @@ def cruce_retenciones(
         if not candidatos_idx:
             continue
 
-        puntajes = [(i, fuzz.token_sort_ratio(nombre_a, str(df_sistema.loc[i, "Tercero"])))
+        puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_a),
+                                              _nombre_comparable(df_sistema.loc[i, "Tercero"])))
                     for i in candidatos_idx]
         mejor_score = max(p[1] for p in puntajes)
         if mejor_score < score_nombre_min:
             continue
 
-        s_idx = next(i for i, sc in puntajes if sc == mejor_score)
+        # Entre empates (mismo proveedor e importe), la fecha más cercana
+        empatados = [i for i, sc in puntajes if sc == mejor_score]
+        s_idx = _mas_cercano_en_fecha(a_idx, empatados)
         matches.append((a_idx, s_idx, "nombre", mejor_score))
         sistema_disponibles.remove(s_idx)
         arca_matcheados.add(a_idx)
@@ -368,7 +415,7 @@ def cruce_retenciones(
         nombres_grupos = list(grupos_nombre.keys())
         candidatos_nombre = process.extract(
             str(df_sistema.loc[s_idx, "Tercero"]), nombres_grupos,
-            scorer=fuzz.token_sort_ratio, limit=4
+            scorer=fuzz.token_sort_ratio, processor=_nombre_comparable, limit=4
         )
 
         for nombre_grupo, score, _ in candidatos_nombre:
