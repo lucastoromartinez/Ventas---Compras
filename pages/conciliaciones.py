@@ -1,6 +1,7 @@
 import streamlit as st
 from estilos import aplicar_estilos, encabezado
 from logica_galicia     import correr_conciliacion_galicia
+from logica_galicia_completa import correr_conciliacion_galicia as correr_conciliacion_galicia_completa
 from logica_hipotecario import correr_conciliacion_hipotecario
 from logica_cupones     import correr_conciliacion_cupones_plantilla
 from logica_fiser       import correr_conciliacion_fiser
@@ -24,100 +25,239 @@ tab_galicia, tab_hipotecario, tab_cupones, tab_fiser, tab_mp = st.tabs(
 # ═══════════════════════════════════════════════
 with tab_galicia:
     st.markdown("<br>", unsafe_allow_html=True)
+    modo_galicia = st.radio(
+        "Tipo de conciliación",
+        ["Cruce", "Conciliación Completa"],
+        horizontal=True,
+        key="galicia_modo",
+    )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
-        archivo_mayor_g = st.file_uploader("mayor_g", type=["xlsx","xls"],
-                                            label_visibility="collapsed", key="mayor_g")
-    with col2:
-        st.markdown('<div class="upload-label">Extracto Galicia</div>', unsafe_allow_html=True)
-        archivo_extracto_g = st.file_uploader("extracto_g", type=["xlsx","xls"],
-                                               label_visibility="collapsed", key="extracto_g")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # Toggle pagos masivos
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-    st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
-    con_masivos = st.toggle("Incluir Pagos Masivos", value=False, key="toggle_masivos")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # ─────────────────────────────────────────
+    # MODO CONCILIACIÓN COMPLETA (en prueba: logica_galicia_completa.py)
+    # ─────────────────────────────────────────
+    if modo_galicia == "Conciliación Completa":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
+            archivo_mayor_gc = st.file_uploader("mayor_gc", type=["xlsx","xls"],
+                                                 label_visibility="collapsed", key="mayor_gc")
+        with col2:
+            st.markdown('<div class="upload-label">Extracto Galicia</div>', unsafe_allow_html=True)
+            archivo_extracto_gc = st.file_uploader("extracto_gc", type=["xlsx","xls"],
+                                                    label_visibility="collapsed", key="extracto_gc")
 
-    archivo_prov_g = None
-    if con_masivos:
-        st.markdown('<div class="upload-label optional">Proveedores Días Masivos</div>', unsafe_allow_html=True)
-        archivo_prov_g = st.file_uploader("prov_g", type=["xlsx","xls"],
-                                           label_visibility="collapsed", key="prov_g")
+        st.caption("Conviene exportar el Mayor desde el mes anterior (o desde enero) "
+                   "para detectar asientos cargados con fecha ya conciliada.")
 
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+        col3, col4 = st.columns(2)
+        with col3:
+            st.markdown('<div class="upload-label optional">Conciliación anterior</div>', unsafe_allow_html=True)
+            archivo_cc_ant_gc = st.file_uploader("cc_ant_gc", type=["xlsx"],
+                                                  label_visibility="collapsed", key="cc_ant_gc")
+        with col4:
+            st.markdown('<div class="upload-label optional">Analista</div>', unsafe_allow_html=True)
+            analista_gc = st.text_input("analista_gc", label_visibility="collapsed", key="analista_gc")
 
-    # Validación: mayor + extracto siempre requeridos; proveedores solo si toggle activo
-    base_ok    = all([archivo_mayor_g, archivo_extracto_g])
-    masivos_ok = (not con_masivos) or (con_masivos and archivo_prov_g)
-    todo_ok_g  = base_ok and masivos_ok
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+        st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
+        con_masivos_gc = st.toggle("Incluir Pagos Masivos", value=False, key="toggle_masivos_gc")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if not base_ok:
-        st.info("Cargá el Mayor y el Extracto para habilitar la conciliación.")
-    elif con_masivos and not archivo_prov_g:
-        st.info("Cargá el archivo de Proveedores Días Masivos para continuar.")
-
-    boton_g = st.button("Conciliar Galicia", disabled=not todo_ok_g,
-                         use_container_width=True, key="btn_galicia")
-
-    if boton_g and todo_ok_g:
-        with st.spinner("Procesando Galicia..."):
-            try:
-                buf_g, stats_g = correr_conciliacion_galicia(
-                    archivo_mayor=archivo_mayor_g,
-                    archivo_extracto=archivo_extracto_g,
-                    archivo_proveedores=archivo_prov_g,  # None si no hay masivos
-                )
-                st.session_state["resultado_galicia"] = {"buf": buf_g, "stats": stats_g}
-            except Exception as e:
-                st.error(f"Error al procesar Galicia: {e}")
-
-    if "resultado_galicia" in st.session_state:
-        r = st.session_state["resultado_galicia"]
-        s = r["stats"]
+        archivo_prov_gc = None
+        if con_masivos_gc:
+            st.markdown('<div class="upload-label optional">Proveedores Días Masivos</div>', unsafe_allow_html=True)
+            archivo_prov_gc = st.file_uploader("prov_gc", type=["xlsx","xls"],
+                                                label_visibility="collapsed", key="prov_gc")
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-        if s.get("con_masivos"):
-            st.success("Conciliación con Pagos Masivos incluidos")
-        else:
-            st.info("ℹ️ Conciliación sin Pagos Masivos")
+        base_ok_gc    = all([archivo_mayor_gc, archivo_extracto_gc])
+        masivos_ok_gc = (not con_masivos_gc) or bool(archivo_prov_gc)
+        todo_ok_gc    = base_ok_gc and masivos_ok_gc
 
-        clase_fm = "error" if s["falta_mayor"]    > 0 else "metric-card"
-        clase_fe = "error" if s["falta_extracto"] > 0 else "metric-card"
+        if not base_ok_gc:
+            st.info("Cargá el Mayor y el Extracto para habilitar la conciliación.")
+        elif not masivos_ok_gc:
+            st.info("Cargá el archivo de Proveedores Días Masivos para continuar.")
+        elif archivo_cc_ant_gc is None:
+            st.info("Sin conciliación anterior no se controlan pendientes ni asientos retroactivos.")
 
-        st.markdown(f"""
-        <div class="metric-row">
-            <div class="metric-card">
-                <div class="metric-value">{s['match_exacto']}</div>
-                <div class="metric-label">Match exacto</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{s['match_tolerancia']}</div>
-                <div class="metric-label">Match tolerancia</div>
-            </div>
-            <div class="metric-card {clase_fm}">
-                <div class="metric-value">{s['falta_mayor']}</div>
-                <div class="metric-label">Faltante mayor</div>
-            </div>
-            <div class="metric-card {clase_fe}">
-                <div class="metric-value">{s['falta_extracto']}</div>
-                <div class="metric-label">Faltante extracto</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        boton_gc = st.button("Conciliar Galicia (completa)", disabled=not todo_ok_gc,
+                             use_container_width=True, key="btn_galicia_completa")
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.download_button(
-            label="Descargar reporte Galicia",
-            icon=":material/download:",
-            data=r["buf"],
-            file_name="conciliacion_galicia.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        if boton_gc and todo_ok_gc:
+            with st.spinner("Procesando conciliación completa Galicia..."):
+                try:
+                    buf_gc, stats_gc = correr_conciliacion_galicia_completa(
+                        archivo_mayor=archivo_mayor_gc,
+                        archivo_extracto=archivo_extracto_gc,
+                        archivo_proveedores=archivo_prov_gc,
+                        archivo_conciliacion_anterior=archivo_cc_ant_gc,
+                        analista=analista_gc or "",
+                    )
+                    st.session_state["resultado_galicia_completa"] = {"buf": buf_gc, "stats": stats_gc}
+                except Exception as e:
+                    st.error(f"Error al procesar la conciliación completa: {e}")
+
+        if "resultado_galicia_completa" in st.session_state:
+            r = st.session_state["resultado_galicia_completa"]
+            s = r["stats"]
+
+            def _fmt(v):
+                if v is None:
+                    return "-"
+                return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+            if s.get("modo"):
+                st.info(f"Modo respecto de la conciliación anterior: {s['modo']}")
+
+            dif = s.get("diferencia") or 0
+            clase_dif = "error" if abs(dif) >= 1 else "metric-card"
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card">
+                    <div class="metric-value">{_fmt(s.get('saldo_mayor_final'))}</div>
+                    <div class="metric-label">Saldo contable</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{_fmt(s.get('saldo_ext_final'))}</div>
+                    <div class="metric-label">Saldo extracto</div>
+                </div>
+                <div class="metric-card {clase_dif}">
+                    <div class="metric-value">{_fmt(s.get('diferencia'))}</div>
+                    <div class="metric-label">Diferencia</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{s.get('lineas_cc', 0)}</div>
+                    <div class="metric-label">Líneas CC</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("Detalle de la diferencia y pendientes anteriores"):
+                st.markdown(
+                    f"- Diferencia heredada de la CC anterior: **{_fmt(s.get('dif_heredada'))}**\n"
+                    f"- Centavos del cruce: **{_fmt(s.get('dif_cruce'))}**\n"
+                    f"- Centavos de apareos: **{_fmt(s.get('dif_redondeo_apareo'))}**\n"
+                    f"- Retroactivos identificados: **{_fmt(s.get('retro_identificado'))}**\n"
+                    f"- Retroactivos sin identificar: **{_fmt(s.get('retro_no_identificado'))}**\n"
+                    f"- Pendientes anteriores registrados: **{s.get('pendientes_anteriores_registrados', 0)}**\n"
+                    f"- Pendientes anteriores vigentes: **{s.get('pendientes_anteriores_vigentes', 0)}**"
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="Descargar conciliación completa Galicia",
+                icon=":material/download:",
+                data=r["buf"],
+                file_name="conciliacion_completa_galicia.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="dl_galicia_completa",
+            )
+
+    # ─────────────────────────────────────────
+    # MODO CRUCE (lógica original, sin cambios)
+    # ─────────────────────────────────────────
+    else:
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
+            archivo_mayor_g = st.file_uploader("mayor_g", type=["xlsx","xls"],
+                                                label_visibility="collapsed", key="mayor_g")
+        with col2:
+            st.markdown('<div class="upload-label">Extracto Galicia</div>', unsafe_allow_html=True)
+            archivo_extracto_g = st.file_uploader("extracto_g", type=["xlsx","xls"],
+                                                   label_visibility="collapsed", key="extracto_g")
+
+        # Toggle pagos masivos
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+        st.markdown('<div class="toggle-box">', unsafe_allow_html=True)
+        con_masivos = st.toggle("Incluir Pagos Masivos", value=False, key="toggle_masivos")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        archivo_prov_g = None
+        if con_masivos:
+            st.markdown('<div class="upload-label optional">Proveedores Días Masivos</div>', unsafe_allow_html=True)
+            archivo_prov_g = st.file_uploader("prov_g", type=["xlsx","xls"],
+                                               label_visibility="collapsed", key="prov_g")
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        # Validación: mayor + extracto siempre requeridos; proveedores solo si toggle activo
+        base_ok    = all([archivo_mayor_g, archivo_extracto_g])
+        masivos_ok = (not con_masivos) or (con_masivos and archivo_prov_g)
+        todo_ok_g  = base_ok and masivos_ok
+
+        if not base_ok:
+            st.info("Cargá el Mayor y el Extracto para habilitar la conciliación.")
+        elif con_masivos and not archivo_prov_g:
+            st.info("Cargá el archivo de Proveedores Días Masivos para continuar.")
+
+        boton_g = st.button("Conciliar Galicia", disabled=not todo_ok_g,
+                             use_container_width=True, key="btn_galicia")
+
+        if boton_g and todo_ok_g:
+            with st.spinner("Procesando Galicia..."):
+                try:
+                    buf_g, stats_g = correr_conciliacion_galicia(
+                        archivo_mayor=archivo_mayor_g,
+                        archivo_extracto=archivo_extracto_g,
+                        archivo_proveedores=archivo_prov_g,  # None si no hay masivos
+                    )
+                    st.session_state["resultado_galicia"] = {"buf": buf_g, "stats": stats_g}
+                except Exception as e:
+                    st.error(f"Error al procesar Galicia: {e}")
+
+        if "resultado_galicia" in st.session_state:
+            r = st.session_state["resultado_galicia"]
+            s = r["stats"]
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+            if s.get("con_masivos"):
+                st.success("Conciliación con Pagos Masivos incluidos")
+            else:
+                st.info("ℹ️ Conciliación sin Pagos Masivos")
+
+            clase_fm = "error" if s["falta_mayor"]    > 0 else "metric-card"
+            clase_fe = "error" if s["falta_extracto"] > 0 else "metric-card"
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card">
+                    <div class="metric-value">{s['match_exacto']}</div>
+                    <div class="metric-label">Match exacto</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{s['match_tolerancia']}</div>
+                    <div class="metric-label">Match tolerancia</div>
+                </div>
+                <div class="metric-card {clase_fm}">
+                    <div class="metric-value">{s['falta_mayor']}</div>
+                    <div class="metric-label">Faltante mayor</div>
+                </div>
+                <div class="metric-card {clase_fe}">
+                    <div class="metric-value">{s['falta_extracto']}</div>
+                    <div class="metric-label">Faltante extracto</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="Descargar reporte Galicia",
+                icon=":material/download:",
+                data=r["buf"],
+                file_name="conciliacion_galicia.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 
 # ═══════════════════════════════════════════════
