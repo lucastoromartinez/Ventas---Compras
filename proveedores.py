@@ -2594,6 +2594,30 @@ PADRON_PROVEEDORES: dict[str, str] = {'20233294900': 'IANNUZZI GUSTAVO ADOLFO',
  '30500031960': 'SWISS MEDICAL'}
 
 
+# Nombres con los que un proveedor figura en el sistema y que no coinciden con
+# su nombre en el padrón. Clave: 'Tercero' tal como viene del sistema.
+ALIAS_PROVEEDORES: dict[str, str] = {
+    'SMG COMPAÑIA ARGENTINA DE SEGUROS S.A.U': '30500031960',
+}
+
+
+def mapa_nombre_a_cuit(padron: dict | None = None) -> dict[str, str]:
+    """
+    Arma el diccionario nombre (en mayúsculas) -> CUIT a partir del padrón,
+    más los alias de ALIAS_PROVEEDORES. Ante nombres repetidos queda el
+    primer CUIT encontrado.
+    """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
+    nombre_a_cuit = {}
+    for cuit, nombre in padron.items():
+        nombre_a_cuit.setdefault(str(nombre).strip().upper(), cuit)
+    for nombre, cuit in ALIAS_PROVEEDORES.items():
+        nombre_a_cuit.setdefault(str(nombre).strip().upper(), cuit)
+    return nombre_a_cuit
+
+
 def normalizar_cuit(cuit) -> str:
     """Deja solo dígitos, para comparar CUITs sin importar guiones/espacios."""
     return "".join(ch for ch in str(cuit) if ch.isdigit())

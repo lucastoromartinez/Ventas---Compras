@@ -7,7 +7,7 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 from logica_percepciones import load_excel_sistema, _nombre_comparable
-from proveedores import PADRON_PROVEEDORES
+from proveedores import PADRON_PROVEEDORES, mapa_nombre_a_cuit
 
 
 # ─────────────────────────────────────────────
@@ -51,8 +51,9 @@ def cargar_txt_arca(file) -> pd.DataFrame:
     df["tipo"] = df["tipo"].str.strip()
     df["importe"] = df["importe"].str.replace(",", ".", regex=False).astype(float)
     df["cuit"] = df["cuit"].str.replace("-", "", regex=False)
-    df["n_comprobante"] = df["comprobante"].str[:8].str.lstrip("0").replace("", "0")
-    df["pto_venta"] = df["comprobante"].str[8:].str.lstrip("0").replace("", "0")
+    # Comprobante de 13 dígitos: punto de venta (5) + número (8)
+    df["pto_venta"] = df["comprobante"].str[:-8].str.lstrip("0").replace("", "0")
+    df["n_comprobante"] = df["comprobante"].str[-8:].str.lstrip("0").replace("", "0")
 
     return df[["cuit", "fecha", "tipo", "pto_venta", "n_comprobante", "importe"]]
 
@@ -95,6 +96,7 @@ def _parse_nro(s: str) -> tuple[str, str]:
 def depurar_sistema_pba(df: pd.DataFrame, padron: dict | None = None) -> pd.DataFrame:
     """
     Depura el reporte del sistema:
+    - Descarta la fila 'Saldo anterior' del mayor (no es un movimiento).
     - Calcula 'Importe' = Debe - Haber.
     - A partir de 'Su Factura' genera 'Pto. Venta' y 'N°Comprobante'.
     - Si el archivo ya trae una columna CUIT (sin importar mayúsculas o
@@ -119,6 +121,13 @@ def depurar_sistema_pba(df: pd.DataFrame, padron: dict | None = None) -> pd.Data
     col_haber = _buscar_columna(df, "Haber")
     col_su_factura = _buscar_columna(df, "Su Factura")
     col_tercero = _buscar_columna(df, "Tercero")
+    col_comentario = _buscar_columna(df, "Comentario")
+
+    if col_comentario is not None:
+        es_saldo_anterior = (
+            df[col_comentario].astype(str).str.strip().str.lower().str.startswith("saldo anterior")
+        )
+        df = df.loc[~es_saldo_anterior].reset_index(drop=True)
 
     columnas_encontradas = {
         "Debe": col_debe, "Haber": col_haber,
@@ -150,10 +159,7 @@ def depurar_sistema_pba(df: pd.DataFrame, padron: dict | None = None) -> pd.Data
         if col_cuit != "CUIT":
             df = df.rename(columns={col_cuit: "CUIT"})
     else:
-        nombre_a_cuit = {}
-        for cuit, nombre in padron.items():
-            clave = str(nombre).strip().upper()
-            nombre_a_cuit.setdefault(clave, cuit)
+        nombre_a_cuit = mapa_nombre_a_cuit(padron)
 
         df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
 
