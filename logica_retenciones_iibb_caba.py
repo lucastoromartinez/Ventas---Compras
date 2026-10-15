@@ -6,37 +6,8 @@ from rapidfuzz import fuzz, process
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
+from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro, _nombre_comparable
 from proveedores import PADRON_PROVEEDORES
-
-
-# ─────────────────────────────────────────────
-# NORMALIZACIÓN DE RAZÓN SOCIAL (para comparar por nombre)
-# ─────────────────────────────────────────────
-
-_FORMAS_SOCIETARIAS = [
-    (r"\bSOCIEDAD ANONIMA UNIPERSONAL\b", "SAU"),
-    (r"\bSOCIEDAD ANONIMA\b", "SA"),
-    (r"\bSOCIEDAD DE RESPONSABILIDAD LIMITADA\b", "SRL"),
-    (r"\bSOCIEDAD POR ACCIONES SIMPLIFICADA\b", "SAS"),
-    (r"\bS A U\b", "SAU"),
-    (r"\bS A S\b", "SAS"),
-    (r"\bS R L\b", "SRL"),
-    (r"\bS A\b", "SA"),
-]
-
-
-def _nombre_comparable(nombre) -> str:
-    """
-    Unifica la forma societaria para la comparación fuzzy: 'STYLUS SOCIEDAD
-    ANONIMA', 'STYLUS S.A.' y 'STYLUS SA' quedan todos como 'STYLUS SA'.
-    """
-    s = str(nombre).upper()
-    s = re.sub(r"[.,\-]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    for patron, reemplazo in _FORMAS_SOCIETARIAS:
-        s = re.sub(patron, reemplazo, s)
-    return s
 
 
 # ─────────────────────────────────────────────

@@ -6,7 +6,7 @@ from rapidfuzz import fuzz
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema
+from logica_percepciones import load_excel_sistema, _nombre_comparable
 from proveedores import PADRON_PROVEEDORES
 
 
@@ -308,7 +308,8 @@ def cruce_percepciones_pba(
             if not candidatos_idx:
                 continue
 
-            puntajes = [(i, fuzz.token_sort_ratio(nombre_a, str(df_sistema.loc[i, col_nombre_sistema])))
+            puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_a),
+                                                  _nombre_comparable(df_sistema.loc[i, col_nombre_sistema])))
                         for i in candidatos_idx]
             mejor_score = max(p[1] for p in puntajes)
 

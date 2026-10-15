@@ -11,6 +11,35 @@ from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
+# NORMALIZACIÓN DE RAZÓN SOCIAL (para comparar por nombre)
+# ─────────────────────────────────────────────
+
+_FORMAS_SOCIETARIAS = [
+    (r"\bSOCIEDAD ANONIMA UNIPERSONAL\b", "SAU"),
+    (r"\bSOCIEDAD ANONIMA\b", "SA"),
+    (r"\bSOCIEDAD DE RESPONSABILIDAD LIMITADA\b", "SRL"),
+    (r"\bSOCIEDAD POR ACCIONES SIMPLIFICADA\b", "SAS"),
+    (r"\bS A U\b", "SAU"),
+    (r"\bS A S\b", "SAS"),
+    (r"\bS R L\b", "SRL"),
+    (r"\bS A\b", "SA"),
+]
+
+
+def _nombre_comparable(nombre) -> str:
+    """
+    Unifica la forma societaria para la comparación fuzzy: 'STYLUS SOCIEDAD
+    ANONIMA', 'STYLUS S.A.' y 'STYLUS SA' quedan todos como 'STYLUS SA'.
+    """
+    s = str(nombre).upper()
+    s = re.sub(r"[.,\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for patron, reemplazo in _FORMAS_SOCIETARIAS:
+        s = re.sub(patron, reemplazo, s)
+    return s
+
+
+# ─────────────────────────────────────────────
 # CARGA
 # ─────────────────────────────────────────────
 
@@ -407,7 +436,8 @@ def cruce_percepciones(
         if not candidatos_idx:
             continue
 
-        puntajes = [(i, fuzz.token_sort_ratio(nombre_a, str(df_sistema.loc[i, "Tercero"])))
+        puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_a),
+                                              _nombre_comparable(df_sistema.loc[i, "Tercero"])))
                     for i in candidatos_idx]
         mejor_score = max(p[1] for p in puntajes)
 
