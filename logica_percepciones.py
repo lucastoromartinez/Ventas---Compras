@@ -7,7 +7,7 @@ from rapidfuzz import fuzz
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from proveedores import PADRON_PROVEEDORES
+from proveedores import PADRON_PROVEEDORES, mapa_nombre_a_cuit
 
 
 # ─────────────────────────────────────────────
@@ -171,10 +171,7 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
         if col_cuit != "CUIT":
             df = df.rename(columns={col_cuit: "CUIT"})
     else:
-        nombre_a_cuit = {}
-        for cuit, nombre in padron.items():
-            clave = str(nombre).strip().upper()
-            nombre_a_cuit.setdefault(clave, cuit)
+        nombre_a_cuit = mapa_nombre_a_cuit(padron)
 
         df["CUIT"] = df[c_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
 
