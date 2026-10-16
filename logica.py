@@ -474,7 +474,9 @@ def revisar_inconsistencias_en_match(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Arma `revisar` desde `match` cuando NO coinciden:
-      - Fecha_Sistema vs Fecha_arca                → comparación exacta
+      - Fecha_Sistema vs Fecha_arca                → no se marca si caen en
+        el mismo mes/año, ni si el sistema tiene día 1 y ARCA una fecha
+        anterior (carga del período cerrado sin abrir el candado)
       - Gravado_sistema vs Gravado_arca            → tolerancia +/- tol_pesos
       - No Gravado_sistema vs No gravado_arca      → tolerancia +/- tol_pesos.
         Si no coincide directo, "No Gravado" no se marca como
@@ -550,9 +552,17 @@ def revisar_inconsistencias_en_match(
 
     tol = float(tol_pesos)
 
-    mask_fecha = ~(
-        _to_dt_norm(df[c_fecha_sis]) == _to_dt_norm(df[c_fecha_arca])
-    )
+    # Diferencias de fecha que no son inconsistencia:
+    #   - dentro del mismo mes (ej. 01/01/2026 en el sistema y 04/01/2026
+    #     en ARCA): el comprobante cae en el mismo período.
+    #   - carga el día 1 del mes con fecha ARCA anterior: los comprobantes
+    #     de un período ya cerrado se cargan el primero del mes siguiente
+    #     para no abrir el candado.
+    fecha_sis  = _to_dt_norm(df[c_fecha_sis])
+    fecha_arca = _to_dt_norm(df[c_fecha_arca])
+    mismo_mes  = fecha_sis.dt.to_period("M") == fecha_arca.dt.to_period("M")
+    carga_dia1 = (fecha_sis.dt.day == 1) & (fecha_arca < fecha_sis)
+    mask_fecha = ~(mismo_mes | carga_dia1)
 
     grav_sis  = _to_num(df[c_grav_sis ]).fillna(0.0).round(2)
     grav_arca = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
