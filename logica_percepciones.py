@@ -175,6 +175,16 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
 
         df["CUIT"] = df[c_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
 
+        # Si no coincide exacto, se compara con la forma societaria unificada:
+        # 'BANCO X SAU' del sistema contra 'Banco X S A U' del padrón.
+        comparable_a_cuit = {}
+        for nombre, cuit in nombre_a_cuit.items():
+            comparable_a_cuit.setdefault(_nombre_comparable(nombre), cuit)
+        sin_cuit = df["CUIT"].isna()
+        df.loc[sin_cuit, "CUIT"] = df.loc[sin_cuit, c_tercero].map(
+            lambda t: comparable_a_cuit.get(_nombre_comparable(t))
+        )
+
     return df
 
 
@@ -278,7 +288,8 @@ def cruce_percepciones(
     en el sistema. No se considera match: el par va a df_revisar, con las
     columnas de AGIP y del sistema en una misma fila y 'Comentario' = 'Importe'.
 
-    PASO 5 - Agrupado: varias percepciones de AGIP del mismo CUIT cuya suma
+    PASO 5 - Agrupado: varias percepciones de AGIP del mismo CUIT (o, si la
+    línea del sistema no tiene CUIT, del mismo nombre) cuya suma
     coincide (con tolerancia_grupo) con una sola línea del sistema. Pasa
     cuando el sistema registra en un único asiento varias percepciones.
     Busca combinaciones de 2 a max_tamano_grupo líneas y se queda con la
@@ -478,13 +489,24 @@ def cruce_percepciones(
     for s_idx in sorted(sistema_disponibles):
         cuit_s = cuit_sistema_norm.loc[s_idx]
         importe_s = df_sistema.loc[s_idx, "Importe"]
-        if not cuit_s or pd.isna(importe_s) or importe_s == 0:
+        if pd.isna(importe_s) or importe_s == 0:
             continue
+
+        # Sin CUIT en el sistema, el proveedor se identifica por nombre
+        if cuit_s:
+            def _mismo_proveedor(i):
+                return cuit_arca_norm.loc[i] == cuit_s
+        else:
+            nombre_s = _nombre_comparable(df_sistema.loc[s_idx, "Tercero"])
+
+            def _mismo_proveedor(i):
+                nombre_a = _nombre_comparable(df_arca.loc[i, "Razon Social"])
+                return fuzz.token_sort_ratio(nombre_a, nombre_s) >= score_nombre_min
 
         pendientes = [
             i for i in df_arca.index
             if i not in arca_matcheados
-            and cuit_arca_norm.loc[i] == cuit_s
+            and _mismo_proveedor(i)
             and pd.notna(df_arca.loc[i, "Monto Percibido"])
             and (df_arca.loc[i, "Monto Percibido"] > 0) == (importe_s > 0)
             and abs(df_arca.loc[i, "Monto Percibido"]) <= abs(importe_s) + tolerancia_grupo
