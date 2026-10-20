@@ -5,7 +5,9 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_cruce_impuestos import (
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+)
 from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
 from proveedores import PADRON_PROVEEDORES
 
@@ -175,15 +177,19 @@ def cruce_retenciones(
     módulos de impuestos (ver logica_cruce_impuestos.cruzar_impuestos). A
     diferencia de percepciones, las retenciones no siempre tienen
     comprobante asociado: las filas del sistema con 'Serie' vacía solo se
-    cruzan de forma sumarizada. Entre candidatos empatados se queda con la
-    fecha más cercana.
+    cruzan de forma sumarizada. Entre candidatos empatados se queda con el
+    mismo comprobante y después con la fecha más cercana. El mismo
+    comprobante con importe distinto va a df_revisar con 'Comentario' =
+    'Importe'.
 
     Retorna:
-        tuple de 4 pd.DataFrame:
+        tuple de 5 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
               'match_tipo' y 'match_score')
             - df_falta_sistema (líneas de AGIP sin match)
             - df_falta_arca (líneas de sistema sin match)
+            - df_revisar (pares AGIP / sistema del mismo comprobante con
+              importe distinto)
     """
     if padron is None:
         padron = PADRON_PROVEEDORES
@@ -204,7 +210,12 @@ def cruce_retenciones(
     col_fecha_arca = _buscar_columna(df_arca, "FECHA RETENCION")
     col_fecha_sistema = _buscar_columna(df_sistema, "FECHA")
 
-    matches, _ = cruzar_impuestos(
+    cols = [
+        _buscar_columna(df_arca, "PTO VENTA"), _buscar_columna(df_arca, "N°COMPROBANTE"),
+        _buscar_columna(df_sistema, "PTO VENTA"), _buscar_columna(df_sistema, "N°COMPROBANTE"),
+    ]
+
+    matches, revisar = cruzar_impuestos(
         df_arca, df_sistema,
         col_cuit_arca=_buscar_columna(df_arca, "CUIT"),
         col_importe_arca="Monto Retenido",
@@ -215,99 +226,18 @@ def cruce_retenciones(
         padron=padron,
         tolerancia_importe=tolerancia_importe,
         score_nombre_min=score_nombre_min,
+        cols_comprobante=tuple(cols) if all(cols) else None,
         cols_fecha=(col_fecha_arca, col_fecha_sistema) if col_fecha_arca and col_fecha_sistema else None,
         solo_agrupado=set(df_sistema.index[df_sistema[col_serie].isna()]),
+        revisar_comprobante=True,
     )
 
-    return armar_resultados(df_arca, df_sistema, matches)
-
-
-# ─────────────────────────────────────────────
-# REVISAR (mismo proveedor con faltantes de ambos lados)
-# ─────────────────────────────────────────────
-
-def separar_diferencias(
-    df_falta_sistema: pd.DataFrame,
-    df_falta_arca: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Toma los faltantes del cruce y separa los proveedores (por CUIT) que
-    tienen líneas sin match de ambos lados: AGIP informa retenciones y el
-    sistema las registró, pero los importes no cierran. Esos casos salen de
-    los faltantes y pasan a revisar.
-
-    df_falta_sistema son líneas de AGIP y df_falta_arca líneas del sistema.
-
-    Retorna:
-        - df_falta_sistema y df_falta_arca sin esos proveedores
-        - df_revisar: una fila por proveedor con 'Importe Sistema',
-          'Monto AGIP', 'Diferencia' (Sistema - AGIP) y 'Comentario'
-          ('Dif: Registrado de Más' / 'Dif: Registrado de Menos')
-        - df_revisar_sistema / df_revisar_arca: el detalle de cada lado,
-          ligado al resumen por 'id_revisar'
-    """
-    def _cuit_norm(serie):
-        return serie.apply(lambda x: "" if pd.isna(x) else re.sub(r"\D", "", str(x)))
-
-    cols_revisar = [
-        "id_revisar", "CUIT", "Tercero", "Razon Social",
-        "Líneas Sistema", "Importe Sistema", "Líneas AGIP", "Monto AGIP",
-        "Diferencia", "Comentario",
-    ]
-    vacio = (
-        df_falta_sistema, df_falta_arca, pd.DataFrame(columns=cols_revisar),
-        df_falta_arca.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
-        df_falta_sistema.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
+    resultados = armar_resultados(
+        df_arca, df_sistema, matches,
+        excluidos_arca={a for a, _, _ in revisar},
+        excluidos_sistema={s for _, s, _ in revisar},
     )
-    if df_falta_sistema.empty or df_falta_arca.empty:
-        return vacio
-
-    cuit_arca = _cuit_norm(df_falta_sistema["CUIT"])
-    cuit_sistema = _cuit_norm(df_falta_arca["CUIT"])
-    cuits_ambos = [c for c in pd.unique(cuit_sistema) if c and c in set(cuit_arca)]
-    if not cuits_ambos:
-        return vacio
-
-    filas_revisar, det_sistema, det_arca = [], [], []
-    for id_revisar, cuit in enumerate(cuits_ambos, start=1):
-        lineas_s = df_falta_arca[cuit_sistema == cuit]
-        lineas_a = df_falta_sistema[cuit_arca == cuit]
-
-        importe_s = round(lineas_s["Importe"].sum(), 2)
-        monto_a = round(lineas_a["Monto Retenido"].sum(), 2)
-        diferencia = round(importe_s - monto_a, 2)
-        if diferencia > 0:
-            comentario = "Dif: Registrado de Más"
-        elif diferencia < 0:
-            comentario = "Dif: Registrado de Menos"
-        else:
-            comentario = "Sin diferencia"
-
-        filas_revisar.append({
-            "id_revisar": id_revisar,
-            "CUIT": cuit,
-            "Tercero": lineas_s["Tercero"].dropna().iloc[0] if lineas_s["Tercero"].notna().any() else "",
-            "Razon Social": lineas_a["Razon Social"].dropna().iloc[0] if lineas_a["Razon Social"].notna().any() else "",
-            "Líneas Sistema": len(lineas_s),
-            "Importe Sistema": importe_s,
-            "Líneas AGIP": len(lineas_a),
-            "Monto AGIP": monto_a,
-            "Diferencia": diferencia,
-            "Comentario": comentario,
-        })
-        det_sistema.append(lineas_s.assign(id_revisar=id_revisar))
-        det_arca.append(lineas_a.assign(id_revisar=id_revisar))
-
-    en_revisar_s = cuit_sistema.isin(cuits_ambos)
-    en_revisar_a = cuit_arca.isin(cuits_ambos)
-
-    return (
-        df_falta_sistema[~en_revisar_a].reset_index(drop=True),
-        df_falta_arca[~en_revisar_s].reset_index(drop=True),
-        pd.DataFrame(filas_revisar, columns=cols_revisar),
-        pd.concat(det_sistema).reset_index(drop=True),
-        pd.concat(det_arca).reset_index(drop=True),
-    )
+    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, "AGIP"))
 
 
 # ─────────────────────────────────────────────
@@ -353,14 +283,12 @@ def generar_excel_retenciones(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
-    df_revisar: pd.DataFrame | None = None,
-    df_revisar_sistema: pd.DataFrame | None = None,
-    df_revisar_arca: pd.DataFrame | None = None,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
     IMPORTE_FORMAT = "#,##0.00"
-    IMPORTE_COLS_REVISAR = {"Importe Sistema", "Monto AGIP", "Diferencia"}
+    IMPORTE_COLS_REVISAR = {"Importe Sistema", "Monto AGIP", "Diferencia", "Importe", "Monto Retenido"}
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -395,12 +323,7 @@ def generar_excel_retenciones(
         "Falta_Sistema": df_falta_sistema,
         "Falta_AGIP": df_falta_arca,
     }
-    if df_revisar is not None and not df_revisar.empty:
-        hojas["Revisar"] = df_revisar
-        if df_revisar_sistema is not None:
-            hojas["Revisar_Sistema"] = df_revisar_sistema
-        if df_revisar_arca is not None:
-            hojas["Revisar_AGIP"] = df_revisar_arca
+    hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -429,12 +352,20 @@ def correr_cruce_retenciones(
     df_sistema_dep = depurar_sistema_retenciones(df_sistema)
     df_arca_dep = depurar_arca_retenciones(df_arca)
 
-    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_retenciones(
+    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar = cruce_retenciones(
         df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
-    df_falta_sistema, df_falta_arca, df_revisar, df_revisar_sistema, df_revisar_arca = separar_diferencias(
-        df_falta_sistema, df_falta_arca
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="CUIT", col_importe_arca="Monto Retenido",
+        col_fecha_arca=next(
+            (c for c in df_falta_sistema.columns if str(c).replace(".", "").strip().upper() == "FECHA RETENCION"),
+            None,
+        ),
+        col_nombre_arca="Razon Social",
+        etiqueta="AGIP", df_revisar_comprobante=df_revisar,
+        score_nombre_min=score_nombre_min,
     )
 
     df_proveedores_nuevos = detectar_proveedores_nuevos(df_match_arca, umbral_nombre=max(score_nombre_min, 80))
@@ -444,12 +375,11 @@ def correr_cruce_retenciones(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
-        "revisar": len(df_revisar),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_retenciones(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos,
-        df_revisar, df_revisar_sistema, df_revisar_arca,
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, hojas_revisar,
     )
 
     return buf_reporte, stats

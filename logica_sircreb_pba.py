@@ -5,7 +5,7 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
 
@@ -218,6 +218,7 @@ def generar_excel_sircreb(
     df_match_arca: pd.DataFrame,
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "fecha", "Fecha factura"}
@@ -252,6 +253,7 @@ def generar_excel_sircreb(
         "Falta_Sistema": df_falta_sistema,
         "Falta_Arca": df_falta_arca,
     }
+    hojas.update(hojas_revisar or {})
 
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -283,14 +285,22 @@ def correr_cruce_sircreb(
         df_arca, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="cuit", col_importe_arca="importe", col_fecha_arca="fecha", col_nombre_arca="Nombre",
+        etiqueta="ARCA",
+        score_nombre_min=score_nombre_min,
+    )
+
     stats = {
         "match": len(df_match_arca),
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_sircreb(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, hojas_revisar,
     )
 
     return buf_reporte, stats

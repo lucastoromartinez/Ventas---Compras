@@ -25,6 +25,25 @@ submodulo_actual = st.selectbox(
 )
 
 
+def avisos_revisar(stats: dict, organismo: str) -> None:
+    """Avisos comunes a todos los submódulos: comprobantes y proveedores a revisar, y neteos."""
+    if stats.get("revisar_comprobante", 0) > 0:
+        st.warning(
+            f"Hay {stats['revisar_comprobante']} comprobante(s) que coinciden entre {organismo} y sistema "
+            "con importe distinto. Revisá la hoja 'Revisar_Comprobante' del reporte."
+        )
+    if stats.get("revisar_proveedor", 0) > 0:
+        st.warning(
+            f"Hay {stats['revisar_proveedor']} proveedor(es) con faltantes en {organismo} y en sistema que "
+            "no cierran. Revisá la hoja 'Revisar_Proveedor' del reporte."
+        )
+    if stats.get("neteos", 0) > 0:
+        st.info(
+            f"Se netearon {stats['neteos']} línea(s) sin match que se cancelan entre sí (factura y nota de "
+            "crédito del mismo proveedor). Están en las hojas 'Neteos' del reporte."
+        )
+
+
 # ═══════════════════════════════════════════════
 # TAB PERCEPCIONES IIBB CABA
 # ═══════════════════════════════════════════════
@@ -106,11 +125,7 @@ if submodulo_actual == "Percepciones IIBB CABA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
-        if stats.get("revisar", 0) > 0:
-            st.warning(
-                f"Hay {stats['revisar']} comprobante(s) que coinciden entre AGIP y sistema con importe "
-                "distinto. Revisá la hoja 'Revisar' del reporte."
-            )
+        avisos_revisar(stats, "AGIP")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
@@ -205,6 +220,8 @@ elif submodulo_actual == "Percepciones IIBB PBA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
+        avisos_revisar(stats_pba, "ARCA")
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
             label="Descargar reporte completo",
@@ -298,11 +315,7 @@ elif submodulo_actual == "Retenciones IIBB CABA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
-        if stats_ret.get("revisar", 0) > 0:
-            st.warning(
-                f"Hay {stats_ret['revisar']} proveedor(es) con retenciones en AGIP y en sistema que no cierran. "
-                "Revisá la hoja 'Revisar' del reporte."
-            )
+        avisos_revisar(stats_ret, "AGIP")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(
@@ -410,6 +423,8 @@ elif submodulo_actual == "Retenciones IIBB PBA":
                     "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
                 )
 
+            avisos_revisar(stats_sirtac, "ARCA")
+
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(
                 label="Descargar reporte completo",
@@ -497,6 +512,8 @@ elif submodulo_actual == "Retenciones IIBB PBA":
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            avisos_revisar(stats_sircreb, "ARCA")
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.download_button(

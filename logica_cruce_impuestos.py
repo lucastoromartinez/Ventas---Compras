@@ -115,9 +115,10 @@ def cruzar_impuestos(
                del organismo: matchea solo si cierra un único proveedor.
                Las líneas sin nombre no participan.
 
-    Si hay más de un candidato uno a uno, desempata por comprobante
-    (cols_comprobante = pto venta / número del organismo y del sistema) o
-    por la fecha más cercana (cols_fecha = organismo, sistema).
+    Si hay más de un candidato uno a uno, desempata por el mismo comprobante
+    (cols_comprobante = pto venta / número del organismo y del sistema),
+    después por la fecha más cercana (cols_fecha = organismo, sistema) y
+    por último por el comprobante más parecido.
 
     Las líneas del sistema en solo_agrupado no participan del uno a uno.
 
@@ -186,14 +187,16 @@ def cruzar_impuestos(
             ):
                 if nivel:
                     return nivel[0]
-            concat_a = f"{pa}{na}"
-            return max(candidatos, key=lambda i: (fuzz.ratio(concat_a, f"{pv_s.loc[i]}{nc_s.loc[i]}"), -i))
 
         if cols_fecha and pd.notna(fecha_a.loc[a]):
             def _distancia(i):
                 f = fecha_s.loc[i]
                 return (pd.isna(f), abs((f - fecha_a.loc[a]).days) if pd.notna(f) else 0, i)
             return min(candidatos, key=_distancia)
+
+        if cols_comprobante:
+            concat_a = f"{pa}{na}"
+            return max(candidatos, key=lambda i: (fuzz.ratio(concat_a, f"{pv_s.loc[i]}{nc_s.loc[i]}"), -i))
 
         return candidatos[0]
 
@@ -386,3 +389,300 @@ def armar_resultados(
         df_arca.loc[[i for i in df_arca.index if i not in usados_a]].reset_index(drop=True),
         df_sistema.loc[[i for i in df_sistema.index if i not in usados_s]].reset_index(drop=True),
     )
+
+
+# ─────────────────────────────────────────────
+# REVISAR Y NETEOS (sobre los faltantes del cruce)
+# ─────────────────────────────────────────────
+
+def tabla_revisar_comprobante(
+    df_arca: pd.DataFrame, df_sistema: pd.DataFrame, revisar: list, etiqueta: str = "AGIP"
+) -> pd.DataFrame:
+    """
+    Arma la hoja de comprobantes a revisar (mismo comprobante, importe
+    distinto): columnas del organismo y del sistema en la misma fila. Las que
+    se repiten en ambos lados llevan sufijo para no pisarse.
+    """
+    repetidas = (set(df_arca.columns) & set(df_sistema.columns)) | {"Comentario"}
+    cols_arca_rev = [f"{c} {etiqueta}" if c in repetidas else c for c in df_arca.columns]
+    cols_sistema_rev = [f"{c} Sistema" if c in repetidas else c for c in df_sistema.columns]
+    cols_revisar = cols_arca_rev + cols_sistema_rev + ["Comentario"]
+
+    filas_revisar = [
+        list(df_arca.loc[a_idx]) + list(df_sistema.loc[s_idx]) + [comentario]
+        for a_idx, s_idx, comentario in revisar
+    ]
+    return pd.DataFrame(filas_revisar, columns=cols_revisar)
+
+
+def netear_faltantes(
+    df: pd.DataFrame,
+    col_importe: str,
+    col_fecha: str | None,
+    col_nombre: str | None = None,
+    tolerancia_dias: int = 2,
+    tolerancia_importe: float = 0.01,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Saca de los faltantes los pares de líneas del mismo proveedor que se
+    cancelan entre sí (una positiva y una negativa por el mismo importe)
+    con fechas a no más de tolerancia_dias de distancia. Por ejemplo, una
+    factura y la nota de crédito que la anula. Si el archivo no trae fecha
+    (col_fecha None), alcanza con el mismo proveedor y el mismo importe.
+
+    El proveedor se identifica por CUIT; si la línea no tiene CUIT, por
+    col_nombre. Para cada línea negativa se elige la positiva de fecha más
+    cercana.
+
+    Retorna:
+        (df sin los pares neteados, df con los pares y su 'id_neteo')
+    """
+    df = df.reset_index(drop=True)
+    vacio = df.iloc[0:0].assign(id_neteo=pd.Series(dtype="int64"))
+    if df.empty or col_importe not in df.columns:
+        return df, vacio
+    usar_fecha = col_fecha is not None
+    if usar_fecha and col_fecha not in df.columns:
+        return df, vacio
+
+    col_cuit = next(
+        (c for c in df.columns if str(c).replace(".", "").strip().upper() == "CUIT"),
+        None
+    )
+
+    def _clave(i):
+        if col_cuit is not None:
+            cuit = re.sub(r"\D", "", _texto(df.loc[i, col_cuit]))
+            if cuit:
+                return cuit
+        if col_nombre is not None and col_nombre in df.columns and _texto(df.loc[i, col_nombre]):
+            return re.sub(r"\s+", "", _texto(df.loc[i, col_nombre])).upper()
+        return ""
+
+    claves = {i: _clave(i) for i in df.index}
+    importes = pd.to_numeric(df[col_importe], errors="coerce")
+    if usar_fecha:
+        fechas = pd.to_datetime(df[col_fecha], errors="coerce", dayfirst=True)
+
+    def _dias(pos, neg):
+        return abs((fechas.loc[pos] - fechas.loc[neg]).days) if usar_fecha else 0
+
+    usados = set()
+    pares = []
+    for neg in df.index:
+        if importes.loc[neg] >= 0 or not claves[neg]:
+            continue
+        if usar_fecha and pd.isna(fechas.loc[neg]):
+            continue
+        candidatos = [
+            pos for pos in df.index
+            if pos not in usados
+            and importes.loc[pos] > 0
+            and claves[pos] == claves[neg]
+            and abs(importes.loc[pos] + importes.loc[neg]) <= tolerancia_importe
+            and (not usar_fecha or (pd.notna(fechas.loc[pos]) and _dias(pos, neg) <= tolerancia_dias))
+        ]
+        if not candidatos:
+            continue
+        pos = min(candidatos, key=lambda i: (_dias(i, neg), i))
+        usados.update([pos, neg])
+        pares.append((pos, neg))
+
+    filas = []
+    for id_neteo, (pos, neg) in enumerate(pares, start=1):
+        for i in (pos, neg):
+            fila = df.loc[i].copy()
+            fila["id_neteo"] = id_neteo
+            filas.append(fila)
+
+    df_neteos = pd.DataFrame(filas).reset_index(drop=True) if filas else vacio
+    df_restante = df.loc[[i for i in df.index if i not in usados]].reset_index(drop=True)
+    return df_restante, df_neteos
+
+
+def separar_diferencias(
+    df_falta_sistema: pd.DataFrame,
+    df_falta_arca: pd.DataFrame,
+    *,
+    col_cuit_arca: str,
+    col_importe_arca: str,
+    col_nombre_arca: str | None,
+    col_cuit_sistema: str = "CUIT",
+    col_importe_sistema: str = "Importe",
+    col_nombre_sistema: str | None = "Tercero",
+    etiqueta: str = "AGIP",
+    score_nombre_min: int = 70,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Toma los faltantes del cruce y separa los proveedores (por CUIT) que
+    tienen líneas sin match de ambos lados: el organismo informa y el
+    sistema registró, pero los importes no cierran. Esos casos salen de
+    los faltantes y pasan a revisar. Una línea del sistema sin CUIT se
+    asigna al proveedor del organismo de nombre más parecido (score >=
+    score_nombre_min); si no trae nombre, queda en faltantes.
+
+    df_falta_sistema son líneas del organismo y df_falta_arca líneas del
+    sistema.
+
+    Retorna:
+        - df_falta_sistema y df_falta_arca sin esos proveedores
+        - df_revisar: una fila por proveedor con 'Importe Sistema',
+          'Monto <etiqueta>', 'Diferencia' (Sistema - organismo) y
+          'Comentario' ('Dif: Registrado de Más' / 'Dif: Registrado de Menos')
+        - df_revisar_sistema / df_revisar_arca: el detalle de cada lado,
+          ligado al resumen por 'id_revisar'
+    """
+    col_monto = f"Monto {etiqueta}"
+    col_lineas = f"Líneas {etiqueta}"
+    cols_revisar = [
+        "id_revisar", "CUIT", "Tercero", "Razon Social",
+        "Líneas Sistema", "Importe Sistema", col_lineas, col_monto,
+        "Diferencia", "Comentario",
+    ]
+    vacio = (
+        df_falta_sistema, df_falta_arca, pd.DataFrame(columns=cols_revisar),
+        df_falta_arca.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
+        df_falta_sistema.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
+    )
+    if df_falta_sistema.empty or df_falta_arca.empty:
+        return vacio
+
+    cuit_arca = normalizar_cuit(df_falta_sistema[col_cuit_arca])
+    cuit_sistema = normalizar_cuit(df_falta_arca[col_cuit_sistema])
+
+    # Líneas del sistema sin CUIT: proveedor del organismo por nombre
+    if col_nombre_arca and col_nombre_sistema:
+        nombres_arca = {}
+        for i, cuit in cuit_arca.items():
+            nombre = _texto(df_falta_sistema.loc[i, col_nombre_arca])
+            if cuit and nombre:
+                nombres_arca.setdefault(cuit, _nombre_comparable(nombre))
+        for i in cuit_sistema.index[cuit_sistema == ""]:
+            nombre = _texto(df_falta_arca.loc[i, col_nombre_sistema])
+            if not nombre or not nombres_arca:
+                continue
+            puntajes = {
+                cuit: fuzz.token_sort_ratio(_nombre_comparable(nombre), nombre_a)
+                for cuit, nombre_a in nombres_arca.items()
+            }
+            mejor = max(puntajes, key=puntajes.get)
+            if puntajes[mejor] >= score_nombre_min:
+                cuit_sistema.loc[i] = mejor
+
+    cuits_ambos = [c for c in pd.unique(cuit_sistema) if c and c in set(cuit_arca)]
+    if not cuits_ambos:
+        return vacio
+
+    def _primer_nombre(lineas, col):
+        if col is None or col not in lineas.columns:
+            return ""
+        nombres = [_texto(v) for v in lineas[col] if _texto(v)]
+        return nombres[0] if nombres else ""
+
+    filas_revisar, det_sistema, det_arca = [], [], []
+    for id_revisar, cuit in enumerate(cuits_ambos, start=1):
+        lineas_s = df_falta_arca[cuit_sistema == cuit]
+        lineas_a = df_falta_sistema[cuit_arca == cuit]
+
+        importe_s = round(pd.to_numeric(lineas_s[col_importe_sistema], errors="coerce").sum(), 2)
+        monto_a = round(pd.to_numeric(lineas_a[col_importe_arca], errors="coerce").sum(), 2)
+        diferencia = round(importe_s - monto_a, 2)
+        if diferencia > 0:
+            comentario = "Dif: Registrado de Más"
+        elif diferencia < 0:
+            comentario = "Dif: Registrado de Menos"
+        else:
+            comentario = "Sin diferencia"
+
+        filas_revisar.append({
+            "id_revisar": id_revisar,
+            "CUIT": cuit,
+            "Tercero": _primer_nombre(lineas_s, col_nombre_sistema),
+            "Razon Social": _primer_nombre(lineas_a, col_nombre_arca),
+            "Líneas Sistema": len(lineas_s),
+            "Importe Sistema": importe_s,
+            col_lineas: len(lineas_a),
+            col_monto: monto_a,
+            "Diferencia": diferencia,
+            "Comentario": comentario,
+        })
+        det_sistema.append(lineas_s.assign(id_revisar=id_revisar))
+        det_arca.append(lineas_a.assign(id_revisar=id_revisar))
+
+    en_revisar_s = cuit_sistema.isin(cuits_ambos)
+    en_revisar_a = cuit_arca.isin(cuits_ambos)
+
+    return (
+        df_falta_sistema[~en_revisar_a].reset_index(drop=True),
+        df_falta_arca[~en_revisar_s].reset_index(drop=True),
+        pd.DataFrame(filas_revisar, columns=cols_revisar),
+        pd.concat(det_sistema).reset_index(drop=True),
+        pd.concat(det_arca).reset_index(drop=True),
+    )
+
+
+def revisar_faltantes(
+    df_falta_sistema: pd.DataFrame,
+    df_falta_arca: pd.DataFrame,
+    *,
+    col_cuit_arca: str,
+    col_importe_arca: str,
+    col_fecha_arca: str | None,
+    col_nombre_arca: str | None,
+    col_fecha_sistema: str | None = "Fecha",
+    col_cuit_sistema: str = "CUIT",
+    col_importe_sistema: str = "Importe",
+    col_nombre_sistema: str | None = "Tercero",
+    etiqueta: str = "AGIP",
+    df_revisar_comprobante: pd.DataFrame | None = None,
+    score_nombre_min: int = 70,
+):
+    """
+    Mismo tratamiento de los faltantes para todos los módulos de impuestos:
+    1. Netea, de cada lado, la factura y la nota de crédito del mismo
+       proveedor que se cancelan entre sí.
+    2. Separa los proveedores con faltantes de ambos lados (Revisar por
+       proveedor).
+
+    df_falta_sistema son líneas del organismo y df_falta_arca líneas del
+    sistema.
+
+    Retorna:
+        (df_falta_sistema, df_falta_arca, hojas, stats)
+        - hojas: dict nombre de hoja -> DataFrame con Revisar y Neteos (solo
+          las que tienen filas)
+        - stats: 'revisar_comprobante', 'revisar_proveedor', 'neteos'
+    """
+    df_falta_arca, df_neteos_sistema = netear_faltantes(
+        df_falta_arca, col_importe=col_importe_sistema, col_fecha=col_fecha_sistema, col_nombre=col_nombre_sistema
+    )
+    df_falta_sistema, df_neteos_arca = netear_faltantes(
+        df_falta_sistema, col_importe=col_importe_arca, col_fecha=col_fecha_arca, col_nombre=col_nombre_arca
+    )
+
+    df_falta_sistema, df_falta_arca, df_revisar, df_revisar_sistema, df_revisar_arca = separar_diferencias(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca=col_cuit_arca, col_importe_arca=col_importe_arca, col_nombre_arca=col_nombre_arca,
+        col_cuit_sistema=col_cuit_sistema, col_importe_sistema=col_importe_sistema,
+        col_nombre_sistema=col_nombre_sistema, etiqueta=etiqueta, score_nombre_min=score_nombre_min,
+    )
+
+    if df_revisar_comprobante is None:
+        df_revisar_comprobante = pd.DataFrame()
+
+    hojas = {
+        "Revisar_Comprobante": df_revisar_comprobante,
+        "Revisar_Proveedor": df_revisar,
+        "Revisar_Prov_Sistema": df_revisar_sistema,
+        f"Revisar_Prov_{etiqueta}": df_revisar_arca,
+        "Neteos_Sistema": df_neteos_sistema,
+        f"Neteos_{etiqueta}": df_neteos_arca,
+    }
+    hojas = {nombre: df for nombre, df in hojas.items() if not df.empty}
+
+    stats = {
+        "revisar_comprobante": len(df_revisar_comprobante),
+        "revisar_proveedor": len(df_revisar),
+        "neteos": len(df_neteos_sistema) + len(df_neteos_arca),
+    }
+    return df_falta_sistema, df_falta_arca, hojas, stats

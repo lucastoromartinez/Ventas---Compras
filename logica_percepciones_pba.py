@@ -5,7 +5,9 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_cruce_impuestos import (
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+)
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
 
@@ -178,14 +180,18 @@ def cruce_percepciones_pba(
     """
     Cruza percepciones de ARCA (PBA) contra el sistema con el criterio común
     de los módulos de impuestos (ver logica_cruce_impuestos.cruzar_impuestos).
-    Si hay más de un candidato, desempata por Pto. Venta / N°Comprobante.
+    Si hay más de un candidato, desempata por Pto. Venta / N°Comprobante, y
+    el mismo comprobante con importe distinto va a df_revisar con
+    'Comentario' = 'Importe'.
 
     Retorna:
-        tuple de 4 pd.DataFrame:
+        tuple de 5 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
               'match_tipo' y 'match_score')
             - df_falta_sistema (líneas de ARCA sin match)
             - df_falta_arca (líneas de sistema sin match)
+            - df_revisar (pares ARCA / sistema del mismo comprobante con
+              importe distinto)
     """
     if padron is None:
         padron = PADRON_PROVEEDORES
@@ -210,11 +216,13 @@ def cruce_percepciones_pba(
         raise ValueError("df_sistema necesita una columna de Importe.")
 
     cols = [
-        _buscar_columna(df_arca, "Pto Venta"), _buscar_columna(df_arca, "N Comprobante"),
-        _buscar_columna(df_sistema, "Pto Venta"), _buscar_columna(df_sistema, "N Comprobante"),
+        _buscar_columna(df_arca, "pto_venta", "Pto. Venta"),
+        _buscar_columna(df_arca, "n_comprobante", "N°Comprobante"),
+        _buscar_columna(df_sistema, "Pto. Venta", "pto_venta"),
+        _buscar_columna(df_sistema, "N°Comprobante", "n_comprobante"),
     ]
 
-    matches, _ = cruzar_impuestos(
+    matches, revisar = cruzar_impuestos(
         df_arca, df_sistema,
         col_cuit_arca=col_cuit_arca,
         col_importe_arca=col_importe_arca,
@@ -226,9 +234,15 @@ def cruce_percepciones_pba(
         tolerancia_importe=tolerancia_importe,
         score_nombre_min=score_nombre_min,
         cols_comprobante=tuple(cols) if all(cols) else None,
+        revisar_comprobante=True,
     )
 
-    return armar_resultados(df_arca, df_sistema, matches)
+    resultados = armar_resultados(
+        df_arca, df_sistema, matches,
+        excluidos_arca={a for a, _, _ in revisar},
+        excluidos_sistema={s for _, s, _ in revisar},
+    )
+    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, "ARCA"))
 
 
 # ─────────────────────────────────────────────
@@ -274,6 +288,7 @@ def generar_excel_percepciones_pba(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"fecha", "Fecha", "Fecha_Sistema", "Fecha_arca"}
@@ -308,6 +323,7 @@ def generar_excel_percepciones_pba(
         "Falta_Sistema": df_falta_sistema,
         "Falta_Arca": df_falta_arca,
     }
+    hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -339,9 +355,16 @@ def correr_cruce_percepciones_pba(
     df_sistema = load_excel_sistema(archivo_sistema)
     df_sistema_dep = depurar_sistema_pba(df_sistema)
 
-    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_percepciones_pba(
+    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar = cruce_percepciones_pba(
         df_arca_dep, df_sistema_dep,
         tolerancia_importe=tolerancia_importe,
+        score_nombre_min=score_nombre_min,
+    )
+
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="cuit", col_importe_arca="importe", col_fecha_arca="fecha", col_nombre_arca="nombre",
+        etiqueta="ARCA", df_revisar_comprobante=df_revisar,
         score_nombre_min=score_nombre_min,
     )
 
@@ -352,10 +375,11 @@ def correr_cruce_percepciones_pba(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_percepciones_pba(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, hojas_revisar,
     )
 
     return buf_reporte, stats

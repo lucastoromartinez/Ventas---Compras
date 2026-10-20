@@ -5,7 +5,7 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
 
@@ -234,6 +234,7 @@ def generar_excel_sirtac(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
@@ -268,6 +269,7 @@ def generar_excel_sirtac(
         "Falta_Sistema": df_falta_sistema,
         "Falta_Arca": df_falta_arca,
     }
+    hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -299,6 +301,14 @@ def correr_cruce_retenciones_pba(
         df_sirtac, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
+    # SIRTAC no trae fecha: el neteo de ese lado es por proveedor e importe
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="cuit", col_importe_arca="importe", col_fecha_arca=None, col_nombre_arca="nombre",
+        etiqueta="ARCA",
+        score_nombre_min=score_nombre_min,
+    )
+
     df_proveedores_nuevos = detectar_proveedores_nuevos(df_match_arca, umbral_nombre=max(score_nombre_min, 80))
 
     stats = {
@@ -306,10 +316,11 @@ def correr_cruce_retenciones_pba(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_sirtac(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, hojas_revisar,
     )
 
     return buf_reporte, stats

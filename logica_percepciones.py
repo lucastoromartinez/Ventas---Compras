@@ -5,7 +5,9 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_cruce_impuestos import (
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+)
 from proveedores import PADRON_PROVEEDORES
 
 
@@ -277,103 +279,9 @@ def cruce_percepciones(
         excluidos_sistema={s for _, s, _ in revisar},
     )
 
-    # Revisar: columnas de AGIP y del sistema en la misma fila. Las que se
-    # repiten en ambos lados llevan sufijo para no pisarse.
-    repetidas = (set(df_arca.columns) & set(df_sistema.columns)) | {"Comentario"}
-    cols_arca_rev = [f"{c} AGIP" if c in repetidas else c for c in df_arca.columns]
-    cols_sistema_rev = [f"{c} Sistema" if c in repetidas else c for c in df_sistema.columns]
-    cols_revisar = cols_arca_rev + cols_sistema_rev + ["Comentario"]
-
-    filas_revisar = [
-        list(df_arca.loc[a_idx]) + list(df_sistema.loc[s_idx]) + [comentario]
-        for a_idx, s_idx, comentario in revisar
-    ]
-    df_revisar = pd.DataFrame(filas_revisar, columns=cols_revisar)
+    df_revisar = tabla_revisar_comprobante(df_arca, df_sistema, revisar, "AGIP")
 
     return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar
-
-
-# ─────────────────────────────────────────────
-# NETEOS (líneas sin match del mismo proveedor que se cancelan)
-# ─────────────────────────────────────────────
-
-def netear_faltantes(
-    df: pd.DataFrame,
-    col_importe: str,
-    col_fecha: str,
-    col_nombre: str | None = None,
-    tolerancia_dias: int = 2,
-    tolerancia_importe: float = 0.01,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Saca de los faltantes los pares de líneas del mismo proveedor que se
-    cancelan entre sí (una positiva y una negativa por el mismo importe)
-    con fechas a no más de tolerancia_dias de distancia. Por ejemplo, una
-    factura y la nota de crédito que la anula.
-
-    El proveedor se identifica por CUIT; si la línea no tiene CUIT, por
-    col_nombre. Para cada línea negativa se elige la positiva de fecha más
-    cercana.
-
-    Retorna:
-        (df sin los pares neteados, df con los pares y su 'id_neteo')
-    """
-    df = df.reset_index(drop=True)
-    if df.empty or col_importe not in df.columns or col_fecha not in df.columns:
-        return df, df.iloc[0:0].assign(id_neteo=pd.Series(dtype="int64"))
-
-    col_cuit = next(
-        (c for c in df.columns if str(c).replace(".", "").strip().upper() == "CUIT"),
-        None
-    )
-
-    def _clave(i):
-        if col_cuit is not None:
-            cuit = re.sub(r"\D", "", str(df.loc[i, col_cuit])) if pd.notna(df.loc[i, col_cuit]) else ""
-            if cuit:
-                return cuit
-        if col_nombre is not None and col_nombre in df.columns and pd.notna(df.loc[i, col_nombre]):
-            return re.sub(r"\s+", "", str(df.loc[i, col_nombre])).upper()
-        return ""
-
-    claves = {i: _clave(i) for i in df.index}
-    importes = pd.to_numeric(df[col_importe], errors="coerce")
-    fechas = pd.to_datetime(df[col_fecha], errors="coerce", dayfirst=True)
-
-    usados = set()
-    pares = []
-    for neg in df.index:
-        if importes.loc[neg] >= 0 or pd.isna(fechas.loc[neg]) or not claves[neg]:
-            continue
-        candidatos = [
-            pos for pos in df.index
-            if pos not in usados
-            and importes.loc[pos] > 0
-            and claves[pos] == claves[neg]
-            and abs(importes.loc[pos] + importes.loc[neg]) <= tolerancia_importe
-            and pd.notna(fechas.loc[pos])
-            and abs((fechas.loc[pos] - fechas.loc[neg]).days) <= tolerancia_dias
-        ]
-        if not candidatos:
-            continue
-        pos = min(candidatos, key=lambda i: abs((fechas.loc[i] - fechas.loc[neg]).days))
-        usados.update([pos, neg])
-        pares.append((pos, neg))
-
-    filas = []
-    for id_neteo, (pos, neg) in enumerate(pares, start=1):
-        for i in (pos, neg):
-            fila = df.loc[i].copy()
-            fila["id_neteo"] = id_neteo
-            filas.append(fila)
-
-    if filas:
-        df_neteos = pd.DataFrame(filas).reset_index(drop=True)
-    else:
-        df_neteos = df.iloc[0:0].assign(id_neteo=pd.Series(dtype="int64"))
-
-    df_restante = df.loc[[i for i in df.index if i not in usados]].reset_index(drop=True)
-    return df_restante, df_neteos
 
 
 # ─────────────────────────────────────────────
@@ -419,14 +327,15 @@ def generar_excel_percepciones(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
-    df_revisar: pd.DataFrame | None = None,
-    df_neteos_sistema: pd.DataFrame | None = None,
-    df_neteos_arca: pd.DataFrame | None = None,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
     IMPORTE_FORMAT = "#,##0.00"
-    IMPORTE_COLS = {"Debe", "Haber", "Saldo", "Importe", "Monto Percibido", "Base Calculo"}
+    IMPORTE_COLS = {
+        "Debe", "Haber", "Saldo", "Importe", "Monto Percibido", "Base Calculo",
+        "Importe Sistema", "Monto AGIP", "Diferencia",
+    }
 
     def _nombre_base(header) -> str:
         h = str(header).strip()
@@ -471,12 +380,7 @@ def generar_excel_percepciones(
         "Falta_Sistema": df_falta_sistema,
         "Falta_AGIP": df_falta_arca,
     }
-    if df_revisar is not None and not df_revisar.empty:
-        hojas["Revisar"] = df_revisar
-    if df_neteos_sistema is not None and not df_neteos_sistema.empty:
-        hojas["Neteos_Sistema"] = df_neteos_sistema
-    if df_neteos_arca is not None and not df_neteos_arca.empty:
-        hojas["Neteos_AGIP"] = df_neteos_arca
+    hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -509,11 +413,12 @@ def correr_cruce_percepciones(
         df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
-    df_falta_arca, df_neteos_sistema = netear_faltantes(
-        df_falta_arca, col_importe="Importe", col_fecha="Fecha", col_nombre="Tercero"
-    )
-    df_falta_sistema, df_neteos_arca = netear_faltantes(
-        df_falta_sistema, col_importe="Monto Percibido", col_fecha="Fecha Percepcion", col_nombre="Razon Social"
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="CUIT", col_importe_arca="Monto Percibido",
+        col_fecha_arca="Fecha Percepcion", col_nombre_arca="Razon Social",
+        etiqueta="AGIP", df_revisar_comprobante=df_revisar,
+        score_nombre_min=score_nombre_min,
     )
 
     df_proveedores_nuevos = detectar_proveedores_nuevos(df_match_arca, umbral_nombre=max(score_nombre_min, 80))
@@ -523,13 +428,11 @@ def correr_cruce_percepciones(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
-        "revisar": len(df_revisar),
-        "neteos": len(df_neteos_sistema) + len(df_neteos_arca),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_percepciones(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, df_revisar,
-        df_neteos_sistema, df_neteos_arca,
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, hojas_revisar,
     )
 
     return buf_reporte, stats
