@@ -2598,6 +2598,9 @@ PADRON_PROVEEDORES: dict[str, str] = {'20233294900': 'IANNUZZI GUSTAVO ADOLFO',
 # su nombre en el padrón. Clave: 'Tercero' tal como viene del sistema.
 ALIAS_PROVEEDORES: dict[str, str] = {
     'SMG COMPAÑIA ARGENTINA DE SEGUROS S.A.U': '30500031960',
+    # Getnet se registra en el sistema con su nombre, pero las retenciones las
+    # informa AGIP con el CUIT de Banco Santander.
+    'GETNET ARGENTINA S.A.U': '30500008454',
 }
 
 

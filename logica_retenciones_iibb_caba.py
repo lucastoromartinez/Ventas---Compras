@@ -2,12 +2,14 @@ import re
 from io import BytesIO
 
 import pandas as pd
-from rapidfuzz import fuzz, process
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro, _nombre_comparable
-from proveedores import PADRON_PROVEEDORES, mapa_nombre_a_cuit
+from logica_cruce_impuestos import (
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+)
+from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
+from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
@@ -82,9 +84,7 @@ def depurar_sistema_retenciones(df: pd.DataFrame, padron: dict | None = None) ->
         if col_cuit != "CUIT":
             df = df.rename(columns={col_cuit: "CUIT"})
     else:
-        nombre_a_cuit = mapa_nombre_a_cuit(padron)
-
-        df["CUIT"] = df[c_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
+        df["CUIT"] = cuit_por_tercero(df[c_tercero], padron)
 
     if c_tercero != "Tercero":
         df = df.rename(columns={c_tercero: "Tercero"})
@@ -173,39 +173,23 @@ def cruce_retenciones(
     padron: dict | None = None,
 ):
     """
-    Cruza retenciones de AGIP contra el sistema. A diferencia de percepciones,
-    las retenciones no siempre tienen comprobante asociado: las filas del
-    sistema con 'Serie' cargada se cruzan línea a línea; las filas con
-    'Serie' vacía se cruzan de forma sumarizada, agrupando varias líneas de
-    AGIP del mismo proveedor contra una sola línea del sistema cuya suma de
-    'Monto Retenido' cierra el 'Importe'.
-
-    PASO 1 (Serie no nula, línea a línea):
-      1a. CUIT + Importe exacto.
-      1b. CUIT vía padrón + Importe (mismo proveedor con más de un CUIT
-          cargado en proveedores.py).
-      1c. Fuzzy por nombre + Importe, para el remanente (score >= score_nombre_min).
-
-    PASO 2 (Serie nula, sumarizado por proveedor):
-      2a. Agrupa AGIP libres por CUIT real; matchea contra el CUIT (generado
-          vía padrón) de la fila del sistema si la suma cierra.
-      2b. Si no hay grupo por CUIT, busca en el padrón el nombre asociado al
-          CUIT de cada grupo de AGIP y lo compara contra 'Tercero' del sistema.
-      2c. Si tampoco, fuzzy por nombre entre los grupos de AGIP restantes y
-          'Tercero' del sistema (probando los 4 mejores candidatos).
-
-    PASO 3 (líneas del sistema sin proveedor identificado, es decir sin CUIT
-    ni por columna ni por padrón): compara el 'Importe' de la línea contra
-    el total de cada proveedor de AGIP que quedó libre. Si un único
-    proveedor cierra (con tolerancia_importe), matchea todo ese grupo como
-    'importe_proveedor_sumarizado'. Si cierran dos o más, no matchea.
+    Cruza retenciones de AGIP contra el sistema con el criterio común de los
+    módulos de impuestos (ver logica_cruce_impuestos.cruzar_impuestos). A
+    diferencia de percepciones, las retenciones no siempre tienen
+    comprobante asociado: las filas del sistema con 'Serie' vacía solo se
+    cruzan de forma sumarizada. Entre candidatos empatados se queda con el
+    mismo comprobante y después con la fecha más cercana. El mismo
+    comprobante con importe distinto va a df_revisar con 'Comentario' =
+    'Importe'.
 
     Retorna:
-        tuple de 4 pd.DataFrame:
+        tuple de 5 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
               'match_tipo' y 'match_score')
             - df_falta_sistema (líneas de AGIP sin match)
             - df_falta_arca (líneas de sistema sin match)
+            - df_revisar (pares AGIP / sistema del mismo comprobante con
+              importe distinto)
     """
     if padron is None:
         padron = PADRON_PROVEEDORES
@@ -219,358 +203,41 @@ def cruce_retenciones(
             None
         )
 
-    def _normalizar_nombre(nombre):
-        return re.sub(r"\s+", "", str(nombre)).strip().upper()
-
-    col_cuit_arca = _buscar_columna(df_arca, "CUIT")
-    col_cuit_sistema = _buscar_columna(df_sistema, "CUIT")
     col_serie = _buscar_columna(df_sistema, "SERIE")
     if col_serie is None:
         raise ValueError("No se encontró la columna 'Serie' en df_sistema.")
 
-    cuit_arca_norm = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
-    cuit_sistema_norm = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
-
     col_fecha_arca = _buscar_columna(df_arca, "FECHA RETENCION")
     col_fecha_sistema = _buscar_columna(df_sistema, "FECHA")
-    fecha_arca = pd.to_datetime(df_arca[col_fecha_arca], errors="coerce") if col_fecha_arca else None
-    fecha_sistema = pd.to_datetime(df_sistema[col_fecha_sistema], errors="coerce") if col_fecha_sistema else None
 
-    def _mas_cercano_en_fecha(a_idx, candidatos_idx):
-        if fecha_arca is None or fecha_sistema is None or pd.isna(fecha_arca.loc[a_idx]):
-            return min(candidatos_idx)
-
-        def _distancia(i):
-            f = fecha_sistema.loc[i]
-            return (pd.isna(f), abs((f - fecha_arca.loc[a_idx]).days) if pd.notna(f) else 0, i)
-
-        return min(candidatos_idx, key=_distancia)
-
-    idx_serie_con = set(df_sistema.index[df_sistema[col_serie].notna()])
-    idx_serie_vacia = set(df_sistema.index[df_sistema[col_serie].isna()])
-
-    matches = []  # (a_idx, s_idx, tipo, score) -- PASO 1, línea a línea
-    matches_grupo = []  # (lista_a_idx, s_idx, tipo, score) -- PASO 2, sumarizado
-
-    # ============================================================
-    # PASO 1: Serie no nula (línea a línea)
-    # ============================================================
-    sistema_disponibles = set(idx_serie_con)
-
-    # 1a: CUIT + Importe
-    for a_idx in df_arca.index:
-        cuit_a = cuit_arca_norm.loc[a_idx]
-        monto_a = df_arca.loc[a_idx, "Monto Retenido"]
-
-        candidatos_idx = [
-            i for i in sistema_disponibles
-            if cuit_sistema_norm.loc[i] == cuit_a
-            and abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
-        ]
-        if not candidatos_idx:
-            continue
-
-        s_idx = candidatos_idx[0]
-        matches.append((a_idx, s_idx, "cuit", 100))
-        sistema_disponibles.remove(s_idx)
-
-    # 1b: CUIT vía padrón + Importe (duplicados de CUIT para el mismo nombre)
-    arca_matcheados = {a_idx for a_idx, s_idx, tipo, score in matches}
-    arca_pendientes = [i for i in df_arca.index if i not in arca_matcheados]
-
-    for a_idx in arca_pendientes:
-        cuit_a = cuit_arca_norm.loc[a_idx]
-        nombre_padron = padron.get(cuit_a)
-        if not nombre_padron:
-            continue
-
-        monto_a = df_arca.loc[a_idx, "Monto Retenido"]
-        candidatos_idx = [
-            i for i in sistema_disponibles
-            if abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
-            and _normalizar_nombre(df_sistema.loc[i, "Tercero"]) == _normalizar_nombre(nombre_padron)
-        ]
-        if not candidatos_idx:
-            continue
-
-        s_idx = candidatos_idx[0]
-        matches.append((a_idx, s_idx, "cuit_padron", 100))
-        sistema_disponibles.remove(s_idx)
-        arca_matcheados.add(a_idx)
-
-    # 1c: Fuzzy por nombre + Importe, para el remanente
-    arca_pendientes = [i for i in df_arca.index if i not in arca_matcheados]
-
-    for a_idx in arca_pendientes:
-        monto_a = df_arca.loc[a_idx, "Monto Retenido"]
-        nombre_a = str(df_arca.loc[a_idx, "Razon Social"])
-
-        candidatos_idx = [
-            i for i in sistema_disponibles
-            if abs(df_sistema.loc[i, "Importe"] - monto_a) <= tolerancia_importe
-        ]
-        if not candidatos_idx:
-            continue
-
-        puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_a),
-                                              _nombre_comparable(df_sistema.loc[i, "Tercero"])))
-                    for i in candidatos_idx]
-        mejor_score = max(p[1] for p in puntajes)
-        if mejor_score < score_nombre_min:
-            continue
-
-        # Entre empates (mismo proveedor e importe), la fecha más cercana
-        empatados = [i for i, sc in puntajes if sc == mejor_score]
-        s_idx = _mas_cercano_en_fecha(a_idx, empatados)
-        matches.append((a_idx, s_idx, "nombre", mejor_score))
-        sistema_disponibles.remove(s_idx)
-        arca_matcheados.add(a_idx)
-
-    # ============================================================
-    # PASO 2: Serie vacía (sumarizado por proveedor)
-    # ============================================================
-    arca_libres = set(df_arca.index) - arca_matcheados
-
-    def _grupos_por_cuit(indices):
-        grupos = {}
-        for a_idx in indices:
-            grupos.setdefault(cuit_arca_norm.loc[a_idx], []).append(a_idx)
-        return grupos
-
-    def _grupos_por_nombre(indices):
-        grupos = {}
-        for a_idx in indices:
-            grupos.setdefault(str(df_arca.loc[a_idx, "Razon Social"]), []).append(a_idx)
-        return grupos
-
-    for s_idx in idx_serie_vacia:
-        importe_sistema = df_sistema.loc[s_idx, "Importe"]
-
-        # 2a: agrupado por CUIT exacto
-        grupos_cuit = _grupos_por_cuit(arca_libres)
-        cuit_sistema_val = cuit_sistema_norm.loc[s_idx]
-        grupo_arca = grupos_cuit.get(cuit_sistema_val, []) if cuit_sistema_val else []
-
-        if grupo_arca:
-            suma_arca = sum(df_arca.loc[i, "Monto Retenido"] for i in grupo_arca)
-            if abs(suma_arca - importe_sistema) <= tolerancia_importe:
-                matches_grupo.append((grupo_arca, s_idx, "cuit", 100))
-                arca_libres -= set(grupo_arca)
-                continue
-
-        # 2b: CUIT vía padrón (mismo proveedor, CUIT distinto por duplicados)
-        tercero_sistema_norm = _normalizar_nombre(df_sistema.loc[s_idx, "Tercero"])
-        grupos_cuit_libres = _grupos_por_cuit(arca_libres)
-        grupo_padron = None
-        for cuit_grupo, indices_grupo in grupos_cuit_libres.items():
-            nombre_padron = padron.get(cuit_grupo)
-            if nombre_padron and _normalizar_nombre(nombre_padron) == tercero_sistema_norm:
-                grupo_padron = indices_grupo
-                break
-
-        if grupo_padron:
-            suma_arca = sum(df_arca.loc[i, "Monto Retenido"] for i in grupo_padron)
-            if abs(suma_arca - importe_sistema) <= tolerancia_importe:
-                matches_grupo.append((grupo_padron, s_idx, "cuit_padron", 100))
-                arca_libres -= set(grupo_padron)
-                continue
-
-        # 2c: fuzzy por nombre entre los grupos de AGIP restantes
-        grupos_nombre = _grupos_por_nombre(arca_libres)
-        if not grupos_nombre:
-            continue
-
-        nombres_grupos = list(grupos_nombre.keys())
-        candidatos_nombre = process.extract(
-            str(df_sistema.loc[s_idx, "Tercero"]), nombres_grupos,
-            scorer=fuzz.token_sort_ratio, processor=_nombre_comparable, limit=4
-        )
-
-        for nombre_grupo, score, _ in candidatos_nombre:
-            if score < score_nombre_min:
-                continue
-            grupo_arca_c = grupos_nombre[nombre_grupo]
-            suma_arca = sum(df_arca.loc[i, "Monto Retenido"] for i in grupo_arca_c)
-            if abs(suma_arca - importe_sistema) <= tolerancia_importe:
-                matches_grupo.append((grupo_arca_c, s_idx, "nombre", score))
-                arca_libres -= set(grupo_arca_c)
-                break
-
-    # ============================================================
-    # PASO 3: líneas del sistema sin proveedor vs total por proveedor de AGIP
-    # ============================================================
-    sistema_matcheados = {s_idx for _, s_idx, _, _ in matches} | {s_idx for _, s_idx, _, _ in matches_grupo}
-    sistema_sin_proveedor = [
-        i for i in df_sistema.index
-        if i not in sistema_matcheados
-        and (pd.isna(cuit_sistema_norm.loc[i]) or not cuit_sistema_norm.loc[i])
+    cols = [
+        _buscar_columna(df_arca, "PTO VENTA"), _buscar_columna(df_arca, "N°COMPROBANTE"),
+        _buscar_columna(df_sistema, "PTO VENTA"), _buscar_columna(df_sistema, "N°COMPROBANTE"),
     ]
 
-    for s_idx in sistema_sin_proveedor:
-        importe_sistema = df_sistema.loc[s_idx, "Importe"]
-        if pd.isna(importe_sistema) or importe_sistema == 0:
-            continue
-
-        grupos_que_cierran = [
-            indices for cuit_grupo, indices in _grupos_por_cuit(arca_libres).items()
-            if pd.notna(cuit_grupo) and cuit_grupo
-            and abs(sum(df_arca.loc[i, "Monto Retenido"] for i in indices) - importe_sistema) <= tolerancia_importe
-        ]
-        if len(grupos_que_cierran) != 1:
-            continue
-
-        grupo = grupos_que_cierran[0]
-        matches_grupo.append((grupo, s_idx, "importe_proveedor", 100))
-        arca_libres -= set(grupo)
-
-    # ============================================================
-    # Armado de resultados finales
-    # ============================================================
-    filas_sistema, filas_arca = [], []
-    id_match = 0
-
-    for a_idx, s_idx, tipo, score in matches:
-        id_match += 1
-        fila_s = df_sistema.loc[s_idx].copy()
-        fila_s["id_match"] = id_match
-        fila_s["match_tipo"] = tipo
-        fila_s["match_score"] = score
-        filas_sistema.append(fila_s)
-
-        fila_a = df_arca.loc[a_idx].copy()
-        fila_a["id_match"] = id_match
-        fila_a["match_tipo"] = tipo
-        fila_a["match_score"] = score
-        filas_arca.append(fila_a)
-
-    for grupo_arca, s_idx, tipo, score in matches_grupo:
-        id_match += 1
-        tipo_grupo = f"{tipo}_sumarizado"
-        fila_s = df_sistema.loc[s_idx].copy()
-        fila_s["id_match"] = id_match
-        fila_s["match_tipo"] = tipo_grupo
-        fila_s["match_score"] = score
-        filas_sistema.append(fila_s)
-
-        for a_idx in grupo_arca:
-            fila_a = df_arca.loc[a_idx].copy()
-            fila_a["id_match"] = id_match
-            fila_a["match_tipo"] = tipo_grupo
-            fila_a["match_score"] = score
-            filas_arca.append(fila_a)
-
-    cols_extra = ["id_match", "match_tipo", "match_score"]
-
-    if filas_sistema:
-        df_match_sistema = pd.DataFrame(filas_sistema).reset_index(drop=True)
-        df_match_sistema = df_match_sistema[[c for c in df_match_sistema.columns if c not in cols_extra] + cols_extra]
-    else:
-        df_match_sistema = pd.DataFrame(columns=list(df_sistema.columns) + cols_extra)
-
-    if filas_arca:
-        df_match_arca = pd.DataFrame(filas_arca).reset_index(drop=True)
-        df_match_arca = df_match_arca[[c for c in df_match_arca.columns if c not in cols_extra] + cols_extra]
-    else:
-        df_match_arca = pd.DataFrame(columns=list(df_arca.columns) + cols_extra)
-
-    arca_matcheados_final = arca_matcheados | {a_idx for grupo, _, _, _ in matches_grupo for a_idx in grupo}
-    sistema_matcheados_final = {s_idx for _, s_idx, _, _ in matches} | {s_idx for _, s_idx, _, _ in matches_grupo}
-
-    idx_falta_sistema = [i for i in df_arca.index if i not in arca_matcheados_final]
-    df_falta_sistema = df_arca.loc[idx_falta_sistema].reset_index(drop=True)
-
-    idx_falta_arca = [i for i in df_sistema.index if i not in sistema_matcheados_final]
-    df_falta_arca = df_sistema.loc[idx_falta_arca].reset_index(drop=True)
-
-    return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
-
-
-# ─────────────────────────────────────────────
-# REVISAR (mismo proveedor con faltantes de ambos lados)
-# ─────────────────────────────────────────────
-
-def separar_diferencias(
-    df_falta_sistema: pd.DataFrame,
-    df_falta_arca: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Toma los faltantes del cruce y separa los proveedores (por CUIT) que
-    tienen líneas sin match de ambos lados: AGIP informa retenciones y el
-    sistema las registró, pero los importes no cierran. Esos casos salen de
-    los faltantes y pasan a revisar.
-
-    df_falta_sistema son líneas de AGIP y df_falta_arca líneas del sistema.
-
-    Retorna:
-        - df_falta_sistema y df_falta_arca sin esos proveedores
-        - df_revisar: una fila por proveedor con 'Importe Sistema',
-          'Monto AGIP', 'Diferencia' (Sistema - AGIP) y 'Comentario'
-          ('Dif: Registrado de Más' / 'Dif: Registrado de Menos')
-        - df_revisar_sistema / df_revisar_arca: el detalle de cada lado,
-          ligado al resumen por 'id_revisar'
-    """
-    def _cuit_norm(serie):
-        return serie.apply(lambda x: "" if pd.isna(x) else re.sub(r"\D", "", str(x)))
-
-    cols_revisar = [
-        "id_revisar", "CUIT", "Tercero", "Razon Social",
-        "Líneas Sistema", "Importe Sistema", "Líneas AGIP", "Monto AGIP",
-        "Diferencia", "Comentario",
-    ]
-    vacio = (
-        df_falta_sistema, df_falta_arca, pd.DataFrame(columns=cols_revisar),
-        df_falta_arca.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
-        df_falta_sistema.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
+    matches, revisar = cruzar_impuestos(
+        df_arca, df_sistema,
+        col_cuit_arca=_buscar_columna(df_arca, "CUIT"),
+        col_importe_arca="Monto Retenido",
+        col_nombre_arca="Razon Social",
+        col_cuit_sistema=_buscar_columna(df_sistema, "CUIT"),
+        col_importe_sistema="Importe",
+        col_nombre_sistema="Tercero",
+        padron=padron,
+        tolerancia_importe=tolerancia_importe,
+        score_nombre_min=score_nombre_min,
+        cols_comprobante=tuple(cols) if all(cols) else None,
+        cols_fecha=(col_fecha_arca, col_fecha_sistema) if col_fecha_arca and col_fecha_sistema else None,
+        solo_agrupado=set(df_sistema.index[df_sistema[col_serie].isna()]),
+        revisar_comprobante=True,
     )
-    if df_falta_sistema.empty or df_falta_arca.empty:
-        return vacio
 
-    cuit_arca = _cuit_norm(df_falta_sistema["CUIT"])
-    cuit_sistema = _cuit_norm(df_falta_arca["CUIT"])
-    cuits_ambos = [c for c in pd.unique(cuit_sistema) if c and c in set(cuit_arca)]
-    if not cuits_ambos:
-        return vacio
-
-    filas_revisar, det_sistema, det_arca = [], [], []
-    for id_revisar, cuit in enumerate(cuits_ambos, start=1):
-        lineas_s = df_falta_arca[cuit_sistema == cuit]
-        lineas_a = df_falta_sistema[cuit_arca == cuit]
-
-        importe_s = round(lineas_s["Importe"].sum(), 2)
-        monto_a = round(lineas_a["Monto Retenido"].sum(), 2)
-        diferencia = round(importe_s - monto_a, 2)
-        if diferencia > 0:
-            comentario = "Dif: Registrado de Más"
-        elif diferencia < 0:
-            comentario = "Dif: Registrado de Menos"
-        else:
-            comentario = "Sin diferencia"
-
-        filas_revisar.append({
-            "id_revisar": id_revisar,
-            "CUIT": cuit,
-            "Tercero": lineas_s["Tercero"].dropna().iloc[0] if lineas_s["Tercero"].notna().any() else "",
-            "Razon Social": lineas_a["Razon Social"].dropna().iloc[0] if lineas_a["Razon Social"].notna().any() else "",
-            "Líneas Sistema": len(lineas_s),
-            "Importe Sistema": importe_s,
-            "Líneas AGIP": len(lineas_a),
-            "Monto AGIP": monto_a,
-            "Diferencia": diferencia,
-            "Comentario": comentario,
-        })
-        det_sistema.append(lineas_s.assign(id_revisar=id_revisar))
-        det_arca.append(lineas_a.assign(id_revisar=id_revisar))
-
-    en_revisar_s = cuit_sistema.isin(cuits_ambos)
-    en_revisar_a = cuit_arca.isin(cuits_ambos)
-
-    return (
-        df_falta_sistema[~en_revisar_a].reset_index(drop=True),
-        df_falta_arca[~en_revisar_s].reset_index(drop=True),
-        pd.DataFrame(filas_revisar, columns=cols_revisar),
-        pd.concat(det_sistema).reset_index(drop=True),
-        pd.concat(det_arca).reset_index(drop=True),
+    resultados = armar_resultados(
+        df_arca, df_sistema, matches,
+        excluidos_arca={a for a, _, _ in revisar},
+        excluidos_sistema={s for _, s, _ in revisar},
     )
+    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, "AGIP"))
 
 
 # ─────────────────────────────────────────────
@@ -590,7 +257,7 @@ def detectar_proveedores_nuevos(
         padron = PADRON_PROVEEDORES
 
     candidatos = df_match_arca[
-        df_match_arca["match_tipo"].isin(["nombre", "nombre_sumarizado"])
+        df_match_arca["match_tipo"].astype(str).str.startswith("nombre")
         & (df_match_arca["match_score"] >= umbral_nombre)
     ]
 
@@ -616,14 +283,12 @@ def generar_excel_retenciones(
     df_falta_sistema: pd.DataFrame,
     df_falta_arca: pd.DataFrame,
     df_proveedores_nuevos: pd.DataFrame | None = None,
-    df_revisar: pd.DataFrame | None = None,
-    df_revisar_sistema: pd.DataFrame | None = None,
-    df_revisar_arca: pd.DataFrame | None = None,
+    hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
     IMPORTE_FORMAT = "#,##0.00"
-    IMPORTE_COLS_REVISAR = {"Importe Sistema", "Monto AGIP", "Diferencia"}
+    IMPORTE_COLS_REVISAR = {"Importe Sistema", "Monto AGIP", "Diferencia", "Importe", "Monto Retenido"}
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -658,12 +323,7 @@ def generar_excel_retenciones(
         "Falta_Sistema": df_falta_sistema,
         "Falta_AGIP": df_falta_arca,
     }
-    if df_revisar is not None and not df_revisar.empty:
-        hojas["Revisar"] = df_revisar
-        if df_revisar_sistema is not None:
-            hojas["Revisar_Sistema"] = df_revisar_sistema
-        if df_revisar_arca is not None:
-            hojas["Revisar_AGIP"] = df_revisar_arca
+    hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
         hojas["Proveedores_Nuevos"] = df_proveedores_nuevos
 
@@ -692,12 +352,20 @@ def correr_cruce_retenciones(
     df_sistema_dep = depurar_sistema_retenciones(df_sistema)
     df_arca_dep = depurar_arca_retenciones(df_arca)
 
-    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_retenciones(
+    df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar = cruce_retenciones(
         df_arca_dep, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
-    df_falta_sistema, df_falta_arca, df_revisar, df_revisar_sistema, df_revisar_arca = separar_diferencias(
-        df_falta_sistema, df_falta_arca
+    df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
+        df_falta_sistema, df_falta_arca,
+        col_cuit_arca="CUIT", col_importe_arca="Monto Retenido",
+        col_fecha_arca=next(
+            (c for c in df_falta_sistema.columns if str(c).replace(".", "").strip().upper() == "FECHA RETENCION"),
+            None,
+        ),
+        col_nombre_arca="Razon Social",
+        etiqueta="AGIP", df_revisar_comprobante=df_revisar,
+        score_nombre_min=score_nombre_min,
     )
 
     df_proveedores_nuevos = detectar_proveedores_nuevos(df_match_arca, umbral_nombre=max(score_nombre_min, 80))
@@ -707,12 +375,11 @@ def correr_cruce_retenciones(
         "faltante_sistema": len(df_falta_sistema),
         "faltante_arca": len(df_falta_arca),
         "proveedores_nuevos": len(df_proveedores_nuevos),
-        "revisar": len(df_revisar),
+        **stats_revisar,
     }
 
     buf_reporte = generar_excel_retenciones(
-        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos,
-        df_revisar, df_revisar_sistema, df_revisar_arca,
+        df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_proveedores_nuevos, hojas_revisar,
     )
 
     return buf_reporte, stats
