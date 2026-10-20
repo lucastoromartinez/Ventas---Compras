@@ -2865,6 +2865,39 @@ class Apareo:
             if hallado:
                 self._cerrar([ia] + hallado, regla)
 
+    def par_mayor_vs_banco(self, mask_m, mask_e, mask_req, tol, regla, max_dias=3):
+        """Un pendiente del banco contra la suma de DOS renglones del mayor de la misma
+        fecha (±max_dias), de cualquier signo, con al menos uno tocado para atrás.
+        Ej.: pago pendiente 5.408.048,90 + modificación del asiento +2.659.261,65 =
+        débito del banco 2.748.787,25. Solo si la combinación es única."""
+        for ie in self._pend(mask_e).index:
+            if self.p.at[ie, "estado"] != "pendiente":
+                continue
+            e = self.p.loc[ie]
+            if pd.isna(e["fecha"]):
+                continue
+            cand = self._pend(mask_m)
+            cand = cand[(cand["fecha"] - e["fecha"]).abs() <= pd.Timedelta(days=max_dias)]
+            if len(cand) < 2 or len(cand) > 40:
+                continue
+            req = set(self.p.index[mask_req.reindex(self.p.index, fill_value=False).astype(bool)])
+            sol = [list(c) for c in itertools.combinations(cand.index, 2)
+                   if (c[0] in req or c[1] in req)
+                   and abs(cand.loc[list(c), "importe"].sum() - e["importe"]) <= tol]
+            if len(sol) == 1:
+                self._cerrar([ie] + sol[0], regla)
+
+    def bancarios_en_conjunto(self, mask_m, mask_e, tol, regla):
+        """Todos los pendientes anteriores de gastos bancarios y préstamos (mayor y banco)
+        se cierran juntos si el total del mayor iguala al del banco."""
+        txt = (self.p["categoria"].astype(str) + " " + self.p["concepto"].astype(str)).str.lower()
+        es_banc = txt.str.contains(r"\bgb\b|gastos bancarios|prestamo|préstamo", regex=True)
+        pm, pe = self._pend(mask_m & es_banc), self._pend(mask_e & es_banc)
+        if pm.empty or pe.empty:
+            return
+        if abs(pm["importe"].sum() - pe["importe"].sum()) <= tol:
+            self._cerrar(list(pm.index) + list(pe.index), regla)
+
     def anulacion_suma(self, mask, tol, regla, max_k=3):
         """Del mismo lado: un renglón se anula con la suma de 2..k renglones de signo
         contrario (p. ej. pendiente de salida 6.366.295,14 contra pendiente de ingreso
@@ -3328,6 +3361,10 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                                   "Pendientes anteriores de una categoría registrados en el período")
     ap.por_categoria_mes(ant_e, retro_m, TOL_CRUCE,
                          "Pendientes anteriores de una categoría y mes registrados con fecha ya conciliada")
+    # Pendiente anterior del mayor corregido para atrás (modificación o devolución)
+    # que así queda igual al pendiente del banco: se cierran los tres
+    ap.par_mayor_vs_banco(ant_m | retro_m, ant_e, retro_m, TOL_CENTAVOS,
+                          "Pendiente anterior corregido con asiento para atrás contra banco")
     # R2.b El cambio de saldo inicial sin identificar coincide con pendientes anteriores
     #      del banco (se registraron con fecha ya conciliada)
     # Un pendiente anterior del mayor y uno del banco por el mismo importe se compensan
@@ -3347,6 +3384,12 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     #     (lo del propio período ya lo resolvió el cruce principal, match 0 a 19)
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
+
+    # R5. Gastos bancarios y préstamos de meses anteriores: si el total pendiente del mayor
+    #     y el del banco se compensan (como hace la analista, "compensa con suma de importe"),
+    #     se cierran todos juntos; la diferencia de centavos queda explicada.
+    ap.bancarios_en_conjunto(ant_m, ant_e, TOL_CRUCE,
+                             "Gastos bancarios y préstamos anteriores que se compensan en conjunto")
 
     P = ap.p
     conc = P[P["estado"] == "conciliado"]
