@@ -111,9 +111,12 @@ def cruzar_impuestos(
       padrón y por último por nombre (score >= score_nombre_min, solo si la
       línea trae nombre). Se suma todo lo que sigue faltando de ese
       proveedor y se compara contra el importe de la otra línea.
-      PASO 7 - Línea del sistema sin CUIT contra el total de cada proveedor
-               del organismo: matchea solo si cierra un único proveedor.
-               Las líneas sin nombre no participan.
+      PASO 7 - Todas las líneas del sistema contra todas las del organismo
+               del mismo proveedor (varias contra varias), con la misma
+               identificación del proveedor.
+      PASO 8 - Línea del sistema sin proveedor (sin CUIT ni nombre) contra
+               el total de cada proveedor del organismo: matchea solo si
+               cierra un único proveedor.
 
     Si hay más de un candidato uno a uno, desempata por el mismo comprobante
     (cols_comprobante = pto venta / número del organismo y del sistema),
@@ -333,13 +336,34 @@ def cruzar_impuestos(
         if grupo:
             _registrar([a], grupo, f"{tipo}_sumarizado_sistema", score)
 
-    # PASO 7: línea del sistema sin CUIT contra el total de un único proveedor
+    # PASO 7: todas las líneas del sistema contra todas las del organismo del
+    # mismo proveedor (varias contra varias)
+    grupos_sistema = {}
     for s in sorted(s_libres):
-        if cuit_s.loc[s] or not nombre_s.loc[s] or imp_s.loc[s] == 0:
+        clave = cuit_s.loc[s] or nombre_s.loc[s]
+        if clave:
+            grupos_sistema.setdefault(clave, []).append(s)
+    for grupo_s in grupos_sistema.values():
+        if len(grupo_s) < 2 or not set(grupo_s) <= s_libres:
+            continue
+        total_s = round(imp_s.loc[grupo_s].sum(), 2)
+        if total_s == 0:
+            continue
+        primera = grupo_s[0]
+        grupo_a, tipo, score = _grupo_del_proveedor(
+            cuit_s.loc[primera], nombre_s.loc[primera], sorted(a_libres), cuit_a, nombre_a, imp_a, total_s
+        )
+        if grupo_a and len(grupo_a) >= 2:
+            _registrar(grupo_a, grupo_s, f"{tipo}_sumarizado_total", score)
+
+    # PASO 8: línea del sistema sin proveedor (sin CUIT ni nombre) contra el
+    # total de un único proveedor
+    for s in sorted(s_libres):
+        if cuit_s.loc[s] or nombre_s.loc[s] or imp_s.loc[s] == 0:
             continue
         por_cuit = {}
         for a in sorted(a_libres):
-            if cuit_a.loc[a] and nombre_a.loc[a]:
+            if cuit_a.loc[a]:
                 por_cuit.setdefault(cuit_a.loc[a], []).append(a)
         que_cierran = [g for g in por_cuit.values() if _cierra(imp_a.loc[g].sum(), imp_s.loc[s])]
         if len(que_cierran) == 1:
