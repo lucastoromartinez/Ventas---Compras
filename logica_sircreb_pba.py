@@ -5,8 +5,9 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
+from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
 from logica_percepciones import load_excel_sistema
-from proveedores import PADRON_PROVEEDORES, mapa_nombre_a_cuit
+from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
@@ -140,9 +141,7 @@ def depurar_sistema_sircreb(
         if col_cuit != "CUIT":
             df = df.rename(columns={col_cuit: "CUIT"})
     else:
-        nombre_a_cuit = mapa_nombre_a_cuit(padron)
-
-        df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
+        df["CUIT"] = cuit_por_tercero(df[col_tercero], padron)
 
     return df.reset_index(drop=True)
 
@@ -155,27 +154,25 @@ def cruce_sircreb(
     df_arca: pd.DataFrame,
     df_sistema: pd.DataFrame,
     tolerancia_importe: float = 1.0,
+    score_nombre_min: int = 70,
+    padron: dict | None = None,
 ):
     """
-    Cruza SIRCREB contra el sistema en tres pasadas:
-
-    PASO 1 - CUIT + Importe, uno a uno (tolerancia): para cada línea de
-    arca, busca en sistema una línea con el mismo CUIT y el mismo Importe.
-
-    PASO 2 - Sumarizado por CUIT del lado del sistema, contra arca
-    remanente: agrupa las líneas de sistema por CUIT, sumando Importe, y
-    cruza ese importe sumarizado contra arca por CUIT + Importe.
-
-    PASO 3 - Sumarizado por CUIT de arca, contra sistema remanente: mismo
-    criterio que el paso 2 pero a la inversa.
+    Cruza SIRCREB contra el sistema con el criterio común de los módulos de
+    impuestos (ver logica_cruce_impuestos.cruzar_impuestos). El nombre de
+    SIRCREB sale del padrón: las líneas cuyo CUIT no está cargado no
+    participan de los pasos por nombre.
 
     Retorna:
         tuple de 4 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
-              'match_tipo' = 'directo' / 'sumarizado_sistema' / 'sumarizado_arca')
+              'match_tipo' y 'match_score')
             - df_falta_sistema (líneas de arca sin match)
             - df_falta_arca (líneas de sistema sin match)
     """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
     df_arca = df_arca.reset_index(drop=True).copy()
     df_sistema = df_sistema.reset_index(drop=True).copy()
 
@@ -196,108 +193,20 @@ def cruce_sircreb(
     if col_cuit_sistema is None or col_importe_sistema is None:
         raise ValueError("df_sistema necesita columnas de CUIT e Importe.")
 
-    cuit_arca = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
-    cuit_sistema = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
+    matches, _ = cruzar_impuestos(
+        df_arca, df_sistema,
+        col_cuit_arca=col_cuit_arca,
+        col_importe_arca=col_importe_arca,
+        col_nombre_arca=_buscar_columna(df_arca, "nombre"),
+        col_cuit_sistema=col_cuit_sistema,
+        col_importe_sistema=col_importe_sistema,
+        col_nombre_sistema=_buscar_columna(df_sistema, "Tercero"),
+        padron=padron,
+        tolerancia_importe=tolerancia_importe,
+        score_nombre_min=score_nombre_min,
+    )
 
-    matches = []  # (idxs_arca, idxs_sistema, tipo)
-    arca_disponibles = set(df_arca.index)
-    sistema_disponibles = set(df_sistema.index)
-
-    # PASO 1: CUIT + Importe, 1 a 1
-    for a_idx in list(arca_disponibles):
-        cuit_a = cuit_arca.loc[a_idx]
-        monto_a = df_arca.loc[a_idx, col_importe_arca]
-
-        candidatos = [
-            i for i in sistema_disponibles
-            if cuit_sistema.loc[i] == cuit_a
-            and abs(df_sistema.loc[i, col_importe_sistema] - monto_a) <= tolerancia_importe
-        ]
-        if not candidatos:
-            continue
-
-        s_idx = candidatos[0]
-        matches.append(([a_idx], [s_idx], "directo"))
-        arca_disponibles.discard(a_idx)
-        sistema_disponibles.discard(s_idx)
-
-    # PASO 2: Sumarizado por CUIT del sistema, contra arca remanente
-    if sistema_disponibles:
-        remanente_sistema = df_sistema.loc[list(sistema_disponibles)]
-        sumarizado_sistema = remanente_sistema.groupby(
-            cuit_sistema.loc[remanente_sistema.index]
-        )[col_importe_sistema].sum()
-
-        for cuit_val, monto_sum in sumarizado_sistema.items():
-            candidatos = [
-                i for i in arca_disponibles
-                if cuit_arca.loc[i] == cuit_val
-                and abs(df_arca.loc[i, col_importe_arca] - monto_sum) <= tolerancia_importe
-            ]
-            if not candidatos:
-                continue
-
-            a_idx = candidatos[0]
-            idxs_sistema_cuit = [i for i in sistema_disponibles if cuit_sistema.loc[i] == cuit_val]
-
-            matches.append(([a_idx], idxs_sistema_cuit, "sumarizado_sistema"))
-            arca_disponibles.discard(a_idx)
-            for i in idxs_sistema_cuit:
-                sistema_disponibles.discard(i)
-
-    # PASO 3: Sumarizado por CUIT de arca, contra sistema remanente
-    if arca_disponibles:
-        remanente_arca = df_arca.loc[list(arca_disponibles)]
-        sumarizado_arca = remanente_arca.groupby(cuit_arca.loc[remanente_arca.index])[col_importe_arca].sum()
-
-        for cuit_val, monto_sum in sumarizado_arca.items():
-            candidatos = [
-                i for i in sistema_disponibles
-                if cuit_sistema.loc[i] == cuit_val
-                and abs(df_sistema.loc[i, col_importe_sistema] - monto_sum) <= tolerancia_importe
-            ]
-            if not candidatos:
-                continue
-
-            s_idx = candidatos[0]
-            idxs_arca_cuit = [i for i in arca_disponibles if cuit_arca.loc[i] == cuit_val]
-
-            matches.append((idxs_arca_cuit, [s_idx], "sumarizado_arca"))
-            for i in idxs_arca_cuit:
-                arca_disponibles.discard(i)
-            sistema_disponibles.discard(s_idx)
-
-    # Armado de resultados
-    filas_sistema, filas_arca = [], []
-    for id_match, (idxs_arca, idxs_sistema, tipo) in enumerate(matches, start=1):
-        for i in idxs_sistema:
-            fila_sis = df_sistema.loc[i].copy()
-            fila_sis["id_match"] = id_match
-            fila_sis["match_tipo"] = tipo
-            filas_sistema.append(fila_sis)
-
-        for i in idxs_arca:
-            fila_a = df_arca.loc[i].copy()
-            fila_a["id_match"] = id_match
-            fila_a["match_tipo"] = tipo
-            filas_arca.append(fila_a)
-
-    cols_extra = ["id_match", "match_tipo"]
-
-    if filas_sistema:
-        df_match_sistema = pd.DataFrame(filas_sistema).reset_index(drop=True)
-    else:
-        df_match_sistema = pd.DataFrame(columns=list(df_sistema.columns) + cols_extra)
-
-    if filas_arca:
-        df_match_arca = pd.DataFrame(filas_arca).reset_index(drop=True)
-    else:
-        df_match_arca = pd.DataFrame(columns=list(df_arca.columns) + cols_extra)
-
-    df_falta_sistema = df_arca.loc[list(arca_disponibles)].reset_index(drop=True)
-    df_falta_arca = df_sistema.loc[list(sistema_disponibles)].reset_index(drop=True)
-
-    return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
+    return armar_resultados(df_arca, df_sistema, matches)
 
 
 # ─────────────────────────────────────────────
@@ -361,7 +270,8 @@ def generar_excel_sircreb(
 # ─────────────────────────────────────────────
 
 def correr_cruce_sircreb(
-    archivo_sircreb_txt, archivo_sircreb_excel, archivo_ret_excel, tolerancia_importe: float = 1.0
+    archivo_sircreb_txt, archivo_sircreb_excel, archivo_ret_excel, tolerancia_importe: float = 1.0,
+    score_nombre_min: int = 70,
 ):
     df_arca = cargar_txt_sircreb(archivo_sircreb_txt)
 
@@ -370,7 +280,7 @@ def correr_cruce_sircreb(
     df_sistema_dep = depurar_sistema_sircreb(df_sircreb_excel, df_ret_excel)
 
     df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca = cruce_sircreb(
-        df_arca, df_sistema_dep, tolerancia_importe=tolerancia_importe
+        df_arca, df_sistema_dep, tolerancia_importe=tolerancia_importe, score_nombre_min=score_nombre_min
     )
 
     stats = {

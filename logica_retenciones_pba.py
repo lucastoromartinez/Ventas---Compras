@@ -2,12 +2,12 @@ import re
 from io import BytesIO
 
 import pandas as pd
-from rapidfuzz import fuzz
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_percepciones import load_excel_sistema, _nombre_comparable
-from proveedores import PADRON_PROVEEDORES, mapa_nombre_a_cuit
+from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero
+from logica_percepciones import load_excel_sistema
+from proveedores import PADRON_PROVEEDORES
 
 
 # ─────────────────────────────────────────────
@@ -120,9 +120,7 @@ def depurar_sistema_sirtac(df: pd.DataFrame, padron: dict | None = None) -> pd.D
         if col_cuit != "CUIT":
             df = df.rename(columns={col_cuit: "CUIT"})
     else:
-        nombre_a_cuit = mapa_nombre_a_cuit(padron)
-
-        df["CUIT"] = df[col_tercero].astype(str).str.strip().str.upper().map(nombre_a_cuit)
+        df["CUIT"] = cuit_por_tercero(df[col_tercero], padron)
 
     if col_tercero != "Tercero":
         df = df.rename(columns={col_tercero: "Tercero"})
@@ -138,31 +136,25 @@ def cruce_sirtac(
     df_sirtac: pd.DataFrame,
     df_sistema: pd.DataFrame,
     tolerancia_importe: float = 1.0,
-    score_nombre_min: int = 80,
+    score_nombre_min: int = 70,
+    padron: dict | None = None,
 ):
     """
-    Cruza df_sirtac contra el sistema en tres pasadas:
-
-    PASO 1 - CUIT + Importe, uno a uno (con tolerancia): para cada línea de
-    sirtac busca en sistema una línea con el mismo CUIT y el mismo Importe.
-
-    PASO 2 - Nombre + Importe, uno a uno, para lo que no matcheó en el paso
-    1: compara 'nombre' (sirtac) vs 'Tercero' (sistema) con fuzzy matching.
-    Solo se acepta si el score >= score_nombre_min y el Importe coincide.
-
-    PASO 3 - Sumarizado por CUIT, para lo que sigue sin matchear: agrupa
-    las líneas remanentes de sirtac por CUIT, sumando el Importe, y cruza
-    ese importe sumarizado contra el sistema por CUIT + Importe. Si
-    matchea, todas las líneas de sirtac de ese CUIT quedan ligadas a esa
-    única línea de sistema.
+    Cruza df_sirtac contra el sistema con el criterio común de los módulos
+    de impuestos (ver logica_cruce_impuestos.cruzar_impuestos). El nombre de
+    SIRTAC sale del padrón: las líneas cuyo CUIT no está cargado no
+    participan de los pasos por nombre.
 
     Retorna:
         tuple de 4 pd.DataFrame:
             - df_match_sistema, df_match_arca (ligados por 'id_match', con
-              'match_tipo' = 'cuit' / 'nombre' / 'cuit_sumarizado')
+              'match_tipo' y 'match_score')
             - df_falta_sistema (líneas de sirtac sin match)
             - df_falta_arca (líneas de sistema sin match)
     """
+    if padron is None:
+        padron = PADRON_PROVEEDORES
+
     df_sirtac = df_sirtac.reset_index(drop=True).copy()
     df_sistema = df_sistema.reset_index(drop=True).copy()
 
@@ -175,123 +167,28 @@ def cruce_sirtac(
 
     col_cuit_sirtac = _buscar_columna(df_sirtac, "cuit")
     col_importe_sirtac = _buscar_columna(df_sirtac, "importe")
-    col_nombre_sirtac = _buscar_columna(df_sirtac, "nombre")
-
     col_cuit_sistema = _buscar_columna(df_sistema, "CUIT")
     col_importe_sistema = _buscar_columna(df_sistema, "Importe")
-    col_tercero_sistema = _buscar_columna(df_sistema, "Tercero")
 
     if col_cuit_sirtac is None or col_importe_sirtac is None:
         raise ValueError("df_sirtac necesita columnas de CUIT e Importe.")
     if col_cuit_sistema is None or col_importe_sistema is None:
         raise ValueError("df_sistema necesita columnas de CUIT e Importe.")
 
-    usar_nombre = col_nombre_sirtac is not None and col_tercero_sistema is not None
+    matches, _ = cruzar_impuestos(
+        df_sirtac, df_sistema,
+        col_cuit_arca=col_cuit_sirtac,
+        col_importe_arca=col_importe_sirtac,
+        col_nombre_arca=_buscar_columna(df_sirtac, "nombre"),
+        col_cuit_sistema=col_cuit_sistema,
+        col_importe_sistema=col_importe_sistema,
+        col_nombre_sistema=_buscar_columna(df_sistema, "Tercero"),
+        padron=padron,
+        tolerancia_importe=tolerancia_importe,
+        score_nombre_min=score_nombre_min,
+    )
 
-    cuit_sirtac = df_sirtac[col_cuit_sirtac].astype(str).str.replace(r"[^0-9]", "", regex=True)
-    cuit_sistema = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
-
-    matches = []  # (lista_sirtac_idx, sistema_idx, tipo, score)
-    sirtac_disponibles = set(df_sirtac.index)
-    sistema_disponibles = set(df_sistema.index)
-
-    # PASO 1: CUIT + Importe, 1 a 1
-    for s_idx in list(sirtac_disponibles):
-        cuit_s = cuit_sirtac.loc[s_idx]
-        monto_s = df_sirtac.loc[s_idx, col_importe_sirtac]
-
-        candidatos = [
-            i for i in sistema_disponibles
-            if cuit_sistema.loc[i] == cuit_s
-            and abs(df_sistema.loc[i, col_importe_sistema] - monto_s) <= tolerancia_importe
-        ]
-        if not candidatos:
-            continue
-
-        i_match = candidatos[0]
-        matches.append(([s_idx], i_match, "cuit", 100))
-        sirtac_disponibles.discard(s_idx)
-        sistema_disponibles.discard(i_match)
-
-    # PASO 2: Nombre + Importe, 1 a 1, para lo que no matcheó por CUIT
-    if usar_nombre:
-        for s_idx in list(sirtac_disponibles):
-            monto_s = df_sirtac.loc[s_idx, col_importe_sirtac]
-            nombre_s = str(df_sirtac.loc[s_idx, col_nombre_sirtac])
-
-            candidatos = [
-                i for i in sistema_disponibles
-                if abs(df_sistema.loc[i, col_importe_sistema] - monto_s) <= tolerancia_importe
-            ]
-            if not candidatos:
-                continue
-
-            puntajes = [(i, fuzz.token_sort_ratio(_nombre_comparable(nombre_s),
-                                                  _nombre_comparable(df_sistema.loc[i, col_tercero_sistema])))
-                        for i in candidatos]
-            mejor_idx, mejor_score = max(puntajes, key=lambda x: x[1])
-
-            if mejor_score < score_nombre_min:
-                continue
-
-            matches.append(([s_idx], mejor_idx, "nombre", mejor_score))
-            sirtac_disponibles.discard(s_idx)
-            sistema_disponibles.discard(mejor_idx)
-
-    # PASO 3: Sumarizado por CUIT, contra sistema remanente
-    if sirtac_disponibles:
-        remanente = df_sirtac.loc[list(sirtac_disponibles)]
-        sumarizado = remanente.groupby(cuit_sirtac.loc[remanente.index])[col_importe_sirtac].sum()
-
-        for cuit_val, monto_sum in sumarizado.items():
-            candidatos = [
-                i for i in sistema_disponibles
-                if cuit_sistema.loc[i] == cuit_val
-                and abs(df_sistema.loc[i, col_importe_sistema] - monto_sum) <= tolerancia_importe
-            ]
-            if not candidatos:
-                continue
-
-            i_match = candidatos[0]
-            idxs_cuit = [i for i in sirtac_disponibles if cuit_sirtac.loc[i] == cuit_val]
-
-            matches.append((idxs_cuit, i_match, "cuit_sumarizado", 100))
-            for i in idxs_cuit:
-                sirtac_disponibles.discard(i)
-            sistema_disponibles.discard(i_match)
-
-    # Armado de resultados
-    filas_sistema, filas_sirtac = [], []
-    for id_match, (idxs_sirtac, s_idx_sistema, tipo, score) in enumerate(matches, start=1):
-        fila_sis = df_sistema.loc[s_idx_sistema].copy()
-        fila_sis["id_match"] = id_match
-        fila_sis["match_tipo"] = tipo
-        fila_sis["match_score"] = score
-        filas_sistema.append(fila_sis)
-
-        for idx in idxs_sirtac:
-            fila_sir = df_sirtac.loc[idx].copy()
-            fila_sir["id_match"] = id_match
-            fila_sir["match_tipo"] = tipo
-            fila_sir["match_score"] = score
-            filas_sirtac.append(fila_sir)
-
-    cols_extra = ["id_match", "match_tipo", "match_score"]
-
-    if filas_sistema:
-        df_match_sistema = pd.DataFrame(filas_sistema).reset_index(drop=True)
-    else:
-        df_match_sistema = pd.DataFrame(columns=list(df_sistema.columns) + cols_extra)
-
-    if filas_sirtac:
-        df_match_arca = pd.DataFrame(filas_sirtac).reset_index(drop=True)
-    else:
-        df_match_arca = pd.DataFrame(columns=list(df_sirtac.columns) + cols_extra)
-
-    df_falta_sistema = df_sirtac.loc[list(sirtac_disponibles)].reset_index(drop=True)
-    df_falta_arca = df_sistema.loc[list(sistema_disponibles)].reset_index(drop=True)
-
-    return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca
+    return armar_resultados(df_sirtac, df_sistema, matches)
 
 
 # ─────────────────────────────────────────────
@@ -311,15 +208,18 @@ def detectar_proveedores_nuevos(
         padron = PADRON_PROVEEDORES
 
     candidatos = df_match_arca[
-        (df_match_arca["match_tipo"] == "nombre")
+        df_match_arca["match_tipo"].astype(str).str.startswith("nombre")
         & (df_match_arca["match_score"] >= umbral_nombre)
     ]
 
-    nuevos = [
-        {"CUIT": fila["cuit"], "Nombre": fila["nombre"], "score": fila["match_score"]}
-        for _, fila in candidatos.iterrows()
-        if fila["cuit"] not in padron
-    ]
+    nuevos = []
+    vistos = set()
+    for _, fila in candidatos.iterrows():
+        cuit = fila["cuit"]
+        if cuit in padron or cuit in vistos:
+            continue
+        vistos.add(cuit)
+        nuevos.append({"CUIT": cuit, "Nombre": fila["nombre"], "score": fila["match_score"]})
 
     return pd.DataFrame(nuevos, columns=["CUIT", "Nombre", "score"])
 
@@ -388,7 +288,7 @@ def generar_excel_sirtac(
 # ─────────────────────────────────────────────
 
 def correr_cruce_retenciones_pba(
-    archivo_sirtac_txt, archivo_sistema, tolerancia_importe: float = 1.0, score_nombre_min: int = 80
+    archivo_sirtac_txt, archivo_sistema, tolerancia_importe: float = 1.0, score_nombre_min: int = 70
 ):
     df_sirtac = cargar_txt_sirtac(archivo_sirtac_txt)
 
