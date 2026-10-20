@@ -331,8 +331,8 @@ def cruce_percepciones(
     col_cuit_arca = _buscar_columna(df_arca, "CUIT")
     col_cuit_sistema = _buscar_columna(df_sistema, "CUIT")
 
-    cuit_arca_norm = df_arca[col_cuit_arca].astype(str).str.replace(r"[^0-9]", "", regex=True)
-    cuit_sistema_norm = df_sistema[col_cuit_sistema].astype(str).str.replace(r"[^0-9]", "", regex=True)
+    cuit_arca_norm = df_arca[col_cuit_arca].fillna("").astype(str).str.replace(r"[^0-9]", "", regex=True)
+    cuit_sistema_norm = df_sistema[col_cuit_sistema].fillna("").astype(str).str.replace(r"[^0-9]", "", regex=True)
 
     col_pv_arca = _buscar_columna(df_arca, "PTO VENTA")
     col_nc_arca = _buscar_columna(df_arca, "N°COMPROBANTE")
