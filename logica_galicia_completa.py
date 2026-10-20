@@ -2898,6 +2898,27 @@ class Apareo:
         if abs(pm["importe"].sum() - pe["importe"].sum()) <= tol:
             self._cerrar(list(pm.index) + list(pe.index), regla)
 
+    def compensacion_categoria_mes(self, mask, tol, regla):
+        """Regla general: todos los pendientes de una categoría y un mes (de ambos lados y de
+        cualquier origen dentro de mask) se cierran juntos si el total del mayor iguala al del
+        banco. Lo que se compensa no debe llegar a la CC (p. ej. préstamo 09-26 de EASA:
+        pendiente del mayor 1.562.500 + cuotas cargadas después 1.839.811,69 = débitos del
+        banco 3.402.311,65)."""
+        pp = self._pend(mask)
+        pp = pp[pp["fecha"].notna() & ~pp["categoria"].astype(str).isin(["0", "nan", ""])]
+        if pp.empty:
+            return
+        cat = pp["categoria"].astype(str).str.lower().str.normalize("NFKD") \
+            .str.encode("ascii", "ignore").str.decode("ascii").str.strip()
+        clave = cat + "|" + pp["fecha"].dt.strftime("%Y-%m")
+        for k, g in pp.groupby(clave):
+            if len(g) < 2:
+                continue
+            sm = g.loc[g["lado"] == "M", "importe"].sum()
+            se = g.loc[g["lado"] == "E", "importe"].sum()
+            if abs(sm - se) <= tol:
+                self._cerrar(list(g.index), regla)
+
     def anulacion_suma(self, mask, tol, regla, max_k=3):
         """Del mismo lado: un renglón se anula con la suma de 2..k renglones de signo
         contrario (p. ej. pendiente de salida 6.366.295,14 contra pendiente de ingreso
@@ -3385,6 +3406,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
 
+    # R4.b Regla general: lo que se compensa por categoría y mes no va a la CC
+    ap.compensacion_categoria_mes(ant_m | ant_e | retro_m, TOL_CRUCE,
+                                  "Pendientes y asientos para atrás de una categoría y mes que se compensan")
     # R5. Gastos bancarios y préstamos de meses anteriores: si el total pendiente del mayor
     #     y el del banco se compensan (como hace la analista, "compensa con suma de importe"),
     #     se cierran todos juntos; la diferencia de centavos queda explicada.
