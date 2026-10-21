@@ -2719,6 +2719,12 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     if len(bloques) > 1 and duenio_cruce is not None and duenio_cruce != cuenta:
         snap, saldo_ant = None, None
 
+    # Líneas de la CC anterior cargadas sin fecha o sin concepto (solo el importe): se completan
+    # con el movimiento pendiente de esa misma conciliación que tiene ese importe, si es único
+    # (banco: hoja "Faltante Mayor"; mayor: hoja "Faltante Extracto").
+    if not lin.empty and snap is not None:
+        lin = _completar_lineas_sin_dato(lin, xls)
+
     return {
         "cuenta": cuenta, "pendientes": lin, "mes": mes,
         "saldo_contable": blo["saldo_contable"], "saldo_extracto": blo["saldo_extracto"],
@@ -2740,6 +2746,47 @@ def _saldos_extracto(ext):
     inicio = float(ext["saldo"].iloc[0] - ext["importe"].iloc[0])
     final = float(ext["saldo"].iloc[-1])
     return inicio, final, abs(inicio + ext["importe"].sum() - final) < 0.05
+
+
+def _completar_lineas_sin_dato(lin, xls):
+    lin = lin.copy()
+    falta = lin["fecha"].isna() | lin["concepto"].isna() | lin["concepto"].astype(str).str.strip().isin(["", "nan", "None"])
+    if not falta.any():
+        return lin
+    fuentes = {}
+    if "Faltante Mayor" in xls.sheet_names:
+        fm = pd.read_excel(xls, sheet_name="Faltante Mayor")
+        if {"fecha", "importe"} <= set(fm.columns):
+            fuentes["E"] = pd.DataFrame({
+                "fecha": pd.to_datetime(fm["fecha"], errors="coerce"),
+                "importe": pd.to_numeric(fm["importe"], errors="coerce").round(2),
+                "cat": fm.get("conciliacion", pd.Series("0", index=fm.index)).astype(str),
+                "desc": fm.get("descripcion", pd.Series("", index=fm.index)).astype(str),
+                "obs": fm.get("leyenda adicional1", pd.Series("", index=fm.index)).astype(str)})
+    if "Faltante Extracto" in xls.sheet_names:
+        fe = pd.read_excel(xls, sheet_name="Faltante Extracto")
+        if {"Fecha", "Importe"} <= set(fe.columns):
+            fuentes["M"] = pd.DataFrame({
+                "fecha": pd.to_datetime(fe["Fecha"], errors="coerce"),
+                "importe": pd.to_numeric(fe["Importe"], errors="coerce").round(2),
+                "cat": fe.get("conciliacion", pd.Series("0", index=fe.index)).astype(str),
+                "desc": fe.get("Comentario", pd.Series("", index=fe.index)).astype(str),
+                "obs": fe.get("Tercero", pd.Series("", index=fe.index)).astype(str)})
+    for i in lin.index[falta]:
+        f = fuentes.get(lin.at[i, "lado"])
+        if f is None:
+            continue
+        c = f[(f["importe"] - round(float(lin.at[i, "importe"]), 2)).abs() <= 0.01]
+        if len(c) != 1:
+            continue
+        c = c.iloc[0]
+        if pd.isna(lin.at[i, "fecha"]) and pd.notna(c["fecha"]):
+            lin.at[i, "fecha"] = c["fecha"]
+        if str(lin.at[i, "concepto"]).strip() in ("", "nan", "None"):
+            lin.at[i, "concepto"] = c["cat"] if c["cat"] not in ("0", "nan", "") else c["desc"]
+        if str(lin.at[i, "obs"]).strip() in ("", "nan", "None") and c["obs"] not in ("nan", ""):
+            lin.at[i, "obs"] = c["obs"]
+    return lin
 
 
 HOJA_FOTO = "Foto mayor"
@@ -3498,6 +3545,12 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ant_e = (P["origen"] == "Pendiente anterior") & es_E
     retro_m = P["origen"].isin(["Retroactivo", "Borrado", "Modificado"])
 
+    # R0. Un pendiente del banco de la conciliación anterior que se registró después con fecha ya
+    #     conciliada se cierra contra ese asiento ANTES de buscar anulaciones dentro del mayor:
+    #     si no, dos asientos nuevos de igual importe y signo contrario (p. ej. Patagonia: +16M el
+    #     04/09 y -16M el 11/09) se anulan entre sí y dejan en la CC los dos pendientes del banco.
+    ap.uno_a_uno(ant_e, retro_m & (P["origen"] == "Retroactivo"), TOL_CENTAVOS,
+                 "Pendiente anterior registrado (retroactivo)", max_dias=40)
     # R1. Mismo lado que se anula (asiento + borrado/reversión, pendiente anterior + borrado)
     ap.uno_a_uno(es_M & ~per, es_M, TOL_CENTAVOS, "Anulación en mayor")
     ap.anulacion_suma(ant_m | retro_m, TOL_CENTAVOS, "Anulación en mayor (suma)")
