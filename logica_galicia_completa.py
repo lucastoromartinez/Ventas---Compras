@@ -2485,6 +2485,9 @@ def _inferir_categoria_extracto(df: pd.DataFrame) -> pd.Series:
     for patron, c in reglas:
         cat[sin & txt.str.contains(patron, regex=True)] = c
         sin = cat == "0"
+    # Transferencia recibida de un tercero sin otra categoría: cobranza (como lo carga el equipo)
+    credito = pd.to_numeric(df["importe"], errors="coerce").fillna(0) > 0
+    cat[sin & credito & txt.str.contains("transferenciadeterceros", regex=False)] = "Cobranzas"
     return cat
 
 
@@ -2995,6 +2998,25 @@ class Apareo:
             if abs(sm - se) <= tol:
                 self._cerrar(list(g.index), regla)
 
+    def subconjunto_categoria(self, mask_a, mask_b, tol, regla, max_dias=15):
+        """Un renglón de A contra un subconjunto de B de la misma categoría y signo, a pocos
+        días, de cualquier tamaño (hasta 40 candidatos). Solo si la combinación es única."""
+        for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
+            if self.p.at[ia, "estado"] != "pendiente":
+                continue
+            a = self.p.loc[ia]
+            if str(a["categoria"]) in ("0", "nan", "") or pd.isna(a["fecha"]):
+                continue
+            cand = self._pend(mask_b)
+            cand = cand[(cand.index != ia) & (cand["categoria"] == a["categoria"])
+                        & (np.sign(cand["importe"]) == np.sign(a["importe"]))
+                        & ((cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias))]
+            if len(cand) < 2 or len(cand) > 40:
+                continue
+            sel = _subconjunto_exacto(list(cand["importe"]), float(a["importe"]), tol=tol)
+            if sel and len(sel) >= 2:
+                self._cerrar([ia] + [cand.index[i] for i in sel], regla)
+
     def anulacion_suma(self, mask, tol, regla, max_k=3):
         """Del mismo lado: un renglón se anula con la suma de 2..k renglones de signo
         contrario (p. ej. pendiente de salida 6.366.295,14 contra pendiente de ingreso
@@ -3492,6 +3514,14 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
 
+    # R4.a Del propio período: un asiento contra varios movimientos del banco de la misma
+    #      categoría (o al revés), a pocos días (p. ej. EASA: pago SMG 909.418,14 del 16/10
+    #      contra cinco débitos SMG del 05/10 que suman 909.418,13)
+    no_agr = ~P["categoria"].isin(list(CATEGORIAS_AGRUPADAS))
+    ap.subconjunto_categoria(es_M & per & no_agr, es_E & per & no_agr, 0.05,
+                             "Asiento del período contra varios movimientos del banco")
+    ap.subconjunto_categoria(es_E & per & no_agr, es_M & per & no_agr, 0.05,
+                             "Movimiento del banco del período contra varios asientos")
     # R4.b Regla general: lo que se compensa por categoría y mes no va a la CC
     ap.compensacion_categoria_mes(ant_m | ant_e | retro_m, TOL_CRUCE,
                                   "Pendientes y asientos para atrás de una categoría y mes que se compensan")
