@@ -1517,6 +1517,10 @@ def categorizar_extracto_v3(df: pd.DataFrame) -> pd.DataFrame:
     es_amex = ley.str.contains("americanexpress") & (pd.to_numeric(df["importe"], errors="coerce") > 0) \
         & df["conciliacion"].isin(["0", "Cobranzas"])
     df.loc[es_amex, "conciliacion"] = "Acred. AmEx"
+    # Transferencias PEI (y sus devoluciones): contabilidad las registra dentro de la
+    # acreditación AmEx (p. ej. Patagonia 10-2026: "Acred AMEX" = AmEx + PEI)
+    desc_l = df["descripcion"].astype(str).apply(_limpiar_v3)
+    df.loc[desc_l.str.contains("transferenciapei|devolucionpei", regex=True), "conciliacion"] = "Acred. AmEx"
     # Transferencias de Delivery Hero (PedidosYa) que no entraron por "Transferencias cash"
     es_py = ley.str.contains("deliveryhero") & (pd.to_numeric(df["importe"], errors="coerce") > 0) \
         & (df["conciliacion"] == "0")
@@ -3211,6 +3215,16 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     mes_dominante = ext["fecha"].dt.to_period("M").mode()[0]
     desde = max(desde, mes_dominante.start_time)
     es_saldo_ant = may_full["Comentario"].astype(str).str.contains("saldo anterior", case=False, na=False)
+    # Lo que el mayor trae con fecha posterior al último día del extracto no es de este corte:
+    # queda afuera (saldo y cruce) y entra en la próxima conciliación.
+    post = (~es_saldo_ant) & (pd.to_datetime(may_full["Fecha"], errors="coerce") > hasta)
+    aviso_posterior = None
+    if post.any():
+        aviso_posterior = (f"El mayor trae {int(post.sum())} movimiento(s) con fecha posterior al cierre del extracto "
+                           f"({hasta:%d/%m/%Y}) por {may_full.loc[post, 'Importe'].sum():,.2f}: no se incluyen en esta "
+                           f"conciliación (saldo al {hasta:%d/%m/%Y}) y entran en la próxima.")
+        may_full = may_full[~post].copy()
+        es_saldo_ant = es_saldo_ant[~post]
     if es_saldo_ant.any():
         saldo_ini_archivo = float(may_full.loc[es_saldo_ant, "Saldo"].iloc[0])
     else:
@@ -3267,7 +3281,8 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     control = {"desde": desde, "hasta": hasta, "saldo_mayor_inicio": saldo_mayor_inicio,
                "saldo_mayor_final": saldo_mayor_final, "saldo_ext_inicio": saldo_ext_inicio,
                "saldo_ext_final": saldo_ext_final, "extracto_consistente": ext_ok,
-               "dif_cruce": dif_cruce, "tiene_anterior": archivo_conciliacion_anterior is not None}
+               "dif_cruce": dif_cruce, "tiene_anterior": archivo_conciliacion_anterior is not None,
+               "aviso_posterior": aviso_posterior}
     ant, retro, pend_ant = None, None, pd.DataFrame()
     if archivo_conciliacion_anterior is not None:
         ant = leer_conciliacion_anterior(archivo_conciliacion_anterior, cuenta,
@@ -3291,6 +3306,13 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
             saldo_ref = ant["saldo_anterior_mayor"]
         else:
             saldo_ref = ant["saldo_contable"]
+        if not misma_ventana and ant.get("saldo_extracto") is not None \
+                and abs(float(ant["saldo_extracto"]) - saldo_ext_inicio) > 1:
+            control["aviso_cuenta"] = (
+                f"El extracto empieza con saldo {saldo_ext_inicio:,.2f} y la conciliación anterior (cuenta "
+                f"{cuenta}, elegida por: {ant.get('criterio_cuenta')}) cerró con saldo de extracto "
+                f"{float(ant['saldo_extracto']):,.2f}. Verificar que la conciliación anterior sea la de esta cuenta "
+                f"(otras cuentas en el archivo: {', '.join(ant.get('otras_cuentas') or []) or 'ninguna'}).")
         control.update({"modo": retro["modo"], "saldo_ref": saldo_ref,
                         "saldo_ext_ref": ant["saldo_extracto"] if not misma_ventana else None})
 
@@ -3554,7 +3576,7 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                                            foto_anterior=ant.get("foto_mayor") if ant else None))
     stats = {k: control.get(k) for k in ("modo", "saldo_mayor_final", "saldo_ext_final", "diferencia",
                                           "dif_heredada", "retro_identificado", "retro_no_identificado",
-                                          "dif_cruce", "dif_redondeo_apareo", "aviso_mayor")}
+                                          "dif_cruce", "dif_redondeo_apareo", "aviso_mayor", "aviso_posterior", "aviso_cuenta")}
     stats = {k: (round(float(v), 2) if isinstance(v, (int, float, np.floating)) and v is not None else v)
              for k, v in stats.items()}
     stats["lineas_cc"] = len(lineas_cc)
@@ -3912,7 +3934,8 @@ def _hoja_control(ws, control, retro):
         ("Cuenta conciliada (bloque de la conciliación anterior)", control.get("cuenta")),
         ("Cómo se eligió la cuenta", control.get("criterio_cuenta")),
         ("Otras cuentas en la conciliación anterior (no incluidas en esta corrida)", control.get("otras_cuentas") or "-"),
-        ("Aviso", " / ".join(x for x in (control.get("aviso_sociedad"), control.get("aviso_mayor")) if x) or "-"),
+        ("Aviso", " / ".join(x for x in (control.get("aviso_sociedad"), control.get("aviso_mayor"),
+                                         control.get("aviso_posterior"), control.get("aviso_cuenta")) if x) or "-"),
         ("", None),
         ("1. ¿SE TOCÓ EL MAYOR DE PERÍODOS YA CONCILIADOS?", None),
         ("Saldo del mayor al inicio del período, según la conciliación anterior", control.get("saldo_ref")),
@@ -3947,7 +3970,7 @@ def _hoja_control(ws, control, retro):
     if abs(control.get("retro_no_identificado") or 0) > TOL_CENTAVOS:
         fila_ru = next(i for i, (k, _) in enumerate(filas, start=1) if k.strip().startswith("sin identificar"))
         ws.cell(fila_ru, 2).fill = ROJO
-    if control.get("aviso_sociedad") or control.get("aviso_mayor"):
+    if any(control.get(k) for k in ("aviso_sociedad", "aviso_mayor", "aviso_posterior", "aviso_cuenta")):
         ws.cell(5, 2).fill = ROJO
         ws.cell(5, 2).alignment = Alignment(wrap_text=True)
         ws.column_dimensions["B"].width = 60
