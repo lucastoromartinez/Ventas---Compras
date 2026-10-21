@@ -2665,6 +2665,11 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
         snap["Fecha"] = pd.to_datetime(snap["Fecha"], errors="coerce")
         if saldo_ant is not None:
             snap_final = saldo_ant + pd.to_numeric(snap["Importe"], errors="coerce").sum()
+    # Foto completa del mayor (hoja oculta "Foto mayor", hasta 12 meses): si existe,
+    # reemplaza a la foto parcial (Match Mayor + Faltante Extracto) como base de comparación.
+    foto = None
+    if HOJA_FOTO in xls.sheet_names:
+        foto = _leer_foto_mayor(pd.read_excel(xls, sheet_name=HOJA_FOTO))
     if "Extracto_cat" in xls.sheet_names:
         f = pd.to_datetime(pd.read_excel(xls, sheet_name="Extracto_cat", usecols=[0]).iloc[:, 0], errors="coerce")
         ext_desde, ext_hasta = f.min(), f.max()
@@ -2710,7 +2715,7 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     return {
         "cuenta": cuenta, "pendientes": lin, "mes": mes,
         "saldo_contable": blo["saldo_contable"], "saldo_extracto": blo["saldo_extracto"],
-        "diferencia": blo["diferencia"], "snapshot_mayor": snap,
+        "diferencia": blo["diferencia"], "snapshot_mayor": snap, "foto_mayor": foto,
         "saldo_anterior_mayor": saldo_ant, "desde": ext_desde, "hasta": ext_hasta,
         "otras_cuentas": [c for c in bloques if c != cuenta],
         "razon_social": razon_social, "criterio_cuenta": criterio,
@@ -2730,6 +2735,57 @@ def _saldos_extracto(ext):
     return inicio, final, abs(inicio + ext["importe"].sum() - final) < 0.05
 
 
+HOJA_FOTO = "Foto mayor"
+MESES_FOTO = 12
+COLS_FOTO = ["Asiento", "Apunte", "Fecha", "Importe", "Comentario", "Tercero", "Serie"]
+
+
+def _leer_foto_mayor(df):
+    """Hoja 'Foto mayor' -> DataFrame con las columnas que usa la comparación,
+    categorizado igual que el mayor (para que los borrados lleven su categoría)."""
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if not {"Asiento", "Apunte", "Fecha", "Importe"} <= set(df.columns):
+        return None
+    for c in COLS_FOTO:
+        if c not in df:
+            df[c] = np.nan
+    df = df[COLS_FOTO].copy()
+    df["Asiento"] = pd.to_numeric(df["Asiento"], errors="coerce")
+    df["Apunte"] = pd.to_numeric(df["Apunte"], errors="coerce")
+    df = df.dropna(subset=["Asiento", "Apunte"]).drop_duplicates(["Asiento", "Apunte"])
+    df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
+    df["Importe"] = pd.to_numeric(df["Importe"], errors="coerce").fillna(0.0).round(2)
+    try:
+        df = categorizar_mayor_v3(categorizar_mayor_v2(categorizar_mayor_v1(df)))
+    except Exception:
+        pass
+    if "conciliacion" not in df:
+        df["conciliacion"] = "0"
+    return df
+
+
+def _armar_foto_mayor(may, hasta, meses=MESES_FOTO, foto_anterior=None):
+    """Foto que guarda cada CC: el mayor usado en la corrida, últimos `meses` meses hasta `hasta`.
+    Si el mayor bajado es más corto, los meses que no cubre se conservan de la foto anterior
+    (nadie los pudo comparar, así que siguen valiendo como estaban)."""
+    f = may.dropna(subset=["Asiento"]).copy()
+    f["Fecha"] = pd.to_datetime(f["Fecha"], errors="coerce")
+    if foto_anterior is not None and len(foto_anterior) and f["Fecha"].notna().any():
+        previo = foto_anterior[foto_anterior["Fecha"] < f["Fecha"].min()]
+        f = pd.concat([previo, f], ignore_index=True)
+    f["Fecha"] = pd.to_datetime(f["Fecha"], errors="coerce")
+    f = f[(f["Fecha"] <= hasta) & (f["Fecha"] > hasta - pd.DateOffset(months=meses))]
+    for c in COLS_FOTO:
+        if c not in f:
+            f[c] = np.nan
+    f = f[COLS_FOTO].copy()
+    f["Asiento"] = pd.to_numeric(f["Asiento"], errors="coerce")
+    f["Apunte"] = pd.to_numeric(f["Apunte"], errors="coerce")
+    f["Importe"] = pd.to_numeric(f["Importe"], errors="coerce").round(2)
+    return f.sort_values(["Fecha", "Asiento", "Apunte"]).reset_index(drop=True)
+
+
 def analizar_retroactivos(may_full, saldo_ini_archivo, desde_actual, ant):
     """Compara el mayor actual contra la foto de la conciliación anterior."""
     snap = ant["snapshot_mayor"]
@@ -2741,7 +2797,27 @@ def analizar_retroactivos(may_full, saldo_ini_archivo, desde_actual, ant):
     vacio = movs.iloc[0:0]
     res = {"modo": "mismo período" if misma_ventana else "período siguiente",
            "retro": vacio, "borrados": vacio, "modificados": pd.DataFrame(),
-           "cubre_periodo_anterior": False}
+           "cubre_periodo_anterior": False, "con_foto": False}
+
+    foto = ant.get("foto_mayor")
+    if foto is not None and len(foto) and len(movs) and ant.get("hasta") is not None:
+        # Foto completa: se compara asiento por asiento todo lo que cubren a la vez la foto
+        # y el mayor actual, hasta el cierre de la conciliación anterior.
+        res["con_foto"] = True
+        ini = max(foto["Fecha"].min(), movs["Fecha"].min())
+        fin = ant["hasta"]
+        f = foto[(foto["Fecha"] >= ini) & (foto["Fecha"] <= fin)]
+        m = movs[(movs["Fecha"] >= ini) & (movs["Fecha"] <= fin)]
+        kf = set(zip(f["Asiento"], f["Apunte"]))
+        km = set(zip(movs["Asiento"], movs["Apunte"]))
+        res["cubre_periodo_anterior"] = True
+        res["inicio_comparacion"] = ini
+        res["retro"] = m[np.array([k not in kf for k in zip(m["Asiento"], m["Apunte"])], dtype=bool)]
+        res["borrados"] = f[np.array([k not in km for k in zip(f["Asiento"], f["Apunte"])], dtype=bool)]
+        j = f.merge(movs, on=["Asiento", "Apunte"], suffixes=("_ant", "_act"))
+        res["modificados"] = j[(j["Importe_ant"].round(2) != j["Importe_act"].round(2)) |
+                               (j["Fecha_ant"] != j["Fecha_act"])]
+        return res
 
     if snap is None or snap.empty:
         res["sin_foto"] = True
@@ -3338,6 +3414,16 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                 f"Volver a correr con el mayor bajado desde el {mes_ant:%d/%m/%Y} o antes.")
             detalle_ru = (f"Mayor cargado desde el {primer_mov:%d/%m/%Y}: no se puede identificar. "
                           f"Bajar el mayor desde el {mes_ant:%d/%m/%Y} o antes")
+        elif (abs(no_identificado) > TOL_CENTAVOS and retro.get("con_foto") and primer_mov is not None
+              and ant.get("foto_mayor") is not None and primer_mov > ant["foto_mayor"]["Fecha"].min()):
+            ini_foto = ant["foto_mayor"]["Fecha"].min()
+            control["aviso_mayor"] = (
+                f"Hay {no_identificado:,.2f} de cambio en el saldo ya conciliado que no se ve en el mayor cargado, "
+                f"que empieza el {primer_mov:%d/%m/%Y}: el cambio es de un mes anterior. La foto de la conciliación "
+                f"anterior cubre desde el {ini_foto:%d/%m/%Y}. Volver a correr con el mayor bajado desde el "
+                f"{ini_foto:%d/%m/%Y} (o desde el mes que se sospeche) para identificarlo asiento por asiento.")
+            detalle_ru = (f"Cambio en un mes anterior al {primer_mov:%d/%m/%Y}: bajar el mayor desde el "
+                          f"{ini_foto:%d/%m/%Y} para identificarlo")
         if abs(no_identificado) > TOL_CENTAVOS:
             partidas.append(pd.DataFrame([{
                 "lado": "M", "origen": "Retroactivo no identificado", "fecha": desde - timedelta(days=1),
@@ -3433,7 +3519,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     buf = _exportar(lineas_cc, detalle, control, retro, estado_ant, bytes_cruce, P,
                     dict(razon_social=razon_social or "", banco=banco,
                          cuenta="",   # el N° de cuenta se deja vacío: solo importa la sociedad
-                         analista=analista, mes=desde.replace(day=1)))
+                         analista=analista, mes=desde.replace(day=1)),
+                    foto=_armar_foto_mayor(may_full[~es_saldo_ant], hasta,
+                                           foto_anterior=ant.get("foto_mayor") if ant else None))
     stats = {k: control.get(k) for k in ("modo", "saldo_mayor_final", "saldo_ext_final", "diferencia",
                                           "dif_heredada", "retro_identificado", "retro_no_identificado",
                                           "dif_cruce", "dif_redondeo_apareo", "aviso_mayor")}
@@ -3872,7 +3960,7 @@ def _hoja_control(ws, control, retro):
             ws.cell(r, 1, "No se detectaron (o el mayor cargado no cubre el período anterior).")
 
 
-def _exportar(lineas, detalle, control, retro, estado_ant, bytes_cruce, P, meta):
+def _exportar(lineas, detalle, control, retro, estado_ant, bytes_cruce, P, meta, foto=None):
     """Libro final = hojas del cruce tal cual las genera logica_galicia (Faltante Mayor,
     Faltante Extracto, Match Mayor, Match Extracto, Extracto_cat) + la hoja CC
     adelante + tres hojas de soporte."""
@@ -3893,6 +3981,16 @@ def _exportar(lineas, detalle, control, retro, estado_ant, bytes_cruce, P, meta)
                    adic[["grupo", "regla aplicada", "origen", "lado (M=mayor, E=extracto)", "fecha", "categoria",
                          "nombre", "referencia", "importe"]],
                    {"regla aplicada": 45, "nombre": 36, "referencia": 30, "lado (M=mayor, E=extracto)": 12})
+    if foto is not None and len(foto):
+        wf = wb.create_sheet(HOJA_FOTO)
+        wf.append(COLS_FOTO)
+        for r in foto.itertuples(index=False):
+            wf.append([None if (isinstance(v, float) and pd.isna(v)) else
+                       (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v) for v in r])
+        for fila in wf.iter_rows(min_row=2):
+            fila[2].number_format = "dd/mm/yyyy"
+            fila[3].number_format = "#,##0.00"
+        wf.sheet_state = "hidden"
     wb.active = 0
     buf = BytesIO()
     wb.save(buf)
