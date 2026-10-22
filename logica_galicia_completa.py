@@ -3049,22 +3049,36 @@ class Apareo:
             if abs(sm - se) <= tol:
                 self._cerrar(list(g.index), regla)
 
-    def subconjunto_categoria(self, mask_a, mask_b, tol, regla, max_dias=15):
-        """Un renglón de A contra un subconjunto de B de la misma categoría y signo, a pocos
-        días, de cualquier tamaño (hasta 40 candidatos). Solo si la combinación es única."""
+    def subconjunto_categoria(self, mask_a, mask_b, tol, regla, max_dias=15, misma_categoria=True):
+        """Un renglón de A contra un subconjunto de B del mismo signo, de cualquier tamaño (hasta
+        40 candidatos): de la misma categoría y a pocos días, o sin esas condiciones
+        (misma_categoria=False, max_dias=None). Solo si la combinación es única; si hay varias
+        que solo difieren en renglones de igual importe (p. ej. un asiento cargado dos veces),
+        se toma una y lo repetido queda pendiente."""
         for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
             if self.p.at[ia, "estado"] != "pendiente":
                 continue
             a = self.p.loc[ia]
-            if str(a["categoria"]) in ("0", "nan", "") or pd.isna(a["fecha"]):
+            if misma_categoria and str(a["categoria"]) in ("0", "nan", ""):
                 continue
             cand = self._pend(mask_b)
-            cand = cand[(cand.index != ia) & (cand["categoria"] == a["categoria"])
-                        & (np.sign(cand["importe"]) == np.sign(a["importe"]))
-                        & ((cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias))]
+            cand = cand[(cand.index != ia) & (np.sign(cand["importe"]) == np.sign(a["importe"]))
+                        & (cand["importe"].abs() <= abs(a["importe"]) + tol)]
+            if misma_categoria:
+                cand = cand[cand["categoria"] == a["categoria"]]
+            if max_dias is not None:
+                if pd.isna(a["fecha"]):
+                    continue
+                cand = cand[(cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias)]
             if len(cand) < 2 or len(cand) > 40:
                 continue
             sel = _subconjunto_exacto(list(cand["importe"]), float(a["importe"]), tol=tol)
+            if not sel:
+                # combinaciones repetidas solo por importes iguales: se evalúa sin repetidos
+                unicos = cand.drop_duplicates("importe")
+                if len(unicos) < len(cand) and len(unicos) >= 2:
+                    s2 = _subconjunto_exacto(list(unicos["importe"]), float(a["importe"]), tol=tol)
+                    sel = [list(cand.index).index(unicos.index[i]) for i in s2] if s2 else []
             if sel and len(sel) >= 2:
                 self._cerrar([ia] + [cand.index[i] for i in sel], regla)
 
@@ -3559,6 +3573,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.uno_a_uno(ant_e, es_M & per, TOL_CRUCE, "Pendiente anterior registrado en el período")
     ap.combinacion(retro_m | (es_M & per), ant_e, TOL_CRUCE, "Pendientes anteriores registrados en un asiento", vinculo="categoria")
     ap.combinacion(ant_e, retro_m, TOL_CRUCE, "Pendiente anterior registrado en varios asientos", vinculo="ninguno")
+    # mismo caso con más de 4 asientos (p. ej. ERSA: Plan Afip 31.799.512,86 = 5 cuotas del asiento 85998)
+    ap.subconjunto_categoria(ant_e, retro_m, 0.05, "Pendiente anterior registrado en varios asientos",
+                             max_dias=None, misma_categoria=False)
     ap.categoria_vs_sin_categoria(ant_e, retro_m, TOL_CENTAVOS,
                                   "Pendientes anteriores de una categoría registrados juntos")
     ap.categoria_vs_sin_categoria(ant_e, es_M & per, TOL_CENTAVOS,
