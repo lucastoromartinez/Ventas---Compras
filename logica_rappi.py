@@ -199,11 +199,144 @@ def _nro_factura_desde_nombre_archivo(nombre_archivo):
     return stem or None
 
 
+def _es_formato_nuevo(words):
+    """Facturas Rappi emitidas desde el punto de venta 0002 (sep-2026 en
+    adelante): el número viene como 'No.A-0002-01965451' junto a 'Punto de Vta'
+    y la fecha como 'Fecha de Emisión:'."""
+    return any(w['text'].startswith('No.') and re.search(r'\d{4}-\d{8}$', w['text']) for w in words)
+
+
+def _parse_factura_nueva(words, nombre_archivo=None):
+    """Formato nuevo: los ítems usan códigos numéricos (75000187, 75000190,
+    75000188), el precio unitario va en la línea de arriba y hay columna de
+    descuento. Devuelve el mismo diccionario que el formato anterior."""
+    COL = {'cod': (36, 160), 'cant': (160, 185), 'desc': (185, 370),
+           'punit': (370, 430), 'ptotal': (500, 600)}
+    IMP = {'codigo': (36, 340), 'alicuota': (420, 490), 'impuesto': (490, 600)}
+
+    def x_in(w, rng): return rng[0] <= w['x0'] < rng[1]
+
+    def unir(row_words):
+        ordenadas = sorted(row_words, key=lambda w: (round(w['top']), w['x0']))
+        return ' '.join(w['text'] for w in ordenadas).strip()
+
+    header_top   = next(w['top'] for w in words if w['text'] == 'Cod.' and w['x0'] < 200)
+    subtotal_top = next(w['top'] for w in words if w['text'] == 'Subtotal:')
+    det_top      = next(w['top'] for w in words if w['text'] == 'Código' and w['top'] > subtotal_top)
+    letras_top   = next(w['top'] for w in words if w['text'] == 'Monto' and w['top'] > det_top)
+    total_top    = next(w['top'] for w in words if w['text'] == 'Total:' and w['top'] > subtotal_top)
+
+    # Número de factura: 'No.A-0002-01965451' -> '0002-01965451'
+    nro_factura = None
+    for w in words:
+        m = re.search(r'(\d{4}-\d{8})$', w['text'])
+        if w['text'].startswith('No.') and m:
+            nro_factura = m.group(1)
+            break
+    if not nro_factura:
+        nro_factura = _nro_factura_desde_nombre_archivo(nombre_archivo)
+
+    # PID (solo en las de posicionamiento / publicidad)
+    pid = None
+    for i, w in enumerate(words):
+        if w['text'] == 'PID:' and i + 1 < len(words):
+            pid = int(words[i + 1]['text'])
+            break
+
+    # Fecha de emisión (puede venir sin cero a la izquierda: '2/10/2026')
+    fecha_factura = None
+    for i, w in enumerate(words):
+        if w['text'] == 'Emisión:':
+            for x in words[i + 1:]:
+                m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', x['text'])
+                if abs(x['top'] - w['top']) < 3 and m:
+                    fecha_factura = f'{m.group(1).zfill(2)}/{m.group(2).zfill(2)}/{m.group(3)}'
+                    break
+            break
+
+    tbl_words = [w for w in words if header_top + 3 < w['top'] < subtotal_top - 3]
+
+    date_pattern   = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+    dates_found    = [w['text'] for w in tbl_words if date_pattern.match(w['text']) and x_in(w, COL['desc'])]
+    inicio_periodo = dates_found[0] if len(dates_found) >= 1 else None
+    fin_periodo    = dates_found[1] if len(dates_found) >= 2 else None
+
+    # Cada ítem termina en la línea que trae el P.Total; arriba quedan la
+    # descripción y el P.Unit.
+    ptotal_anchors = sorted(
+        [w for w in tbl_words if x_in(w, COL['ptotal']) and re.match(r'^-?\d', w['text'])],
+        key=lambda w: w['top']
+    )
+    rows = []
+    t_start = header_top + 3
+    for anchor in ptotal_anchors:
+        t_end = anchor['top'] + 3
+        rw = [w for w in tbl_words if t_start <= w['top'] < t_end]
+        cod_vals  = [w['text'] for w in rw if x_in(w, COL['cod']) and w['text'].isdigit()]
+        cant_vals = [w['text'] for w in rw if x_in(w, COL['cant']) and re.match(r'^\d', w['text'])]
+        rows.append({
+            'Cod':         cod_vals[0] if cod_vals else '',
+            'Cant':        cant_vals[0] if cant_vals else None,
+            'Descripción': unir([w for w in rw if x_in(w, COL['desc']) or (x_in(w, COL['cod']) and not w['text'].isdigit())]),
+            'Imp':         None,
+            'P.Unit':      unir([w for w in rw if x_in(w, COL['punit'])]),
+            'P.Total':     anchor['text'],
+        })
+        t_start = t_end
+    df_main = pd.DataFrame(rows, columns=['Cod', 'Cant', 'Descripción', 'Imp', 'P.Unit', 'P.Total'])
+
+    imp_words = [w for w in words if det_top + 3 < w['top'] < letras_top - 3]
+    ali_anchors = sorted(
+        [w for w in imp_words if x_in(w, IMP['alicuota']) and '%' in w['text']],
+        key=lambda w: w['top']
+    )
+    imp_rows = []
+    for anchor in ali_anchors:
+        rw = [w for w in imp_words if abs(w['top'] - anchor['top']) < 3]
+        impuesto = unir([w for w in rw if x_in(w, IMP['impuesto'])])
+        imp_rows.append({
+            'Cod':         'Detalle de Impuesto',
+            'Cant':        None,
+            'Descripción': unir([w for w in rw if x_in(w, IMP['codigo'])]),
+            'Imp':         anchor['text'],
+            'P.Unit':      impuesto,
+            'P.Total':     impuesto,
+        })
+
+    df = pd.concat([df_main, pd.DataFrame(imp_rows)], ignore_index=True)
+
+    es_publicidad = (
+        df_main['Cod'].eq('75000188').any()
+        or df_main['Descripción'].str.lower().str.contains('posicionamiento', na=False).any()
+    )
+    tipo = 'publicidad' if es_publicidad else 'servicios'
+
+    total_words = sorted(
+        [w for w in words if abs(w['top'] - total_top) < 3 and w['x0'] > 500],
+        key=lambda w: w['x0']
+    )
+    total_factura = ' '.join(w['text'] for w in total_words) or None
+
+    return {
+        'nro_factura':    nro_factura,
+        'pid':            pid,
+        'tipo':           tipo,
+        'fecha_factura':  fecha_factura,
+        'inicio_periodo': inicio_periodo,
+        'fin_periodo':    fin_periodo,
+        'total_factura':  total_factura,
+        'df':             df,
+    }
+
+
 def _parse_factura(file_obj, nombre_archivo=None):
     with pdfplumber.open(io.BytesIO(file_obj.read())) as pdf:
         words = pdf.pages[0].extract_words()
 
-    COL = {'cod':(36,115), 'cant':(115,158), 'desc':(158,379),
+    if _es_formato_nuevo(words):
+        return _parse_factura_nueva(words, nombre_archivo)
+
+    COL ={'cod':(36,115), 'cant':(115,158), 'desc':(158,379),
            'imp':(379,440), 'punit':(400,500), 'ptotal':(500,600)}
     IMP = {'codigo':(200,257), 'alicuota':(316,363), 'impuesto':(363,520)}
 
@@ -354,7 +487,12 @@ def _parse_factura(file_obj, nombre_archivo=None):
 def importar_facturas(archivos_pdf):
     facturas = []
     for f in archivos_pdf:
-        factura = _parse_factura(f, getattr(f, 'name', None))
+        nombre = getattr(f, 'name', None)
+        try:
+            factura = _parse_factura(f, nombre)
+        except StopIteration:
+            # Falta alguno de los rótulos que ubican las tablas del PDF.
+            raise ValueError(f"{nombre}: formato de factura no reconocido") from None
         facturas.append(factura)
     return facturas
 
