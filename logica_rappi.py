@@ -206,12 +206,23 @@ def _es_formato_nuevo(words):
     return any(w['text'].startswith('No.') and re.search(r'\d{4}-\d{8}$', w['text']) for w in words)
 
 
+# Formato nuevo: cada código numérico se rotula con el nombre del concepto del
+# formato anterior, que es lo que buscan la asignación y los cruces contra la
+# liquidación. Solo 75000187 trae descuento: es el DAR, que en la liquidación
+# va en "Descuento por inversión de Rappi ... sobre Uso y alquiler ... DAR".
+CODIGOS_FORMATO_NUEVO = {
+    '75000187': 'AR-Comisiones Restaurant',                   # Uso y alquiler de plataforma Rappi
+    '75000190': 'AR-BankFee Restaurantes',                    # Tarifa transaccional
+    '75000188': 'Servicios de publicidad indexaccion Rappi',  # Cuota de RappiAds
+}
+
+
 def _parse_factura_nueva(words, nombre_archivo=None):
     """Formato nuevo: los ítems usan códigos numéricos (75000187, 75000190,
     75000188), el precio unitario va en la línea de arriba y hay columna de
     descuento. Devuelve el mismo diccionario que el formato anterior."""
     COL = {'cod': (36, 160), 'cant': (160, 185), 'desc': (185, 370),
-           'punit': (370, 430), 'ptotal': (500, 600)}
+           'punit': (370, 430), 'dto': (430, 500), 'ptotal': (500, 600)}
     IMP = {'codigo': (36, 340), 'alicuota': (420, 490), 'impuesto': (490, 600)}
 
     def x_in(w, rng): return rng[0] <= w['x0'] < rng[1]
@@ -226,10 +237,11 @@ def _parse_factura_nueva(words, nombre_archivo=None):
     letras_top   = next(w['top'] for w in words if w['text'] == 'Monto' and w['top'] > det_top)
     total_top    = next(w['top'] for w in words if w['text'] == 'Total:' and w['top'] > subtotal_top)
 
-    # Número de factura: 'No.A-0002-01965451' -> '0002-01965451'
+    # Número de factura: 'No.A-0002-01965451' -> 'A-0002-01965451' (las
+    # conciliaciones reconocen las facturas del cuadro por ese formato)
     nro_factura = None
     for w in words:
-        m = re.search(r'(\d{4}-\d{8})$', w['text'])
+        m = re.search(r'(A-\d{4}-\d{8})$', w['text'])
         if w['text'].startswith('No.') and m:
             nro_factura = m.group(1)
             break
@@ -274,14 +286,32 @@ def _parse_factura_nueva(words, nombre_archivo=None):
         rw = [w for w in tbl_words if t_start <= w['top'] < t_end]
         cod_vals  = [w['text'] for w in rw if x_in(w, COL['cod']) and w['text'].isdigit()]
         cant_vals = [w['text'] for w in rw if x_in(w, COL['cant']) and re.match(r'^\d', w['text'])]
+        codigo      = cod_vals[0] if cod_vals else ''
+        descripcion = unir([w for w in rw if x_in(w, COL['desc']) or (x_in(w, COL['cod']) and not w['text'].isdigit())])
+        p_unit      = unir([w for w in rw if x_in(w, COL['punit'])])
+        descuento   = unir([w for w in rw if x_in(w, COL['dto'])])
+        cod         = f"{codigo} {CODIGOS_FORMATO_NUEVO.get(codigo, '')}".strip()
+
+        # Con descuento, el ítem se abre en bruto (P.Unit) y descuento, como
+        # vienen en la liquidación; sin descuento, P.Unit y P.Total coinciden.
+        hay_descuento = bool(re.search(r'[1-9]', descuento))
         rows.append({
-            'Cod':         cod_vals[0] if cod_vals else '',
+            'Cod':         cod,
             'Cant':        cant_vals[0] if cant_vals else None,
-            'Descripción': unir([w for w in rw if x_in(w, COL['desc']) or (x_in(w, COL['cod']) and not w['text'].isdigit())]),
+            'Descripción': descripcion,
             'Imp':         None,
-            'P.Unit':      unir([w for w in rw if x_in(w, COL['punit'])]),
-            'P.Total':     anchor['text'],
+            'P.Unit':      p_unit,
+            'P.Total':     p_unit if hay_descuento else anchor['text'],
         })
+        if hay_descuento:
+            rows.append({
+                'Cod':         f'{codigo} Descuento por inversion de Rappi DAR',
+                'Cant':        None,
+                'Descripción': descripcion,
+                'Imp':         None,
+                'P.Unit':      f'-{descuento}',
+                'P.Total':     f'-{descuento}',
+            })
         t_start = t_end
     df_main = pd.DataFrame(rows, columns=['Cod', 'Cant', 'Descripción', 'Imp', 'P.Unit', 'P.Total'])
 
@@ -306,7 +336,7 @@ def _parse_factura_nueva(words, nombre_archivo=None):
     df = pd.concat([df_main, pd.DataFrame(imp_rows)], ignore_index=True)
 
     es_publicidad = (
-        df_main['Cod'].eq('75000188').any()
+        df_main['Cod'].str.startswith('75000188').any()
         or df_main['Descripción'].str.lower().str.contains('posicionamiento', na=False).any()
     )
     tipo = 'publicidad' if es_publicidad else 'servicios'
