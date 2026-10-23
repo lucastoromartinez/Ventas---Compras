@@ -744,7 +744,9 @@ def _cruce_publicidad(df_publicidad, df_liquidacion):
 
     match_liq = df_liquidacion.loc[idx_match_liq].reset_index(drop=True)
     falta_liq = df_liquidacion.drop(index=idx_match_liq).reset_index(drop=True)
-    match_pub = df_publicidad.loc[idx_match_pub].reset_index(drop=True)
+    # Las filas de la factura conservan su índice: procesar_liquidaciones lo usa
+    # para saber qué líneas de la factura no encontraron concepto en la liquidación.
+    match_pub = df_publicidad.loc[idx_match_pub]
     return match_pub, match_liq, falta_liq
 
 
@@ -817,12 +819,74 @@ def _cruce_servicios(df_servicios, falta_pub):
 
     match_liq = falta_pub.loc[todos_liq].reset_index(drop=True)
     falta_fac = falta_pub.drop(index=todos_liq).reset_index(drop=True)
-    return df_servicios.loc[todos_srv].reset_index(drop=True), match_liq, falta_fac
+    return df_servicios.loc[todos_srv], match_liq, falta_fac
 
 
 # ─────────────────────────────────────────────
 # PROCESAMIENTO POR LIQUIDACIÓN
 # ─────────────────────────────────────────────
+
+# Líneas de factura que se cruzan por concepto cuando el importe no coincide:
+# (texto que identifica la línea en la factura, concepto de la liquidación,
+# rótulo de la diferencia). En el formato nuevo Rappi factura la percepción de
+# IVA RG 5319 sobre la venta más la tarifa transaccional, pero en la liquidación
+# descuenta solo el 1% de la venta: difieren en el 1% de la tarifa.
+CRUCES_POR_CONCEPTO = [
+    ('5319', 'SUM of Impuestos Percepción de IVA', 'SUM of Diferencia Percepción de IVA RG 5319'),
+]
+
+
+def _cruce_lineas_sin_match(lineas, falta_liq):
+    """Cruza las líneas de factura que no encontraron su importe en la
+    liquidación. Las de CRUCES_POR_CONCEPTO se emparejan con el concepto de la
+    liquidación (el de importe más cercano si hay varios) y la diferencia queda
+    como falta; las que no tienen concepto en la liquidación quedan como falta
+    por el total. Los importes de falta van con el signo de la liquidación, de
+    modo que el cuadro de conceptos siga sumando lo mismo que la liquidación."""
+    falta_liq = falta_liq.copy()
+    match_rows, falta_rows = [], []
+
+    def regla_de(fila):
+        return next((r for r in CRUCES_POR_CONCEPTO if r[0] in str(fila['Descripción'])), None)
+
+    # Todas las parejas posibles línea-concepto, de la más parecida en importe a
+    # la menos: así una línea chica de otra factura no se queda con el concepto
+    # que corresponde a la línea de importe parecido.
+    parejas = sorted(
+        (abs(abs(falta_liq.loc[j, 'Total']) - abs(fila['P.Total'])), i, j)
+        for i, (_, fila) in enumerate(lineas) if regla_de(fila)
+        for j in falta_liq.index[falta_liq['Valores'] == regla_de(fila)[1]]
+    )
+    emparejadas, usadas = {}, set()
+    for _, i, j in parejas:
+        if i not in emparejadas and j not in usadas:
+            emparejadas[i] = j
+            usadas.add(j)
+
+    for i, (nro_factura, fila) in enumerate(lineas):
+        regla   = regla_de(fila)
+        importe = fila['P.Total']
+        if i in emparejadas:
+            fila_liq = falta_liq.loc[emparejadas[i]]
+            match_rows.append({**fila_liq.to_dict(), 'nro_factura': nro_factura})
+            # La liquidación descuenta el concepto en negativo y la factura lo
+            # cobra en positivo: la suma es lo cobrado de más (o de menos).
+            diferencia = round(fila_liq['Total'] + importe, 2)
+            if abs(diferencia) >= 0.01:
+                falta_rows.append({'Grupo': fila_liq['Grupo'], 'Valores': regla[2],
+                                   'Total': diferencia, 'nro_factura': nro_factura})
+        else:
+            valores = regla[2] if regla else f"SUM of Línea de factura sin concepto en la liquidación: {fila['Descripción']}"
+            falta_rows.append({'Grupo': 'Impuestos' if fila['Cod'] == 'Detalle de Impuesto' else None,
+                               'Valores': valores, 'Total': round(importe, 2), 'nro_factura': nro_factura})
+
+    falta_liq = falta_liq.drop(index=list(usadas))
+
+    match_liq = pd.DataFrame(match_rows)
+    if falta_rows:
+        falta_liq = pd.concat([falta_liq, pd.DataFrame(falta_rows)], ignore_index=True)
+    return match_liq, falta_liq.reset_index(drop=True)
+
 
 def procesar_liquidaciones(liquidaciones):
     COLUMNAS_FAC = ['Cod', 'Cant', 'Descripción', 'Imp', 'P.Unit', 'P.Total']
@@ -835,12 +899,16 @@ def procesar_liquidaciones(liquidaciones):
         all_match_liq = []
         falta_actual  = df_liq.copy()
 
+        # Líneas de factura que no encontraron su importe en la liquidación
+        lineas_sin_match = []
+
         if not facturas_pub:
             _, _, falta_actual = _cruce_publicidad(pd.DataFrame(columns=COLUMNAS_FAC), falta_actual)
         else:
             for factura in facturas_pub:
                 df_pub = factura['df'].copy().reset_index(drop=True)
-                _, match_liq, falta_actual = _cruce_publicidad(df_pub, falta_actual)
+                match_fac, match_liq, falta_actual = _cruce_publicidad(df_pub, falta_actual)
+                lineas_sin_match += [(factura['nro_factura'], fila) for _, fila in df_pub.drop(index=match_fac.index).iterrows()]
                 if not match_liq.empty:
                     match_liq = match_liq.copy()
                     match_liq['nro_factura'] = factura['nro_factura']
@@ -851,11 +919,17 @@ def procesar_liquidaciones(liquidaciones):
         else:
             for factura in facturas_srv:
                 df_srv = factura['df'].copy().reset_index(drop=True)
-                _, match_liq, falta_actual = _cruce_servicios(df_srv, falta_actual)
+                match_fac, match_liq, falta_actual = _cruce_servicios(df_srv, falta_actual)
+                lineas_sin_match += [(factura['nro_factura'], fila) for _, fila in df_srv.drop(index=match_fac.index).iterrows()]
                 if not match_liq.empty:
                     match_liq = match_liq.copy()
                     match_liq['nro_factura'] = factura['nro_factura']
                     all_match_liq.append(match_liq)
+
+        if lineas_sin_match:
+            match_liq, falta_actual = _cruce_lineas_sin_match(lineas_sin_match, falta_actual)
+            if not match_liq.empty:
+                all_match_liq.append(match_liq)
 
         liq['match_liquidacion'] = (
             pd.concat(all_match_liq, ignore_index=True)
