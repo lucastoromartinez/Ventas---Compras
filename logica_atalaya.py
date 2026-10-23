@@ -57,51 +57,15 @@ def depurar_rappi(df):
         df["Venta Bruta"] + df["Descuento de Producto asumido por el aliado"]
     ).round(2)
 
-    columnas_a_dropear = [
-        "Tiempo de preparación", "Prime  ", "Retroactivo", "Porcentaje de Cancelación",
-        "Porcentaje de Uso y alquiler de plataforma Rappi",
-        "Porcentaje de Uso y alquiler de plataforma Rappi Prime", "Tipo de transacción",
-        "Ventas base por Uso y alquiler de plataforma Rappi (informativo)", "Venta Bruta",
-        "Descuento en créditos", "Descuento de Producto asumido por el aliado",
-        "Descuentos por inversión de Rappi DAR", "Costo de Domicilio - Propinas (marketplace)",
-        "Meal Vouchers", "Total pagado por Repartidor independiente al Aliado en Efectivo",
-        "Total pagado por el Usuario al Aliado  (marketplace)", "Descuento por Domicilio gratis",
-        "Compensaciones", "Costo Canceladas", "Uso y alquiler de plataforma Rappi",
-        "Descuento por inversión de Rappi  a aplicar sobre Uso y alquiler de plataforma Rappi DAR",
-        "Uso y alquiler de plataforma Rappi Prime", "Tarifa de Integration", "Tarifa por demora",
-        "Tarifa Transaccional", "Tarifa por activación (marketplace)", "Cuota de RappiAds",
-        "Tarifa de servicio al usuario", "Contracargos", "Descuento por Service Fee",
-        "Servicio de Cargo", "Descuento por pago anticipado", "Subtotal antes de impuestos",
-        "IVA Uso y alquiler de plataforma Rappi",
-        "Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler de plataforma Rappi DAR",
-        "IVA Campañas", "Reteiva Uso y alquiler de plataforma Rappi", "Percepcion",
-        "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE BA DAR",
-        "CABA  ", "CBDA  ", "SANTA FE ", "Retencion Ganancias ", "Retencion Buenos Aires",
-        "IVA Rappi Ads", "ReteIVA Rappi Ads", "IVA Descuento por Service Fee",
-        "Retefuente Descuento por Service Fee", "IVA Servicio de Cargo",
-        "Percepción Servicio de Cargo", "Percepción Córdoba Servicio de Cargo",
-        "Percepción Corrientes Servicio de Cargo", "Percepción Tucuman Servicio de Cargo",
-        "Percepcion Cordoba",
-        "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE CÓRDOBA DAR",
-        "Retencion Cordoba ", "Percepción Tucuman",
-        "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE TUCUMAN DAR",
-        "Retención Tucuman", "Perceptión Corrientes",
-        "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE CORRIENTES DAR",
-        "Percepción Campañas", "Percepción Campañas Tucuman", "Percepción Campañas Corrientes",
-        "Percepción Campañas Cordoba", "Percepción de IVA", "Unnamed: 75",
-        "Percepción activación fee", "Percepción tarifa de servicio",
-        "Percepción Cordoba Tarifa de servicio", "Percepción Current sobre Tarifa de servicio",
-        "Percepción tucuman sobre Tarifa de servicio", "Valor Ajustes Manuales",
-        "Deuda Periodos Anteriores", "Cuota de préstamo",
-        "Cashback en Rappi creditos asumido por el aliado",
-        "Challenge Rappi créditos asumidos por el aliado", "Cashback 15 mis o gratis",
-        "Valor Neto", "Valor a transferir",
-        "ID relacionado (global offer / campaña ADs / paidlot deuda)",
-        "ID Paidlot retroactivo", "Razon (Ajuste / RADs)",
-        "Descripción o comentarios (Ajustes  / RADs)  ", "Hora"
+    # Se conservan solo las columnas que usa el cruce: Rappi agrega y renombra
+    # columnas en la hoja Detalle (p.ej. 'Prime' pasó a 'Pro'), y descartar por
+    # nombre las que no se usan dejaba pasar las nuevas al resultado.
+    columnas_a_conservar = [
+        "Fecha de creación orden", "ID de la órden", "ID del paidlot", "ID de la tienda",
+        "Nombre de la tienda", "Estado de la órden", "Ventas Totales",
     ]
 
-    df = df.drop(columns=columnas_a_dropear, errors="ignore")
+    df = df[[c for c in columnas_a_conservar if c in df.columns]]
 
     return df
 
