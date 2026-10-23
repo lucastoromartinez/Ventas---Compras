@@ -2672,11 +2672,6 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
         snap["Fecha"] = pd.to_datetime(snap["Fecha"], errors="coerce")
         if saldo_ant is not None:
             snap_final = saldo_ant + pd.to_numeric(snap["Importe"], errors="coerce").sum()
-    # Foto completa del mayor (hoja oculta "Foto mayor", hasta 12 meses): si existe,
-    # reemplaza a la foto parcial (Match Mayor + Faltante Extracto) como base de comparación.
-    foto = None
-    if HOJA_FOTO in xls.sheet_names:
-        foto = _leer_foto_mayor(pd.read_excel(xls, sheet_name=HOJA_FOTO))
     if "Extracto_cat" in xls.sheet_names:
         f = pd.to_datetime(pd.read_excel(xls, sheet_name="Extracto_cat", usecols=[0]).iloc[:, 0], errors="coerce")
         ext_desde, ext_hasta = f.min(), f.max()
@@ -2709,6 +2704,15 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     else:
         cuenta, criterio = next(iter(bloques)), "primera cuenta de la hoja"
     blo = bloques[cuenta]
+    # Foto completa del mayor (hoja oculta, hasta 12 meses): si existe, reemplaza a la foto
+    # parcial (Match Mayor + Faltante Extracto) como base de comparación. Con varias cuentas
+    # en el archivo, la hoja lleva la cuenta en el nombre ("Foto mayor Cta 2213-8"); la hoja
+    # sin cuenta solo vale si el archivo tiene una sola cuenta.
+    foto = None
+    hoja_foto = next((h for h in (_nombre_hoja_foto(cuenta), HOJA_FOTO) if h in xls.sheet_names
+                      and (h != HOJA_FOTO or len(bloques) == 1)), None)
+    if hoja_foto:
+        foto = _leer_foto_mayor(pd.read_excel(xls, sheet_name=hoja_foto))
     lin = pd.DataFrame(blo["lineas"])
     if not lin.empty:
         signo = lin["seccion"].map({"ING_MAYOR": 1, "SAL_MAYOR": -1, "CRED_BANCO": 1, "DEB_BANCO": -1})
@@ -2789,7 +2793,128 @@ def _completar_lineas_sin_dato(lin, xls):
     return lin
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PENDIENTES POR PERSONA (libro aparte, como la solapa "Pendientes" del equipo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ORDEN_PERSONAS = ["MERI", "JOACO", "FIO", "MARU", "LUCAS"]
+
+
+def _persona_de_categoria(cat):
+    """A quién se le pasa cada movimiento del banco sin registrar, según la categoría
+    (criterio de las solapas "Pendientes" de las conciliaciones del equipo).
+    Devuelve None para lo que no se reparte (gastos bancarios)."""
+    c = _norm(cat)
+    if not c or c in ("0", "nan") or "gastosbancarios" in c or c.startswith("gb"):
+        return None
+    if c.startswith("acred") or "propina" in c:
+        return "MERI"
+    if "echeq" in c:
+        return "JOACO"
+    if "cobranza" in c:
+        return "MARU"
+    if "prestamo" in c or "planafip" in c or "planesafip" in c or "descuento" in c:
+        return "LUCAS"
+    return "FIO"
+
+
+def armar_pendientes_por_persona(P, ext_c, hasta, razon_social="", cuenta=""):
+    """Libro de Excel con los movimientos del banco del período que todavía no están en el
+    mayor, repartidos por persona según la categoría. Las acreditaciones y propinas (MERI)
+    van como un total por categoría; el resto, movimiento por movimiento con los datos del
+    extracto. No incluye gastos bancarios ni pendientes de meses anteriores (esos ya están
+    en la CC). Devuelve los bytes del archivo."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    pend = P[(P["estado"] == "pendiente") & (P["lado"] == "E") & (P["origen"] == "Período")].copy()
+    # AFIP: los débitos automáticos son cuotas de planes de pago ("Plan Afip", LUCAS); las
+    # transferencias/VEP son impuestos del mes ("Imp. AFIP", FIO)
+    es_afip = pend["categoria"].astype(str).map(_norm).isin(["impafip", "planafip"])
+    deb_aut = pend["detalle"].astype(str).map(_norm).str.contains("debautom")
+    pend.loc[es_afip & deb_aut, "categoria"] = "Plan Afip"
+    pend.loc[es_afip & ~deb_aut, "categoria"] = "Imp. AFIP"
+    pend["persona"] = pend["categoria"].map(_persona_de_categoria)
+    pend = pend[pend["persona"].notna()]
+    ext = ext_c.set_index(ext_c["_rid"].astype(str)) if "_rid" in ext_c else pd.DataFrame()
+    extra = ["grupo de conceptos", "concepto", "numero de terminal", "observaciones cliente",
+             "numero de comprobante", "leyenda adicional1", "leyenda adicional2",
+             "leyenda adicional3", "leyenda adicional4"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pendientes"
+    neg = Font(name="Arial", size=10, bold=True)
+    normal = Font(name="Arial", size=9)
+    titulo_fill = PatternFill("solid", fgColor="D99694")
+    head_fill = PatternFill("solid", fgColor="F2DCDB")
+    fino = Side(style="thin", color="999999")
+    caja = Border(left=fino, right=fino, top=fino, bottom=fino)
+    num = '#,##0.00;-#,##0.00;"-"'
+    for col, w in zip("ABCDEFGHIJKLMNO", [3, 12, 34, 22, 15, 15, 24, 34, 12, 14, 14, 30, 22, 22, 18]):
+        ws.column_dimensions[col].width = w
+    r = 2
+    ws.cell(r, 2, f"{razon_social}  -  Pendientes del banco por registrar al {hasta:%d/%m/%Y}".strip(" -")).font = Font(name="Arial", size=12, bold=True)
+    r += 1
+    ws.cell(r, 2, "Movimientos del banco que todavía no están en el mayor. Pintar de verde lo que ya se registró "
+                  "y dejar al lado cualquier observación.").font = Font(name="Arial", size=9, italic=True)
+    r += 2
+    for persona in ORDEN_PERSONAS:
+        g = pend[pend["persona"] == persona]
+        if g.empty:
+            continue
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=4)
+        c = ws.cell(r, 3, f"PENDIENTES PARA {persona}")
+        c.font, c.fill, c.alignment = neg, titulo_fill, Alignment(horizontal="center")
+        r += 1
+        if cuenta:
+            ws.cell(r, 2, cuenta).font = neg
+            r += 1
+        ws.cell(r, 2, "BANCO").font = neg
+        r += 1
+        cab = ["Fecha", "Descripción", "Conciliación", "Débitos", "Créditos"] + \
+              (["Grupo de conceptos", "Concepto", "Terminal", "Observaciones", "Comprobante",
+                "Leyenda 1", "Leyenda 2", "Leyenda 3", "Leyenda 4"] if persona != "MERI" else [])
+        for j, t in enumerate(cab, start=2):
+            c = ws.cell(r, j, t)
+            c.font, c.fill, c.border = Font(name="Arial", size=9, bold=True), head_fill, caja
+        r += 1
+        if persona == "MERI":
+            filas = [(hasta, "", cat, x.sum()) for cat, x in g.groupby("categoria")["importe"]]
+            filas = [(f, d, cat, imp, None) for f, d, cat, imp in filas]
+        else:
+            filas = []
+            for _, f in g.sort_values(["categoria", "fecha"]).iterrows():
+                e = ext.loc[str(f["rid"])] if str(f["rid"]) in ext.index else None
+                if isinstance(e, pd.DataFrame):
+                    e = e.iloc[0]
+                desc = e["descripcion"] if e is not None else f["detalle"]
+                filas.append((f["fecha"], desc, f["categoria"], f["importe"], e))
+        for fecha, desc, cat, imp, e in filas:
+            vals = [fecha.to_pydatetime() if isinstance(fecha, pd.Timestamp) else fecha,
+                    "" if str(desc) in ("nan", "None") else desc, cat,
+                    -imp if imp < 0 else 0, imp if imp > 0 else 0]
+            if persona != "MERI":
+                vals += ["" if e is None or str(e.get(k)) in ("nan", "None") else e.get(k) for k in extra]
+            for j, v in enumerate(vals, start=2):
+                c = ws.cell(r, j, v)
+                c.font, c.border = normal, caja
+                if j == 2:
+                    c.number_format = "dd/mm/yyyy"
+                elif j in (5, 6):
+                    c.number_format = num
+            r += 1
+        r += 2
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 HOJA_FOTO = "Foto mayor"
+
+
+def _nombre_hoja_foto(cuenta):
+    nom = re.sub(r"[\\/?*\[\]:]", "", f"{HOJA_FOTO} {cuenta}".strip()) if cuenta else HOJA_FOTO
+    return nom[:31]
 MESES_FOTO = 12
 COLS_FOTO = ["Asiento", "Apunte", "Fecha", "Importe", "Comentario", "Tercero", "Serie"]
 
@@ -3644,6 +3769,11 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                          analista=analista, mes=desde.replace(day=1)),
                     foto=_armar_foto_mayor(may_full[~es_saldo_ant], hasta,
                                            foto_anterior=ant.get("foto_mayor") if ant else None))
+    try:
+        pendientes_xlsx = armar_pendientes_por_persona(P, ext_c, hasta, razon_social or "", control.get("cuenta") or "")
+    except Exception as ex:   # el libro de pendientes no debe impedir la conciliación
+        pendientes_xlsx = None
+        control["aviso_pendientes"] = f"No se pudo armar el libro de pendientes: {ex}"
     stats = {k: control.get(k) for k in ("modo", "saldo_mayor_final", "saldo_ext_final", "diferencia",
                                           "dif_heredada", "retro_identificado", "retro_no_identificado",
                                           "dif_cruce", "dif_redondeo_apareo", "aviso_mayor", "aviso_posterior", "aviso_cuenta")}
@@ -3652,6 +3782,8 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     stats["lineas_cc"] = len(lineas_cc)
     stats["pendientes_anteriores_registrados"] = int((estado_ant.get("estado", pd.Series()) == "Registrado").sum()) if len(estado_ant) else 0
     stats["pendientes_anteriores_vigentes"] = int((estado_ant.get("estado", pd.Series()) == "Vigente").sum()) if len(estado_ant) else 0
+    # Libro aparte con los pendientes del banco repartidos por persona (bytes de un .xlsx)
+    stats["pendientes_xlsx"] = pendientes_xlsx
     return buf, stats
 
 
@@ -4105,7 +4237,8 @@ def _exportar(lineas, detalle, control, retro, estado_ant, bytes_cruce, P, meta,
                          "nombre", "referencia", "importe"]],
                    {"regla aplicada": 45, "nombre": 36, "referencia": 30, "lado (M=mayor, E=extracto)": 12})
     if foto is not None and len(foto):
-        wf = wb.create_sheet(HOJA_FOTO)
+        varias = bool(control.get("otras_cuentas"))
+        wf = wb.create_sheet(_nombre_hoja_foto(control.get("cuenta")) if varias else HOJA_FOTO)
         wf.append(COLS_FOTO)
         for r in foto.itertuples(index=False):
             wf.append([None if (isinstance(v, float) and pd.isna(v)) else
