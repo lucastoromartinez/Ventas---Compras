@@ -160,6 +160,18 @@ with tab_galicia:
                 key="dl_galicia_completa",
             )
 
+            # Libro aparte: pendientes del banco repartidos por persona
+            if s.get("pendientes_xlsx"):
+                st.download_button(
+                    label="Descargar pendientes por persona",
+                    icon=":material/download:",
+                    data=s["pendientes_xlsx"],
+                    file_name="pendientes_galicia.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_galicia_pendientes",
+                )
+
     # ─────────────────────────────────────────
     # MODO CRUCE (lógica original, sin cambios)
     # ─────────────────────────────────────────
