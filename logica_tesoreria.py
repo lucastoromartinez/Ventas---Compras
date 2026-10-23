@@ -449,7 +449,14 @@ def _pares_comision(comisiones, unif, col_fecha, col_monto, tolerancia_pesos, to
 # de un local (ej. "Ingreso préstamo a PB", "Ingreso de sueldos"). Esas
 # líneas no se esperan en "Ingreso efectivo" y se cruzan como cualquier
 # otro movimiento.
-PALABRAS_NO_RECAUDACION = ("prestamo", "sueldo", "devolucion")
+#
+# Las entregas de la recaudadora ("Ingreso recaudadora Aribau del 31 al
+# 16.8") tampoco son parte del "Ingreso efectivo": contabilidad las
+# registra como Cobro N/F y cruzan uno a uno. Si entran al agrupado del
+# mes, el mes no cierra aunque el resto esté bien. "recuadador" cubre el
+# error de tipeo que aparece en la Caja Central.
+PALABRAS_NO_RECAUDACION = ("prestamo", "sueldo", "devolucion",
+                           "recaudador", "recaudacion", "recuadador")
 
 TERCERO_AREA_MARKETING = "area marketing"
 
@@ -474,8 +481,10 @@ def _es_ingreso_efectivo_sistema(texto):
 
 
 def _es_ingreso_recaudacion(texto):
-    """True si el detalle es un ingreso de recaudación: dice "ingreso" y
-    no dice ninguna de PALABRAS_NO_RECAUDACION."""
+    """True si el detalle es un ingreso de recaudación de un local: dice
+    "ingreso" y no dice ninguna de PALABRAS_NO_RECAUDACION. Las entregas
+    de la recaudadora quedan afuera porque contabilidad las registra como
+    Cobro N/F y no dentro del "Ingreso efectivo" del mes."""
     t = _normalizar_texto(texto)
     return "ingreso" in t and not any(p in t for p in PALABRAS_NO_RECAUDACION)
 
@@ -659,16 +668,23 @@ def _palabras_clave(texto):
 
 def _pares_ingreso_otro_concepto(pend_m, unif, col_detalle_michu, col_detalle_unificada,
                                  col_tercero_unificada, tolerancia_pesos, tolerancia_dias=3,
-                                 tolerancia_pct_cobro=0.001):
+                                 tolerancia_pct_cobro=0.001, tolerancia_dias_cobro=31):
     """
     Ingresos de tesorería que contabilidad registró con otro concepto, y
     que por eso no están dentro del "Ingreso de efectivo" del mes:
 
       - "Cobro N/F" del tercero que nombra el ingreso ("Ingreso venta
         Rutini" contra "Cobro N/F IGNACIO YAGUAR RUTINI"), a
-        `tolerancia_dias` y con diferencia de hasta `tolerancia_pct_cobro`.
+        `tolerancia_dias_cobro` y con diferencia de hasta
+        `tolerancia_pct_cobro`. La ventana es amplia porque el tercero
+        confirma el par y contabilidad a veces carga el cobro un mes
+        después o con el mes mal tipeado (ej. "Ingreso venta carne arcos"
+        del 10/09 contra Cobro N/F CARNE ARCOS del 10/10). Si el cobro
+        está a más de `tolerancia_dias`, la observación lo señala.
       - "Vuelta de factura" contra un asiento del mismo importe con signo
         opuesto, a `tolerancia_dias` (signo invertido en contabilidad).
+        Ventana corta: sin tercero, un importe igual lejos en el tiempo
+        puede ser casual.
 
     Devuelve {indice tesorería: (indice contabilidad, tipo, observación)}.
     No marca nada: el segundo intento de ingresos los usa sólo si sacarlos
@@ -689,22 +705,26 @@ def _pares_ingreso_otro_concepto(pend_m, unif, col_detalle_michu, col_detalle_un
         vuelta = "vuelta" in texto_m and "factura" in texto_m
         for i_u, fila_u in libres_u.iterrows():
             dias = abs((fila_u["_fecha_norm"] - fila_m["_fecha_norm"]).days)
-            if dias > tolerancia_dias:
+            if dias > max(tolerancia_dias, tolerancia_dias_cobro):
                 continue
             monto_u = fila_u["_monto_norm"]
-            if vuelta and abs(monto_u + monto_m) <= tolerancia_pesos:
+            if (vuelta and dias <= tolerancia_dias
+                    and abs(monto_u + monto_m) <= tolerancia_pesos):
                 candidatos.append((dias, i_m, i_u, "Signo invertido (vuelta de factura)",
                                    f"Tesorería registra la vuelta de factura como ingreso por "
                                    f"{_fmt_ar(monto_m)} y contabilidad tiene un asiento por "
                                    f"{_fmt_ar(monto_u)}. Verificar el signo del asiento."))
                 continue
-            if (claves and "cobro" in textos_u[i_u] and monto_u > 0
+            if (dias <= tolerancia_dias_cobro
+                    and claves and "cobro" in textos_u[i_u] and monto_u > 0
                     and claves & set((terceros_u[i_u] + " " + textos_u[i_u]).split())
                     and abs(monto_u - monto_m) <= max(tolerancia_pesos, abs(monto_m) * tolerancia_pct_cobro)):
                 dif = round(monto_u - monto_m, 2)
                 obs = "Contabilidad registró el ingreso como cobro al tercero, no dentro del Ingreso de efectivo."
                 if abs(dif) > tolerancia_pesos:
                     obs += f" Diferencia de {_fmt_ar(abs(dif))}."
+                if dias > tolerancia_dias:
+                    obs += f" El cobro está a {_texto_dias(dias)}: verificar la fecha del asiento."
                 candidatos.append((dias, i_m, i_u, "Ingreso registrado como cobro", obs))
 
     pares, usados_u = {}, set()
@@ -801,24 +821,55 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
 
         for i_m in sacados:
             i_u, tipo, obs = pares[i_m]
-            michu.at[i_m, "_revisar"] = True
-            unif.at[i_u, "_revisar"] = True
-            fila_m, fila_u = michu.loc[i_m], unif.loc[i_u]
-            filas_revisar.append({
-                "Tipo Error": tipo,
-                "Fecha Contabilidad": fila_u[col_fecha],
-                "Tercero": fila_u.get(col_tercero_unificada),
-                "Comentario": fila_u[col_detalle_unificada],
-                "Monto Contabilidad": fila_u[col_monto],
-                "Fecha Tesorería": fila_m[col_fecha],
-                "Detalle": fila_m[col_detalle_michu],
-                "Monto Tesorería": fila_m[col_monto],
-                "Diferencia": round(fila_u["_monto_norm"] - fila_m["_monto_norm"], 2),
-                "Días": abs((fila_u["_fecha_norm"] - fila_m["_fecha_norm"]).days),
-                "Observación": obs + f" Sin esta línea los ingresos de {mes[0]}-{mes[1]:02d} "
-                                     "cierran contra el Ingreso de efectivo.",
-            })
+            filas_revisar.append(_fila_revisar_ingreso(
+                michu, unif, i_m, i_u, tipo,
+                obs + f" Sin esta línea los ingresos de {mes[0]}-{mes[1]:02d} "
+                      "cierran contra el Ingreso de efectivo.",
+                col_fecha, col_monto, col_detalle_unificada, col_detalle_michu,
+                col_tercero_unificada))
+
+    # Ingresos registrados como cobro al tercero que siguen sueltos porque
+    # el mes ya cerró sin ellos (en el paso 1 o en este intento). El
+    # tercero y el importe identifican el par, así que no son faltantes:
+    # van a Revisar aunque no hayan hecho falta para cerrar el mes. Ej.:
+    # "Ingreso venta carne arcos" del 10/09 contra Cobro N/F CARNE ARCOS
+    # del 10/10. Las vueltas de factura no entran acá: sin tercero, el par
+    # sólo vale si hace cerrar el mes.
+    for i_m, (i_u, tipo, obs) in pares.items():
+        if tipo != "Ingreso registrado como cobro":
+            continue
+        if (michu.at[i_m, "_matched"] or michu.at[i_m, "_revisar"]
+                or unif.at[i_u, "_matched"] or unif.at[i_u, "_revisar"]):
+            continue
+        f = michu.at[i_m, "_fecha_norm"]
+        filas_revisar.append(_fila_revisar_ingreso(
+            michu, unif, i_m, i_u, tipo,
+            obs + f" Los ingresos de {f.year}-{f.month:02d} no incluyen esta línea.",
+            col_fecha, col_monto, col_detalle_unificada, col_detalle_michu,
+            col_tercero_unificada))
     return contador, meses_conciliados, pd.DataFrame(filas_revisar, columns=COLUMNAS_REVISAR), avisos
+
+
+def _fila_revisar_ingreso(michu, unif, i_m, i_u, tipo, observacion, col_fecha, col_monto,
+                          col_detalle_unificada, col_detalle_michu, col_tercero_unificada):
+    """Marca el par ingreso / asiento con "_revisar" en los dos lados y
+    devuelve su fila para la hoja Revisar."""
+    michu.at[i_m, "_revisar"] = True
+    unif.at[i_u, "_revisar"] = True
+    fila_m, fila_u = michu.loc[i_m], unif.loc[i_u]
+    return {
+        "Tipo Error": tipo,
+        "Fecha Contabilidad": fila_u[col_fecha],
+        "Tercero": fila_u.get(col_tercero_unificada),
+        "Comentario": fila_u[col_detalle_unificada],
+        "Monto Contabilidad": fila_u[col_monto],
+        "Fecha Tesorería": fila_m[col_fecha],
+        "Detalle": fila_m[col_detalle_michu],
+        "Monto Tesorería": fila_m[col_monto],
+        "Diferencia": round(fila_u["_monto_norm"] - fila_m["_monto_norm"], 2),
+        "Días": abs((fila_u["_fecha_norm"] - fila_m["_fecha_norm"]).days),
+        "Observación": observacion,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -1953,12 +2004,14 @@ def cruzar_caja(
     Al terminar el ciclo, segundo intento de ingresos: todo ingreso de
     recaudación sin conciliar, por mes, contra el "Ingreso efectivo" sin
     conciliar del mismo mes. Las líneas con "ingreso" que además dicen
-    préstamo, sueldo o devolución no se tratan como ingresos. Si el mes
-    no cierra, se prueba sumar recaudación de eventos sin "ingreso"
-    ("River vs …", "partido", "show"), que se concilia dentro del
-    agrupado, y sacar ingresos que contabilidad registró con otro
-    concepto (Cobro N/F del tercero que nombra el ingreso, o vuelta de
-    factura con signo invertido), que van con su asiento a Revisar.
+    préstamo, sueldo, devolución o recaudadora no se tratan como
+    ingresos (la recaudadora tampoco entra al paso 1: cruza uno a uno
+    contra su Cobro N/F). Si el mes no cierra, se prueba sumar
+    recaudación de eventos sin "ingreso" ("River vs …", "partido",
+    "show"), que se concilia dentro del agrupado, y sacar ingresos que
+    contabilidad registró con otro concepto (Cobro N/F del tercero que
+    nombra el ingreso, a hasta 31 días, o vuelta de factura con signo
+    invertido, a hasta 3), que van con su asiento a Revisar.
 
     El cruce sólo por importe, sin ventana de fechas, ya no concilia
     solo: esos pares van a "Revisar" (ver SALIDA).
