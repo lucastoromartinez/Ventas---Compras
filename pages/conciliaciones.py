@@ -3,6 +3,7 @@ from estilos import aplicar_estilos, encabezado
 from logica_galicia     import correr_conciliacion_galicia
 from logica_galicia_completa import correr_conciliacion_galicia as correr_conciliacion_galicia_completa
 from logica_hipotecario import correr_conciliacion_hipotecario
+from logica_hipotecario_completa import correr_conciliacion_hipotecario as correr_conciliacion_hipotecario_completa
 from logica_cupones     import correr_conciliacion_cupones_plantilla
 from logica_fiser       import correr_conciliacion_fiser
 from logica_mercadopago import correr_conciliacion_mercadopago
@@ -277,76 +278,214 @@ with tab_galicia:
 # ═══════════════════════════════════════════════
 with tab_hipotecario:
     st.markdown("<br>", unsafe_allow_html=True)
+    modo_hipotecario = st.radio(
+        "Tipo de conciliación",
+        ["Cruce", "Conciliación Completa"],
+        horizontal=True,
+        key="hipotecario_modo",
+    )
 
-    col4, col5 = st.columns(2)
-    with col4:
-        st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
-        archivo_mayor_h = st.file_uploader("mayor_h", type=["xlsx","xls"],
-                                            label_visibility="collapsed", key="mayor_h")
-    with col5:
-        st.markdown('<div class="upload-label">Extracto Hipotecario</div>', unsafe_allow_html=True)
-        archivo_extracto_h = st.file_uploader("extracto_h", type=["xlsx","xls"],
-                                               label_visibility="collapsed", key="extracto_h")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    # ─────────────────────────────────────────
+    # MODO CONCILIACIÓN COMPLETA (en prueba: logica_hipotecario_completa.py)
+    # ─────────────────────────────────────────
+    if modo_hipotecario == "Conciliación Completa":
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
+            archivo_mayor_hc = st.file_uploader("mayor_hc", type=["xlsx","xls"],
+                                                 label_visibility="collapsed", key="mayor_hc")
+        with col2:
+            st.markdown('<div class="upload-label">Extracto Hipotecario</div>', unsafe_allow_html=True)
+            archivo_extracto_hc = st.file_uploader("extracto_hc", type=["xlsx","xls"],
+                                                    label_visibility="collapsed", key="extracto_hc")
 
-    todos_h = all([archivo_mayor_h, archivo_extracto_h])
-    if not todos_h:
-        st.info("Cargá los dos archivos para habilitar la conciliación.")
+        st.caption("Conviene exportar el Mayor desde el mes anterior (o desde enero) "
+                   "para detectar asientos cargados con fecha ya conciliada.")
 
-    boton_h = st.button("Conciliar Hipotecario", disabled=not todos_h,
-                         use_container_width=True, key="btn_hipotecario")
-
-    if boton_h and todos_h:
-        with st.spinner("Procesando Hipotecario..."):
-            try:
-                buf_h, stats_h = correr_conciliacion_hipotecario(
-                    archivo_mayor=archivo_mayor_h,
-                    archivo_extracto=archivo_extracto_h,
-                )
-                st.session_state["resultado_hipotecario"] = {"buf": buf_h, "stats": stats_h}
-            except Exception as e:
-                st.error(f"Error al procesar Hipotecario: {e}")
-
-    if "resultado_hipotecario" in st.session_state:
-        r = st.session_state["resultado_hipotecario"]
-        s = r["stats"]
+        col3, col4 = st.columns(2)
+        with col3:
+            st.markdown('<div class="upload-label optional">Conciliación anterior</div>', unsafe_allow_html=True)
+            archivo_cc_ant_hc = st.file_uploader("cc_ant_hc", type=["xlsx"],
+                                                  label_visibility="collapsed", key="cc_ant_hc")
+        with col4:
+            st.markdown('<div class="upload-label optional">Analista</div>', unsafe_allow_html=True)
+            analista_hc = st.text_input("analista_hc", label_visibility="collapsed", key="analista_hc")
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
-        clase_fm = "error" if s["falta_mayor"]    > 0 else "metric-card"
-        clase_fe = "error" if s["falta_extracto"] > 0 else "metric-card"
+        todo_ok_hc = all([archivo_mayor_hc, archivo_extracto_hc])
 
-        st.markdown(f"""
-        <div class="metric-row">
-            <div class="metric-card">
-                <div class="metric-value">{s['match_exacto']}</div>
-                <div class="metric-label">Match exacto</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{s['match_tolerancia']}</div>
-                <div class="metric-label">Match tolerancia</div>
-            </div>
-            <div class="metric-card {clase_fm}">
-                <div class="metric-value">{s['falta_mayor']}</div>
-                <div class="metric-label">Faltante mayor</div>
-            </div>
-            <div class="metric-card {clase_fe}">
-                <div class="metric-value">{s['falta_extracto']}</div>
-                <div class="metric-label">Faltante extracto</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        if not todo_ok_hc:
+            st.info("Cargá el Mayor y el Extracto para habilitar la conciliación.")
+        elif archivo_cc_ant_hc is None:
+            st.info("Sin conciliación anterior no se controlan pendientes ni asientos retroactivos.")
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.download_button(
-            label="Descargar reporte Hipotecario",
-            icon=":material/download:",
-            data=r["buf"],
-            file_name="conciliacion_hipotecario.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        boton_hc = st.button("Conciliar Hipotecario (completa)", disabled=not todo_ok_hc,
+                             use_container_width=True, key="btn_hipotecario_completa")
+
+        if boton_hc and todo_ok_hc:
+            with st.spinner("Procesando conciliación completa Hipotecario..."):
+                try:
+                    buf_hc, stats_hc = correr_conciliacion_hipotecario_completa(
+                        archivo_mayor=archivo_mayor_hc,
+                        archivo_extracto=archivo_extracto_hc,
+                        archivo_conciliacion_anterior=archivo_cc_ant_hc,
+                        analista=analista_hc or "",
+                    )
+                    st.session_state["resultado_hipotecario_completa"] = {"buf": buf_hc, "stats": stats_hc}
+                except Exception as e:
+                    st.error(f"Error al procesar la conciliación completa: {e}")
+
+        if "resultado_hipotecario_completa" in st.session_state:
+            r = st.session_state["resultado_hipotecario_completa"]
+            s = r["stats"]
+
+            def _fmt(v):
+                if v is None:
+                    return "-"
+                return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+            if s.get("modo"):
+                st.info(f"Modo respecto de la conciliación anterior: {s['modo']}")
+            for clave in ("aviso_cuenta", "aviso_mayor", "aviso_posterior"):
+                if s.get(clave):
+                    st.warning(s[clave])
+
+            dif = s.get("diferencia") or 0
+            clase_dif = "error" if abs(dif) >= 1 else "metric-card"
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card">
+                    <div class="metric-value">{_fmt(s.get('saldo_mayor_final'))}</div>
+                    <div class="metric-label">Saldo contable</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{_fmt(s.get('saldo_ext_final'))}</div>
+                    <div class="metric-label">Saldo extracto</div>
+                </div>
+                <div class="metric-card {clase_dif}">
+                    <div class="metric-value">{_fmt(s.get('diferencia'))}</div>
+                    <div class="metric-label">Diferencia</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{s.get('lineas_cc', 0)}</div>
+                    <div class="metric-label">Líneas CC</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("Detalle de la diferencia y pendientes anteriores"):
+                st.markdown(
+                    f"- Diferencia heredada de la CC anterior: **{_fmt(s.get('dif_heredada'))}**\n"
+                    f"- Centavos del cruce: **{_fmt(s.get('dif_cruce'))}**\n"
+                    f"- Centavos de apareos: **{_fmt(s.get('dif_redondeo_apareo'))}**\n"
+                    f"- Retroactivos identificados: **{_fmt(s.get('retro_identificado'))}**\n"
+                    f"- Retroactivos sin identificar: **{_fmt(s.get('retro_no_identificado'))}**\n"
+                    f"- Pendientes anteriores registrados: **{s.get('pendientes_anteriores_registrados', 0)}**\n"
+                    f"- Pendientes anteriores vigentes: **{s.get('pendientes_anteriores_vigentes', 0)}**"
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="Descargar conciliación completa Hipotecario",
+                icon=":material/download:",
+                data=r["buf"],
+                file_name="conciliacion_completa_hipotecario.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="dl_hipotecario_completa",
+            )
+
+            # Libro aparte: pendientes del banco repartidos por persona
+            if s.get("pendientes_xlsx"):
+                st.download_button(
+                    label="Descargar pendientes por persona",
+                    icon=":material/download:",
+                    data=s["pendientes_xlsx"],
+                    file_name="pendientes_hipotecario.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_hipotecario_pendientes",
+                )
+
+    # ─────────────────────────────────────────
+    # MODO CRUCE (lógica original, sin cambios)
+    # ─────────────────────────────────────────
+    else:
+
+        col4, col5 = st.columns(2)
+        with col4:
+            st.markdown('<div class="upload-label">Mayor</div>', unsafe_allow_html=True)
+            archivo_mayor_h = st.file_uploader("mayor_h", type=["xlsx","xls"],
+                                                label_visibility="collapsed", key="mayor_h")
+        with col5:
+            st.markdown('<div class="upload-label">Extracto Hipotecario</div>', unsafe_allow_html=True)
+            archivo_extracto_h = st.file_uploader("extracto_h", type=["xlsx","xls"],
+                                                   label_visibility="collapsed", key="extracto_h")
+
+        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+        todos_h = all([archivo_mayor_h, archivo_extracto_h])
+        if not todos_h:
+            st.info("Cargá los dos archivos para habilitar la conciliación.")
+
+        boton_h = st.button("Conciliar Hipotecario", disabled=not todos_h,
+                             use_container_width=True, key="btn_hipotecario")
+
+        if boton_h and todos_h:
+            with st.spinner("Procesando Hipotecario..."):
+                try:
+                    buf_h, stats_h = correr_conciliacion_hipotecario(
+                        archivo_mayor=archivo_mayor_h,
+                        archivo_extracto=archivo_extracto_h,
+                    )
+                    st.session_state["resultado_hipotecario"] = {"buf": buf_h, "stats": stats_h}
+                except Exception as e:
+                    st.error(f"Error al procesar Hipotecario: {e}")
+
+        if "resultado_hipotecario" in st.session_state:
+            r = st.session_state["resultado_hipotecario"]
+            s = r["stats"]
+
+            st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+
+            clase_fm = "error" if s["falta_mayor"]    > 0 else "metric-card"
+            clase_fe = "error" if s["falta_extracto"] > 0 else "metric-card"
+
+            st.markdown(f"""
+            <div class="metric-row">
+                <div class="metric-card">
+                    <div class="metric-value">{s['match_exacto']}</div>
+                    <div class="metric-label">Match exacto</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value">{s['match_tolerancia']}</div>
+                    <div class="metric-label">Match tolerancia</div>
+                </div>
+                <div class="metric-card {clase_fm}">
+                    <div class="metric-value">{s['falta_mayor']}</div>
+                    <div class="metric-label">Faltante mayor</div>
+                </div>
+                <div class="metric-card {clase_fe}">
+                    <div class="metric-value">{s['falta_extracto']}</div>
+                    <div class="metric-label">Faltante extracto</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.download_button(
+                label="Descargar reporte Hipotecario",
+                icon=":material/download:",
+                data=r["buf"],
+                file_name="conciliacion_hipotecario.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
 
 # ═══════════════════════════════════════════════
