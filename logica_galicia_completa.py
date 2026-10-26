@@ -3400,6 +3400,11 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     # (p. ej. Ronda: el de junio empieza el 29/05). El período es el mes predominante.
     mes_dominante = ext["fecha"].dt.to_period("M").mode()[0]
     desde = max(desde, mes_dominante.start_time)
+    # Si el extracto arranca a los pocos días del mes (fin de semana o feriado: p. ej. agosto
+    # empieza el lunes 03/08), el período igual empieza el día 1: un asiento del 01/08 es del
+    # mes, no del saldo inicial.
+    if (desde - mes_dominante.start_time).days <= 5:
+        desde = mes_dominante.start_time
     es_saldo_ant = may_full["Comentario"].astype(str).str.contains("saldo anterior", case=False, na=False)
     # Lo que el mayor trae con fecha posterior al último día del extracto no es de este corte:
     # queda afuera (saldo y cruce) y entra en la próxima conciliación.
@@ -3819,6 +3824,15 @@ def _armar_lineas_cc(P, hasta):
             sec = "SAL_MAYOR" if efecto > 0 else "ING_MAYOR"
         obs = ("Neto mayor vs extracto" if (sm != 0 and se != 0)
                else str(g["detalle"].iloc[0]) if len(g) == 1 else f"{len(g)} movimientos")
+        if str(cat).startswith("Acred.") or cat == "Propinas":
+            # Acreditaciones: si el banco acreditó más de lo registrado, falta registrar (crédito
+            # del banco); si el mayor registró más de lo acreditado, sobra en el mayor (ingreso
+            # en mayor que no está en el extracto). El cruce de acreditaciones deja siempre una
+            # línea del lado del banco: aquí se ubica según el signo.
+            if efecto > 0:
+                sec, obs = "CRED_BANCO", f"{etiqueta} pendiente de registrar"
+            else:
+                sec, obs = "ING_MAYOR", f"{etiqueta} registrada de más en el mayor"
         agregar(sec, hasta, etiqueta, abs(efecto), obs, g, "Período")
     resto = pend.drop(agrupables.index)
 
