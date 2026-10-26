@@ -1422,6 +1422,16 @@ def analizar_retroactivos(may_full, desde_actual, ant):
         res["cubre_periodo_anterior"] = True
         res["inicio_comparacion"] = ini
         res["retro"] = m[np.array([k not in kf for k in zip(m["Asiento"], m["Apunte"])], dtype=bool)]
+        # Antes de lo que cubre la foto no hay con qué comparar, pero los asientos se numeran
+        # en orden: uno con número mayor que el último de la foto se cargó después de la
+        # conciliación anterior, aunque tenga fecha vieja (9dD: asientos 147765 a 147789
+        # cargados en octubre con fecha de enero a junio).
+        max_foto = pd.to_numeric(foto["Asiento"], errors="coerce").max() if len(foto) else np.nan
+        if pd.notna(max_foto):
+            nuevos = movs[(movs["Fecha"] < ini) & (movs["Asiento"] > max_foto)]
+            if len(nuevos):
+                res["retro"] = pd.concat([nuevos, res["retro"]])
+                res["nuevos_fuera_de_foto"] = len(nuevos)
         res["borrados"] = f[np.array([k not in km for k in zip(f["Asiento"], f["Apunte"])], dtype=bool)]
         j = f.merge(movs, on=["Asiento", "Apunte"], suffixes=("_ant", "_act"))
         res["modificados"] = j[(j["Importe_ant"].round(2) != j["Importe_act"].round(2)) | (j["Fecha_ant"] != j["Fecha_act"])]
@@ -1543,6 +1553,41 @@ class Apareo:
                 hallado = list(cand.index)
             if hallado:
                 self._cerrar([ia] + hallado, regla)
+
+    def uno_a_uno_con_diferencia(self, mask_a, mask_b, regla, max_dias=3, tol_rel=TOL_RELATIVA_COMPROBANTE):
+        """Un renglón de A contra uno de B de la misma categoría, a pocos días, cuyo importe
+        difiere en menos del 0,1% (p. ej. 9dD: pendiente 'ORDENES DE PAGO COMEX' 5.126.699,25
+        contra el asiento 146147 por 5.126.696,19, mismo día). Solo si hay UN candidato. Se
+        cierran los dos y la diferencia queda como línea aparte, como en el cruce por
+        comprobante de Galicia."""
+        for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
+            if self.p.at[ia, "estado"] != "pendiente":
+                continue
+            a = self.p.loc[ia]
+            if pd.isna(a["fecha"]) or str(a["categoria"]) in ("0", "nan", ""):
+                continue
+            cand = self._pend(mask_b)
+            cand = cand[(cand.index != ia) & (cand["categoria"] == a["categoria"])
+                        & (np.sign(cand["importe"]) == np.sign(a["importe"]))
+                        & ((cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias))]
+            cand = cand[(cand["importe"] - a["importe"]).abs() <= max(TOL_CRUCE, abs(a["importe"]) * tol_rel)]
+            if len(cand) != 1:
+                continue
+            ib = cand.index[0]
+            b = self.p.loc[ib]
+            e, m = (a, b) if a["lado"] == "E" else (b, a)
+            dif = round(e["importe"] - m["importe"], 2)   # lo que el banco tiene de más que el mayor
+            self._cerrar([ia, ib], regla)
+            if abs(dif) >= TOL_LINEA_DIFERENCIA:
+                self.p.loc[len(self.p)] = {
+                    **{c: None for c in self.p.columns},
+                    "lado": "E", "origen": "Diferencia de apareo", "fecha": e["fecha"],
+                    "categoria": e["categoria"], "concepto": f"Diferencia {e['categoria']}",
+                    "nombre": str(m.get("referencia") or ""),
+                    "detalle": f"Banco {e['importe']:,.2f} - mayor {m['importe']:,.2f} ({m.get('referencia') or ''})",
+                    "referencia": f"{e.get('referencia') or ''} / {m.get('referencia') or ''}", "importe": dif,
+                    "rid": f"D{ia}-{ib}", "mes_ref": e.get("mes_ref"), "comprobante": "",
+                    "ya_conciliado_antes": False, "estado": "pendiente", "grupo": 0, "regla": ""}
 
     def par_mayor_vs_banco(self, mask_m, mask_e, mask_req, tol, regla, max_dias=3):
         """Un pendiente del banco contra la suma de DOS renglones del mayor de la misma fecha
@@ -1862,7 +1907,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         # Movimientos retroactivos identificados (solo los anteriores al período: los del
         # propio período ya entran en el cruce)
         identificado = 0.0
-        if not misma_ventana:
+        # También en un corte del mismo mes: con un mayor de varios meses, lo cargado/borrado con
+        # fecha anterior al período se identifica igual (solo cuenta lo anterior al período).
+        if True:
             r = retro["retro"]
             r = r[r["Fecha"] < desde]
             identificado += r["Importe"].sum()
@@ -1986,6 +2033,19 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                 f"El saldo inicial del mayor cambió {no_identificado:,.2f} respecto de la conciliación anterior y la "
                 f"conciliación anterior no tiene foto del mayor para comparar asiento por asiento. Las conciliaciones "
                 f"generadas con esta lógica guardan la foto: a partir de la próxima se identifica solo.")
+        if abs(no_identificado) > TOL_CENTAVOS and "aviso_mayor" not in control and primer_mov is not None:
+            # El mayor cubre el período anterior y la foto, pero el cambio igual no se ve: se cargó,
+            # borró o modificó algo con fecha anterior al inicio del mayor (p. ej. cobranzas de 2025
+            # registradas con su fecha original). Hay que bajar el mayor desde el pendiente más viejo.
+            viejo = pend_ant["fecha"].min() if len(pend_ant) else None
+            desde_bajar = min(viejo, primer_mov) if viejo is not None and pd.notna(viejo) else primer_mov
+            control["aviso_mayor"] = (
+                f"Hay {no_identificado:,.2f} de cambio en el saldo ya conciliado que no se ve en el mayor cargado "
+                f"(cubre desde el {primer_mov:%d/%m/%Y}): son asientos con fecha anterior. Volver a correr con el "
+                f"mayor bajado desde el {pd.Timestamp(desde_bajar).replace(day=1):%d/%m/%Y} (pendiente anterior más "
+                f"antiguo) para identificarlo asiento por asiento.")
+            detalle_ru = (f"Asientos con fecha anterior al {primer_mov:%d/%m/%Y}: bajar el mayor desde el "
+                          f"{pd.Timestamp(desde_bajar).replace(day=1):%d/%m/%Y}")
         if abs(no_identificado) > TOL_CENTAVOS:
             partidas.append(pd.DataFrame([{
                 "lado": "M", "origen": "Retroactivo no identificado", "fecha": desde - timedelta(days=1),
@@ -2081,6 +2141,11 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     # R3. Pendientes de mayor anteriores que impactaron en el banco este período
     ap.uno_a_uno(ant_m, es_E & per, TOL_CRUCE, "Pendiente anterior impactó en banco")
     ap.combinacion(ant_m, es_E & per, TOL_CRUCE, "Pendiente anterior impactó en banco (suma)", vinculo="categoria")
+    # R3.b Pendientes anteriores contra un asiento (para atrás o del período) o un movimiento del
+    #      banco del período por casi el mismo importe (diferencia menor al 0,1%, mismo día ± 3):
+    #      se cruzan y la diferencia queda en una línea aparte.
+    ap.uno_a_uno_con_diferencia(ant_e, retro_m | (es_M & per), "Pendiente anterior registrado con diferencia")
+    ap.uno_a_uno_con_diferencia(ant_m, es_E & per, "Pendiente anterior impactó en banco con diferencia")
     # R4. Asientos retroactivos contra movimientos del banco del período
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
@@ -2109,7 +2174,10 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         efecto = previo.loc[previo["lado"] == "M", "importe"].sum() - previo.loc[previo["lado"] == "E", "importe"].sum()
         control["dif_heredada"] = (control.get("dif_heredada") or 0.0) + efecto
     conc = P[(P["estado"] == "conciliado") & (P["regla"] != REGLA_PREVIO)]
-    control["dif_redondeo_apareo"] = conc.loc[conc["lado"] == "M", "importe"].sum() - conc.loc[conc["lado"] == "E", "importe"].sum()
+    # Las diferencias que quedaron en una línea aparte (cruces con diferencia) ya están en la CC
+    dif_lineas = P.loc[P["rid"].astype(str).str.match(r"^D\d+-\d+$"), "importe"].sum()
+    control["dif_redondeo_apareo"] = conc.loc[conc["lado"] == "M", "importe"].sum() \
+        - conc.loc[conc["lado"] == "E", "importe"].sum() + dif_lineas
 
     lineas_cc, detalle, dif_neteo = _armar_lineas_cc(P, hasta)
     control["dif_cruce"] = control["dif_cruce"] + dif_neteo
@@ -2195,14 +2263,33 @@ def _armar_lineas_cc(P, hasta):
     # categoría y mes, como lo presenta el equipo ("GB 07-26 cargado con fecha ya conciliada")
     retro_agr = resto[(resto["origen"] == "Retroactivo") & resto["categoria"].isin(CATEGORIAS_AGRUPADAS)]
     mes_ret = retro_agr["mes_ref"].where(retro_agr["mes_ref"].notna(), retro_agr["fecha"].dt.strftime("%m-%y"))
+    usados = []
     for (cat, mes), g in retro_agr.groupby([retro_agr["categoria"], mes_ret]):
-        total = g["importe"].sum()
-        if abs(total) < TOL_LINEA_DIFERENCIA:
+        # Si hay un pendiente anterior de la misma categoría y mes (p. ej. 'GB 07-26' del banco),
+        # se netea contra lo cargado para atrás y queda solo la diferencia, como lo presenta el
+        # equipo (9dD: GB 07-26 61.202,07 pendiente - 61.855,27 cargado = 653,20).
+        pa = resto[(resto["origen"] == "Pendiente anterior") & (resto["categoria"] == cat)
+                   & (resto["mes_ref"].astype(str) == str(mes)) & ~resto.index.isin(usados)]
+        g2 = pd.concat([g, pa])
+        sm = g2.loc[g2["lado"] == "M", "importe"].sum()
+        se = g2.loc[g2["lado"] == "E", "importe"].sum()
+        efecto = se - sm
+        usados += list(pa.index)
+        if abs(efecto) < TOL_LINEA_DIFERENCIA:
+            centavos_neteo.append(efecto)
             continue
-        etiqueta = f"{CATEGORIAS_AGRUPADAS[cat]} {mes} cargado con fecha ya conciliada"
-        agregar(_seccion("M", total), g["fecha"].max(), etiqueta, abs(total),
-                f"{len(g)} asientos: " + ", ".join(g["referencia"].astype(str).str.replace("Asiento ", "")), g, "Retroactivo")
-    resto = resto.drop(retro_agr.index)
+        if len(pa):
+            sec = ("CRED_BANCO" if efecto > 0 else "DEB_BANCO") if abs(se) >= abs(sm) else \
+                ("SAL_MAYOR" if efecto > 0 else "ING_MAYOR")
+            etiqueta = f"{CATEGORIAS_AGRUPADAS[cat]} {mes}"
+            obs = (f"Pendiente anterior {abs(se):,.2f} neto de lo cargado con fecha ya conciliada {abs(sm):,.2f} "
+                   f"(asientos " + ", ".join(g["referencia"].astype(str).str.replace("Asiento ", "")) + ")")
+        else:
+            sec = _seccion("M", sm)
+            etiqueta = f"{CATEGORIAS_AGRUPADAS[cat]} {mes} cargado con fecha ya conciliada"
+            obs = f"{len(g)} asientos: " + ", ".join(g["referencia"].astype(str).str.replace("Asiento ", ""))
+        agregar(sec, g["fecha"].max(), etiqueta, abs(efecto), obs, g2, "Retroactivo")
+    resto = resto.drop(list(retro_agr.index) + usados)
 
     for _, f in resto.sort_values(["origen", "fecha"]).iterrows():
         sec = _seccion(f["lado"], f["importe"])
