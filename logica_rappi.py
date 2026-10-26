@@ -826,59 +826,118 @@ def _cruce_servicios(df_servicios, falta_pub):
 # PROCESAMIENTO POR LIQUIDACIÓN
 # ─────────────────────────────────────────────
 
-# Líneas de factura que se cruzan por concepto cuando el importe no coincide:
-# (texto que identifica la línea en la factura, concepto de la liquidación,
-# rótulo de la diferencia). En el formato nuevo Rappi factura la percepción de
+# Cruce por concepto de las líneas de factura que no encontraron su importe en
+# la liquidación: (texto que identifica la línea, tipo de factura o None para
+# ambos, conceptos de la liquidación que la componen). Si el concepto lleva su
+# descuento DAR, se compara contra la suma de los dos. El primer concepto da
+# nombre a la diferencia ("Diferencia <concepto>"). Los textos se comparan
+# normalizados (sin tildes, espacios ni signos) y sirven para los dos formatos
+# de factura. Caso conocido: en el formato nuevo Rappi factura la percepción de
 # IVA RG 5319 sobre la venta más la tarifa transaccional, pero en la liquidación
-# descuenta solo el 1% de la venta: difieren en el 1% de la tarifa.
+# descuenta solo el 1% de la venta.
 CRUCES_POR_CONCEPTO = [
-    ('5319', 'SUM of Impuestos Percepción de IVA', 'SUM of Diferencia Percepción de IVA RG 5319'),
+    ('5319', None,
+     ['Impuestos Percepción de IVA']),
+    ('descuentoporinversion', None,
+     ['Descuento por inversión de Rappi a aplicar sobre Uso y alquiler de plataforma Rappi DAR']),
+    ('descuentosenventas', None,
+     ['Descuento por inversión de Rappi a aplicar sobre Uso y alquiler de plataforma Rappi DAR']),
+    ('comisiones', None,
+     ['Uso y alquiler de plataforma Rappi']),
+    ('bankfee', None,
+     ['Tarifa transaccional']),
+    ('publicidad', None,
+     ['Cuota de RappiAds']),
+    ('iibb', 'servicios',
+     ['Percepcion', 'Descuento por inversión de Rappi a aplicar sobre la Percepción de BA DAR']),
+    ('iibb', 'publicidad',
+     ['Percepción Campañas']),
+    ('iva', 'servicios',
+     ['IVA Uso y alquiler de plataforma Rappi',
+      'Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler de plataforma Rappi DAR']),
+    ('iva', 'publicidad',
+     ['IVA Rappi Ads', 'IVA Campañas']),
 ]
+IMPUESTOS_POR_CONCEPTO = {'5319', 'iibb', 'iva'}
+
+
+def _concepto_liq(valores):
+    """'SUM of IVA Rappi Ads' -> 'ivarappiads': para comparar rótulos de la
+    liquidación aunque cambien espacios, tildes o el prefijo 'SUM of'."""
+    return _normalizar(re.sub(r'^\s*sum\s+of\s+', '', str(valores), flags=re.IGNORECASE))
+
+
+def _rotulo_diferencia(concepto):
+    concepto = re.sub(r'^Impuestos\s+', '', concepto)
+    return f'SUM of Diferencia {concepto}'
 
 
 def _cruce_lineas_sin_match(lineas, falta_liq):
-    """Cruza las líneas de factura que no encontraron su importe en la
-    liquidación. Las de CRUCES_POR_CONCEPTO se emparejan con el concepto de la
-    liquidación (el de importe más cercano si hay varios) y la diferencia queda
-    como falta; las que no tienen concepto en la liquidación quedan como falta
-    por el total. Los importes de falta van con el signo de la liquidación, de
-    modo que el cuadro de conceptos siga sumando lo mismo que la liquidación."""
+    """Cruza por concepto las líneas de factura (nro_factura, tipo, fila) que no
+    encontraron su importe en la liquidación: cada una se empareja con su
+    concepto (el de importe más parecido si hay varios) y lo que no coincide
+    queda como falta 'Diferencia <concepto>'. Si la liquidación no trae el
+    concepto, la diferencia es la línea entera. Los importes de falta van con el
+    signo de la liquidación, así el cuadro de conceptos sigue cerrando."""
     falta_liq = falta_liq.copy()
+    conceptos = falta_liq['Valores'].map(_concepto_liq)
     match_rows, falta_rows = [], []
 
-    def regla_de(fila):
-        return next((r for r in CRUCES_POR_CONCEPTO if r[0] in str(fila['Descripción'])), None)
+    def regla_de(tipo, fila):
+        # Los impuestos se reconocen por la descripción y los ítems por el código.
+        es_impuesto = fila['Cod'] == 'Detalle de Impuesto'
+        texto = _normalizar(fila['Descripción'] if es_impuesto else fila['Cod'])
+        return next((r for r in CRUCES_POR_CONCEPTO
+                     if r[0] in texto and r[1] in (None, tipo)
+                     and (r[0] in IMPUESTOS_POR_CONCEPTO) == es_impuesto), None)
+
+    def unidades(regla):
+        """Filas de la liquidación contra las que se compara la línea: de a una si
+        el concepto es simple, o todas juntas si va con su descuento DAR."""
+        claves = [_normalizar(c) for c in regla[2]]
+        filas = [j for j in falta_liq.index if conceptos[j] in claves]
+        if len(claves) == 1:
+            return [(j,) for j in filas]
+        return [tuple(filas)] if filas else []
+
+    reglas = [regla_de(tipo, fila) for _, tipo, fila in lineas]
 
     # Todas las parejas posibles línea-concepto, de la más parecida en importe a
     # la menos: así una línea chica de otra factura no se queda con el concepto
     # que corresponde a la línea de importe parecido.
     parejas = sorted(
-        (abs(abs(falta_liq.loc[j, 'Total']) - abs(fila['P.Total'])), i, j)
-        for i, (_, fila) in enumerate(lineas) if regla_de(fila)
-        for j in falta_liq.index[falta_liq['Valores'] == regla_de(fila)[1]]
+        (abs(abs(falta_liq.loc[list(u), 'Total'].sum()) - abs(fila['P.Total'])), i, u)
+        for i, (_, _, fila) in enumerate(lineas) if reglas[i]
+        for u in unidades(reglas[i])
     )
     emparejadas, usadas = {}, set()
-    for _, i, j in parejas:
-        if i not in emparejadas and j not in usadas:
-            emparejadas[i] = j
-            usadas.add(j)
+    for _, i, u in parejas:
+        if i not in emparejadas and not usadas.intersection(u):
+            emparejadas[i] = u
+            usadas.update(u)
 
-    for i, (nro_factura, fila) in enumerate(lineas):
-        regla   = regla_de(fila)
+    for i, (nro_factura, _, fila) in enumerate(lineas):
+        regla   = reglas[i]
         importe = fila['P.Total']
-        if i in emparejadas:
-            fila_liq = falta_liq.loc[emparejadas[i]]
-            match_rows.append({**fila_liq.to_dict(), 'nro_factura': nro_factura})
-            # La liquidación descuenta el concepto en negativo y la factura lo
-            # cobra en positivo: la suma es lo cobrado de más (o de menos).
-            diferencia = round(fila_liq['Total'] + importe, 2)
-            if abs(diferencia) >= 0.01:
-                falta_rows.append({'Grupo': fila_liq['Grupo'], 'Valores': regla[2],
-                                   'Total': diferencia, 'nro_factura': nro_factura})
+        if regla:
+            rotulo = _rotulo_diferencia(regla[2][0])
         else:
-            valores = regla[2] if regla else f"SUM of Línea de factura sin concepto en la liquidación: {fila['Descripción']}"
-            falta_rows.append({'Grupo': 'Impuestos' if fila['Cod'] == 'Detalle de Impuesto' else None,
-                               'Valores': valores, 'Total': round(importe, 2), 'nro_factura': nro_factura})
+            rotulo = _rotulo_diferencia(fila['Descripción'] if fila['Cod'] == 'Detalle de Impuesto' else fila['Cod'])
+
+        if i in emparejadas:
+            filas_liq = falta_liq.loc[list(emparejadas[i])]
+            match_rows += [{**f.to_dict(), 'nro_factura': nro_factura} for _, f in filas_liq.iterrows()]
+            grupo = filas_liq['Grupo'].iloc[0]
+            # La liquidación descuenta el concepto con el signo contrario al de la
+            # factura: la suma es lo facturado de más (o de menos).
+            diferencia = round(filas_liq['Total'].sum() + importe, 2)
+        else:
+            grupo = 'Impuestos' if fila['Cod'] == 'Detalle de Impuesto' else None
+            diferencia = round(importe, 2)
+
+        if abs(diferencia) >= 0.01:
+            falta_rows.append({'Grupo': grupo, 'Valores': rotulo,
+                               'Total': diferencia, 'nro_factura': nro_factura})
 
     falta_liq = falta_liq.drop(index=list(usadas))
 
@@ -908,7 +967,7 @@ def procesar_liquidaciones(liquidaciones):
             for factura in facturas_pub:
                 df_pub = factura['df'].copy().reset_index(drop=True)
                 match_fac, match_liq, falta_actual = _cruce_publicidad(df_pub, falta_actual)
-                lineas_sin_match += [(factura['nro_factura'], fila) for _, fila in df_pub.drop(index=match_fac.index).iterrows()]
+                lineas_sin_match += [(factura['nro_factura'], factura['tipo'], fila) for _, fila in df_pub.drop(index=match_fac.index).iterrows()]
                 if not match_liq.empty:
                     match_liq = match_liq.copy()
                     match_liq['nro_factura'] = factura['nro_factura']
@@ -920,7 +979,7 @@ def procesar_liquidaciones(liquidaciones):
             for factura in facturas_srv:
                 df_srv = factura['df'].copy().reset_index(drop=True)
                 match_fac, match_liq, falta_actual = _cruce_servicios(df_srv, falta_actual)
-                lineas_sin_match += [(factura['nro_factura'], fila) for _, fila in df_srv.drop(index=match_fac.index).iterrows()]
+                lineas_sin_match += [(factura['nro_factura'], factura['tipo'], fila) for _, fila in df_srv.drop(index=match_fac.index).iterrows()]
                 if not match_liq.empty:
                     match_liq = match_liq.copy()
                     match_liq['nro_factura'] = factura['nro_factura']
