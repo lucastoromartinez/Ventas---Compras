@@ -66,7 +66,14 @@ CUITS_PROPIOS = ["30716161591", "30718257510", "30716981076", "30719170699", "30
 COL_DEB, COL_CRED, COL_SALDO = "debito en $", "credito en $", "saldo en $"
 
 # Acreditaciones: Debin, Fiserv (ex First Data, antes "Acred. TC"), Cabal y Prisma (Payway)
-CATEGORIAS_ACRED = ["Acred. Debin", "Acred. Fiserv", "Acred. Cabal", "Acred. Prisma"]
+# "Cobranzas/Señas" (solo EASA): las transferencias recibidas de particulares pueden ser señas
+# (registradas en el mayor en una "Acreditación Señas" mensual por el total) o cobranzas
+# (registradas una por una con "Cobro N/F"); con la leyenda del banco no se puede distinguir.
+# Primero se cruzan 1 a 1 contra los Cobro N/F (fecha e importe exactos) y el resto se
+# concilia por total contra las "Acreditación Señas", como una acreditación.
+COBRANZAS_SENAS = "Cobranzas/Señas"
+SOCIEDADES_COBRANZAS_SENAS = ["EASA"]
+CATEGORIAS_ACRED = ["Acred. Debin", "Acred. Fiserv", "Acred. Cabal", "Acred. Prisma", COBRANZAS_SENAS]
 CATEGORIAS_MASIVAS = ["Gastos Bancarios"] + CATEGORIAS_ACRED
 # Categorías que se cruzan por mes de referencia (el mes del comentario del asiento)
 CATEGORIAS_POR_MES = ["Gastos Bancarios", "Prestamo"]
@@ -227,7 +234,8 @@ def _mes_de_texto(serie: pd.Series) -> pd.Series:
     return (m[0] + "-" + m[1]).where(m[0].notna())
 
 
-def categorizar_extracto(df: pd.DataFrame) -> pd.DataFrame:
+def categorizar_extracto(df: pd.DataFrame, senas: bool = False) -> pd.DataFrame:
+    """senas=True (solo EASA): las transferencias de particulares van a 'Cobranzas/Señas'."""
     df = df.copy()
     raw = df["descripcion"].astype(str)
     d = raw.map(_limpiar)
@@ -255,12 +263,13 @@ def categorizar_extracto(df: pd.DataFrame) -> pd.DataFrame:
         (tiene("debin"), "Acred. Debin"),
         # Solo liquidaciones a comercios: 'COMPRA CON TRANSFERENCIA | FIRST DATA CONO SUR' es un pago
         (tiene("comerciosfirstdata", "comerciosfiserv"), "Acred. Fiserv"),
-        (tiene("cabal") & (imp > 0), "Acred. Cabal"),
+        # palabra completa: "Matias Nicolas CABALLERO" no es una acreditación Cabal
+        (raw.str.contains(r"\bCABAL\b", case=False, regex=True) & (imp > 0), "Acred. Cabal"),
         # Transferencias propias (CUIT del grupo o cuenta propia)
         (propio | tiene("ctaprop"), "Transf. entre cuentas"),
         # Transferencias recibidas de terceros (RECIBISTE UNA TRANSFERENCIA, CASH OUT): el equipo
         # las concilia como cobranzas (9dD); antes salían como "Señas"
-        (clave_sena | tiene("recibistetransfcashout", "creditocashout"), "Cobranzas"),
+        (clave_sena | tiene("recibistetransfcashout", "creditocashout"), COBRANZAS_SENAS if senas else "Cobranzas"),
         (tiene("prestamo") & tiene("cuota", "pago", "amortiz", "interes"), "Prestamo"),
         # Débitos automáticos: antes que gastos bancarios (la descripción del ente
         # puede traer "impuesto", "comisión", etc.)
@@ -291,6 +300,9 @@ def categorizar_mayor(df: pd.DataFrame) -> pd.DataFrame:
     cc = df["Cc"].astype(str).str.upper().str.strip()
 
     reglas = [
+        # "Acreditación Señas 09-2026" (total del mes). La "Devolución Señas" se cruza 1 a 1
+        # contra la transferencia devuelta (EASA: devolución 300.000 a QUIROGA del 21/09).
+        (com.str.contains("sena") & ~com.str.contains("devolucion"), COBRANZAS_SENAS),
         (com.str.contains("cabal"), "Acred. Cabal"),
         (com.str.contains("prisma|payway", regex=True), "Acred. Prisma"),
         (com.str.contains("debin"), "Acred. Debin"),
@@ -347,8 +359,10 @@ def cruzar_mayor_extracto(mayor, extracto):
         idx_e = list(idx_e)
         if len(idx_e) == 1 and len(idx_m) == 1:
             im.append(idx_m[0]); ie.append(idx_e[0]); continue
+        # Mayor puntaje de nombre primero; a igual puntaje, en orden (el primer asiento con el
+        # primer movimiento del banco), como el cruce del equipo.
         pares = sorted(((fuzz.token_sort_ratio(str(extracto.at[e, "tercero"]), str(mayor.at[m, "Tercero"])), e, m)
-                        for e in idx_e for m in idx_m), reverse=True)
+                        for e in idx_e for m in idx_m), key=lambda t: (-t[0], t[1], t[2]))
         ue, um = set(), set()
         for sc, e, m in pares:
             if e in ue or m in um:
@@ -839,9 +853,9 @@ def _safe_concat(dfs):
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
-def ejecutar_cruces(df_mayor_dep, df_extracto_dep):
+def ejecutar_cruces(df_mayor_dep, df_extracto_dep, senas=False):
     """Corre todos los cruces y devuelve los DataFrames."""
-    ext_cat = categorizar_extracto(df_extracto_dep)
+    ext_cat = categorizar_extracto(df_extracto_dep, senas)
     may_cat = categorizar_mayor(df_mayor_dep)
     if "_rid" not in may_cat:
         may_cat["_rid"] = ["M%06d" % i for i in range(len(may_cat))]
@@ -853,13 +867,22 @@ def ejecutar_cruces(df_mayor_dep, df_extracto_dep):
     may_sin_acred = may_mov[~may_mov["conciliacion"].isin(CATEGORIAS_ACRED)]
     may_acred = may_mov[may_mov["conciliacion"].isin(CATEGORIAS_ACRED)]
 
-    mm0, me0, fe0, fm0 = cruzar_mayor_extracto(may_sin_acred, ext_sin_acred)
+    ext_para_acred = ext_cat
+    if senas:
+        # Cobranzas/Señas: primero 1 a 1 contra los Cobro N/F (fecha e importe exactos); lo
+        # que no cruza queda para el total contra las "Acreditación Señas" (cruce 5)
+        es_cs = ext_cat["conciliacion"] == COBRANZAS_SENAS
+        mm0, me0, fe0, fm0 = cruzar_mayor_extracto(may_sin_acred, ext_cat[~ext_cat["conciliacion"].isin(CATEGORIAS_ACRED) | es_cs])
+        fm0 = fm0[fm0["conciliacion"] != COBRANZAS_SENAS].reset_index(drop=True)
+        ext_para_acred = ext_cat[~ext_cat["_rid"].isin(me0["_rid"])]
+    else:
+        mm0, me0, fe0, fm0 = cruzar_mayor_extracto(may_sin_acred, ext_sin_acred)
     mm1, me1, fe1, fm1 = cruzar_con_tolerancia(fe0, fm0)
     mm2, me2, fe2, fm2 = cruzar_por_categoria(fe1, fm1)
     mm3, me3, fe3, fm3 = cruzar_proveedores(fe2, fm2)
     mm4, me4, fe4, fm4 = cruzar_tp(fe3, fm3)
     fe4 = pd.concat([fe4, may_acred], ignore_index=True)
-    me5, mm5, fe5, fm5 = cruzar_acreditaciones(ext_cat, fe4, fm4)
+    me5, mm5, fe5, fm5 = cruzar_acreditaciones(ext_para_acred, fe4, fm4)
 
     dm0, de0, i1 = _asignar_ids(mm0, me0, 0, 1)
     dm1, de1, i2 = _asignar_ids(mm1, me1, 1, i1)
@@ -917,6 +940,7 @@ CATEGORIAS_AGRUPADAS = {
     "Acred. Cabal": "Acred. Cabal",
     "Acred. Prisma": "Acred. Prisma",
     "Propinas": "Propinas",
+    COBRANZAS_SENAS: COBRANZAS_SENAS,
 }
 
 SECCIONES = {
@@ -940,8 +964,8 @@ def _categoria_desde_concepto(concepto) -> str:
         (("acredtc", "acreditacionestc", "firstdata", "fiserv"), "Acred. Fiserv"),
         (("seguro", "sancor", "swiss", "berkley"), "Seguros"),
         (("proveedor",), "Proveedores"),
+        (("sena",), COBRANZAS_SENAS),
         (("cobranza",), "Cobranzas"),
-        (("sena",), "Señas"),
         (("transf",), "Transf. entre cuentas"),
         (("ajust",), "Ajuste"),
     ]
@@ -1021,9 +1045,9 @@ def _a_bytes(archivo):
 # 1. CRUCE CON IDS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _correr_cruce_con_ids(df_mayor_dep, df_extracto_dep):
+def _correr_cruce_con_ids(df_mayor_dep, df_extracto_dep, senas=False):
     """Corre el cruce (match 0 a 19) y separa, por _rid, qué quedó conciliado y qué no."""
-    r = ejecutar_cruces(df_mayor_dep, df_extracto_dep)
+    r = ejecutar_cruces(df_mayor_dep, df_extracto_dep, senas)
     fe, fm = r["falta_extracto"], r["falta_mayor"]   # fe = renglones del MAYOR; fm = del EXTRACTO
     rid_m_pend = set(fe["_rid"].dropna().astype(str)) - {""}
     rid_fm = fm["_rid"].fillna("").astype(str)
@@ -1755,6 +1779,27 @@ class Apareo:
 # 5. PIPELINE COMPLETO
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _razon_social_anterior(contenido):
+    """Razón social que figura en la hoja CC de la conciliación anterior (celda 'Razón social:')."""
+    if not contenido:
+        return None
+    try:
+        xls = pd.ExcelFile(BytesIO(_contenido_xlsx(contenido)))
+        hoja = next((h for h in xls.sheet_names if _norm(h).startswith("concilia") or _norm(h) == "cc"), None)
+        if hoja is None:
+            return None
+        d = xls.parse(hoja, header=None, nrows=15)
+        for _, r in d.iterrows():
+            vals = list(r.values)
+            for k, v in enumerate(vals[:-1]):
+                if isinstance(v, str) and _norm(v).startswith("razonsocial"):
+                    sig = vals[k + 1]
+                    return str(sig).strip() if pd.notna(sig) else None
+    except Exception:
+        return None
+    return None
+
+
 def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_conciliacion_anterior=None,
                                  analista="", razon_social=None, banco=BANCO, cuenta=None,
                                  archivos_conciliaciones_previas=None):
@@ -1806,7 +1851,15 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     saldo_ext_inicio, saldo_ext_final, ext_ok = _saldos_extracto(ext)
 
     # ── Cruce principal (match 0 a 19) solo con el mayor del período ─────────
-    may, ext_c, bytes_cruce, dif_cruce_df, stats_cruce = _correr_cruce_con_ids(actuales.reset_index(drop=True), ext)
+    # Cobranzas/Señas: solo para las sociedades de SOCIEDADES_COBRANZAS_SENAS (EASA), según la
+    # razón social indicada o, si no se indica, la de la conciliación anterior
+    razon_det = razon_social or _razon_social_anterior(_a_bytes(archivo_conciliacion_anterior))
+    senas = _norm(razon_det or "") in [_norm(x) for x in SOCIEDADES_COBRANZAS_SENAS]
+    aviso_senas = None
+    if not senas and categorizar_mayor(movs)["conciliacion"].eq(COBRANZAS_SENAS).any():
+        aviso_senas = ("El mayor tiene asientos 'Acreditación Señas' pero la sociedad no está marcada para "
+                       "conciliar Cobranzas/Señas por total (SOCIEDADES_COBRANZAS_SENAS). Indicar la razón social.")
+    may, ext_c, bytes_cruce, dif_cruce_df, stats_cruce = _correr_cruce_con_ids(actuales.reset_index(drop=True), ext, senas)
     dif_cruce = (may.loc[~may["pendiente"], "Importe"].sum() - ext_c.loc[~ext_c["pendiente"], "importe"].sum()
                  + pd.to_numeric(dif_cruce_df["importe"], errors="coerce").sum())
 
@@ -1843,7 +1896,7 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                "saldo_mayor_final": saldo_mayor_final, "saldo_ext_inicio": saldo_ext_inicio,
                "saldo_ext_final": saldo_ext_final, "extracto_consistente": ext_ok,
                "dif_cruce": dif_cruce, "tiene_anterior": archivo_conciliacion_anterior is not None,
-               "aviso_posterior": aviso_posterior}
+               "aviso_posterior": " / ".join(x for x in (aviso_posterior, aviso_senas) if x) or None}
     ant, retro, pend_ant = None, None, pd.DataFrame()
     if archivo_conciliacion_anterior is not None:
         ant = leer_conciliacion_anterior(archivo_conciliacion_anterior, cuenta,
@@ -2039,18 +2092,34 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                 f"conciliación anterior no tiene foto del mayor para comparar asiento por asiento. Las conciliaciones "
                 f"generadas con esta lógica guardan la foto: a partir de la próxima se identifica solo.")
         if abs(no_identificado) > TOL_CENTAVOS and "aviso_mayor" not in control and primer_mov is not None:
-            # El mayor cubre el período anterior y la foto, pero el cambio igual no se ve: se cargó,
-            # borró o modificó algo con fecha anterior al inicio del mayor (p. ej. cobranzas de 2025
-            # registradas con su fecha original). Hay que bajar el mayor desde el pendiente más viejo.
+            # El mayor cubre el período anterior y la foto, pero el cambio igual no se ve asiento por
+            # asiento. Hay dos causas posibles y el aviso dice cuál aplica:
+            #  a) hay pendientes anteriores con fecha anterior al inicio del mayor: lo que se registró
+            #     con esas fechas no está en el mayor cargado -> bajarlo desde el pendiente más viejo;
+            #  b) el mayor ya cubre todos los pendientes: el cambio es la modificación o el borrado de
+            #     un asiento que ya existía, con fecha anterior a lo que cubre la foto o hecho antes de
+            #     tomarla. Ningún mayor bajado hoy lo muestra (todos traen el asiento ya modificado):
+            #     hay que buscarlo en el historial de asientos del sistema.
             viejo = pend_ant["fecha"].min() if len(pend_ant) else None
-            desde_bajar = min(viejo, primer_mov) if viejo is not None and pd.notna(viejo) else primer_mov
-            control["aviso_mayor"] = (
-                f"Hay {no_identificado:,.2f} de cambio en el saldo ya conciliado que no se ve en el mayor cargado "
-                f"(cubre desde el {primer_mov:%d/%m/%Y}): son asientos con fecha anterior. Volver a correr con el "
-                f"mayor bajado desde el {pd.Timestamp(desde_bajar).replace(day=1):%d/%m/%Y} (pendiente anterior más "
-                f"antiguo) para identificarlo asiento por asiento.")
-            detalle_ru = (f"Asientos con fecha anterior al {primer_mov:%d/%m/%Y}: bajar el mayor desde el "
-                          f"{pd.Timestamp(desde_bajar).replace(day=1):%d/%m/%Y}")
+            hasta_ant_txt = (f"{pd.Timestamp(ant['hasta']):%d/%m/%Y}" if ant.get("hasta") is not None
+                             else "la conciliación anterior")
+            if viejo is not None and pd.notna(viejo) and pd.Timestamp(viejo).replace(day=1) < primer_mov:
+                desde_bajar = pd.Timestamp(viejo).replace(day=1)
+                control["aviso_mayor"] = (
+                    f"Hay {no_identificado:,.2f} de cambio en el saldo ya conciliado que no se ve en el mayor cargado "
+                    f"(cubre desde el {primer_mov:%d/%m/%Y}). Puede ser algo registrado con fecha anterior: volver a "
+                    f"correr con el mayor bajado desde el {desde_bajar:%d/%m/%Y} (fecha del pendiente anterior más antiguo).")
+                detalle_ru = f"Posible registro con fecha anterior al {primer_mov:%d/%m/%Y}: bajar el mayor desde el {desde_bajar:%d/%m/%Y}"
+            else:
+                ini_foto = foto.attrs.get("cubre_desde") if foto is not None else None
+                desde_foto = f" (la foto cubre desde el {pd.Timestamp(ini_foto):%d/%m/%Y})" if ini_foto is not None and pd.notna(ini_foto) else ""
+                control["aviso_mayor"] = (
+                    f"Hay {no_identificado:,.2f} de cambio en el saldo ya conciliado que no se ve asiento por asiento, y el "
+                    f"mayor cargado ya cubre todos los pendientes anteriores. No es algo cargado con fecha vieja: es la "
+                    f"modificación o el borrado de un asiento que ya existía, con fecha anterior a lo que cubre la foto"
+                    f"{desde_foto} o hecho antes de tomarla. Bajar más mayor no lo muestra: revisar en el sistema los "
+                    f"asientos modificados o borrados después del {hasta_ant_txt}.")
+                detalle_ru = f"Asiento modificado o borrado después del {hasta_ant_txt}: revisar el historial en el sistema"
         if abs(no_identificado) > TOL_CENTAVOS:
             partidas.append(pd.DataFrame([{
                 "lado": "M", "origen": "Retroactivo no identificado", "fecha": desde - timedelta(days=1),
@@ -2271,7 +2340,7 @@ def _armar_lineas_cc(P, hasta):
             sec = "SAL_MAYOR" if efecto > 0 else "ING_MAYOR"
         obs = ("Neto mayor vs extracto" if (sm != 0 and se != 0)
                else str(g["detalle"].iloc[0]) if len(g) == 1 else f"{len(g)} movimientos")
-        if str(cat).startswith("Acred.") or cat == "Propinas":
+        if str(cat).startswith("Acred.") or cat in ("Propinas", COBRANZAS_SENAS):
             sec, obs = (("CRED_BANCO", f"{etiqueta} pendiente de registrar") if efecto > 0
                         else ("ING_MAYOR", f"{etiqueta} registrada de más en el mayor"))
         agregar(sec, None if sm == 0 else g["fecha"].max(), etiqueta, abs(efecto), obs, g, "Período")
@@ -2326,6 +2395,16 @@ def _armar_lineas_cc(P, hasta):
         else:
             concepto = f"{f['concepto']} ({f['referencia']})" if f["referencia"] else f["concepto"]
             obs = f["nombre"] if f["nombre"] not in ("nan", "", "None") else f["detalle"]
+            if f["origen"] == "Retroactivo":
+                # Cargado con fecha ya conciliada y sin pendiente anterior ni movimiento del banco
+                # que lo explique: lo más probable es que duplique algo ya registrado
+                # (9dD: asiento 147777, 26.000, sin tercero, dentro del cobro de GABES de 94.000).
+                tipo = "cobro" if f["importe"] > 0 else "pago"
+                nom = str(f["nombre"]).strip()
+                quien = f"{nom}. " if nom not in ("nan", "", "None", "NaN") else "Sin tercero. "
+                obs = (f"{quien}Cargado después de la conciliación anterior con fecha ya conciliada y no "
+                       f"corresponde a ningún pendiente anterior: posible duplicado de un {tipo} ya "
+                       f"registrado. Verificar qué movimiento del banco lo respalda.")
         agregar(sec, f["fecha"], concepto, abs(f["importe"]), obs, pd.DataFrame([f]), f["origen"])
 
     lineas = pd.DataFrame(lineas, columns=["linea", "seccion", "fecha", "concepto", "importe_hoja", "obs", "origen"])
