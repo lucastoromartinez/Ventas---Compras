@@ -1726,6 +1726,11 @@ class Apareo:
         if items.empty:
             return
         items = items.assign(_v=np.where(items["lado"] == "E", items["importe"], -items["importe"]).round(2))
+        # Un único pendiente que explica exacto el cambio, aunque sea chico (9dD: LX ARGENTINA 400)
+        exacto = items[(items["_v"] - objetivo).abs() <= tol]
+        if len(exacto) == 1:
+            self._cerrar([ir, exacto.index[0]], regla)
+            return
         items = items.reindex(items["_v"].abs().sort_values(ascending=False).index)[:max_items]
         idx = list(items.index)
         mejor = _subconjunto_exacto(list(items["_v"]), objetivo, tol)
@@ -2146,6 +2151,11 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     #      se cruzan y la diferencia queda en una línea aparte.
     ap.uno_a_uno_con_diferencia(ant_e, retro_m | (es_M & per), "Pendiente anterior registrado con diferencia")
     ap.uno_a_uno_con_diferencia(ant_m, es_E & per, "Pendiente anterior impactó en banco con diferencia")
+    # Mismo día: se acepta hasta 1% de diferencia (9dD: cobranza 155.500 registrada por 155.000)
+    ap.uno_a_uno_con_diferencia(ant_e, retro_m | (es_M & per), "Pendiente anterior registrado con diferencia",
+                                max_dias=0, tol_rel=0.01)
+    ap.uno_a_uno_con_diferencia(ant_m, es_E & per, "Pendiente anterior impactó en banco con diferencia",
+                                max_dias=0, tol_rel=0.01)
     # R4. Asientos retroactivos contra movimientos del banco del período
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
@@ -2168,6 +2178,14 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         ap._cerrar([i], REGLA_PREVIO)
 
     P = ap.p
+    # Si el cambio de saldo sin identificar quedó explicado por pendientes anteriores registrados
+    # o anulados, no hace falta bajar más mayor: se reemplaza el aviso
+    ru_ok = P[(P["origen"] == "Retroactivo no identificado") & (P["estado"] == "conciliado")]
+    if len(ru_ok) and control.get("aviso_mayor"):
+        control["aviso_mayor"] = (
+            f"El cambio de saldo de {ru_ok['importe'].sum():,.2f} que no se vio asiento por asiento se explica con "
+            f"pendientes de la conciliación anterior que ya no están (ver hojas Pendientes anteriores y Cruces "
+            f"pend. anteriores). No va a la CC.")
     previo = P[P["regla"] == REGLA_PREVIO]
     if len(previo):
         # Su par quedó en la conciliación anterior: el efecto es parte de lo heredado
