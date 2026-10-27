@@ -928,7 +928,8 @@ def correr_cruce_hipotecario(archivo_mayor, archivo_extracto):
 
 TOL_CENTAVOS = 0.01
 TOL_CRUCE = 0.5
-TOL_CAMBIO_SALDO = 0.05   # el equipo da por explicado un cambio de saldo con hasta 5 centavos
+TOL_CAMBIO_SALDO = 0.05
+TOL_RELATIVA_CAMBIO_SALDO = 0.0001   # 0,01 % del cambio de saldo inicial   # el equipo da por explicado un cambio de saldo con hasta 5 centavos
 MAX_COMBINACION = 4
 
 CATEGORIAS_AGRUPADAS = {
@@ -973,6 +974,36 @@ def _categoria_desde_concepto(concepto) -> str:
         if any(c.startswith(k) or (len(k) > 2 and k in c) for k in claves):
             return cat
     return str(concepto) if concepto else "0"
+
+
+def _subconjunto_cercano(valores, objetivo, tol):
+    """Subconjunto (no vacío) de 'valores' cuya suma difiere de 'objetivo' en a lo sumo 'tol'.
+    Devuelve los índices solo si hay UNA sola combinación posible (búsqueda por mitades)."""
+    import bisect
+    vals = [int(round(v * 100)) for v in valores]
+    meta, tol_c = int(round(objetivo * 100)), int(round(tol * 100))
+    mitad = len(vals) // 2
+
+    def sumas(rango):
+        res = [(0, ())]
+        for i in rango:
+            res += [(s_ + vals[i], c + (i,)) for s_, c in res]
+        return res
+
+    izq = sumas(range(mitad))
+    der = sorted(sumas(range(mitad, len(vals))))
+    claves = [d[0] for d in der]
+    sol = []
+    for s_i, c_i in izq:
+        lo = bisect.bisect_left(claves, meta - tol_c - s_i)
+        hi = bisect.bisect_right(claves, meta + tol_c - s_i)
+        for j in range(lo, hi):
+            comb = c_i + der[j][1]
+            if comb:
+                sol.append(comb)
+                if len(sol) > 1:
+                    return None
+    return list(sol[0]) if len(sol) == 1 else None
 
 
 def _subconjunto_exacto(valores, objetivo, tol=0.01, exigir_unico=True):
@@ -1760,6 +1791,20 @@ class Apareo:
         mejor = _subconjunto_exacto(list(items["_v"]), objetivo, tol)
         if mejor:
             self._cerrar([ir] + [idx[i] for i in mejor], regla)
+            return
+        # Sin combinación exacta: se acepta una ÚNICA combinación que difiera en menos del
+        # 0,01 % del cambio (Ronda 09-26: cambio de -11.977.727,11 explicado por cinco pendientes
+        # de agosto registrados por -11.977.697,10; la diferencia de 30,01 pasa a la diferencia
+        # de la conciliación, como en la planilla del equipo).
+        # Solo pendientes de los dos últimos meses: lo que se registra con fecha ya conciliada son
+        # pendientes recientes, y con los viejos (p. ej. débitos chicos de 2025) aparecen muchas
+        # combinaciones parecidas y no se puede elegir.
+        tol_rel = max(tol, abs(objetivo) * TOL_RELATIVA_CAMBIO_SALDO)
+        f_ru = self.p.at[ir, "fecha"]
+        cerca = items[items["fecha"] >= f_ru - pd.Timedelta(days=62)][:24] if pd.notna(f_ru) else items[:24]
+        sel = _subconjunto_cercano(list(cerca["_v"]), objetivo, tol_rel)
+        if sel:
+            self._cerrar([ir] + [list(cerca.index)[i] for i in sel], regla + " (con diferencia)")
 
     def por_categoria_mes(self, mask_a, mask_b, tol, regla):
         """Todos los pendientes de una categoría y mes de referencia de A contra los de B, por suma."""
@@ -2309,6 +2354,38 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
 # 6. LÍNEAS DE LA HOJA CC
 # ─────────────────────────────────────────────────────────────────────────────
 
+DIAS_SIGNO_INVERTIDO = 5
+
+
+def _signos_invertidos(pend):
+    """Asiento pendiente y movimiento del banco pendiente por el mismo importe con signo
+    contrario, a pocos días: probablemente el asiento se registró con el signo invertido
+    (Ronda: asiento 187087 Pago S/F +3.500.000 del 18/09 y débito del banco de 3.500.000 a
+    PASEO RONDA del mismo día). No se cruzan (suman el doble): solo se avisa en la observación.
+    Devuelve {índice de la partida: texto}."""
+    m = pend[(pend["lado"] == "M") & (pend["origen"] != "Pendiente anterior") & pend["fecha"].notna()]
+    e = pend[(pend["lado"] == "E") & pend["fecha"].notna()]
+    out, usados = {}, set()
+    for im, a in m.iterrows():
+        c = e[((e["importe"] + a["importe"]).abs() <= TOL_EXACTO)
+              & ((e["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=DIAS_SIGNO_INVERTIDO))
+              & ~e.index.isin(usados)]
+        if c.empty:
+            continue
+        ie = c.assign(_d=(c["fecha"] - a["fecha"]).abs()).sort_values("_d").index[0]
+        b = e.loc[ie]
+        usados.add(ie)
+        tipo_b = "débito" if b["importe"] < 0 else "crédito"
+        nombre_b = str(b.get("nombre") or "")
+        nombre_b = "" if nombre_b in ("nan", "None") else f" ({nombre_b})"
+        ref = str(a.get("referencia") or "").replace("Asiento ", "asiento ")
+        out[im] = (f"Posible registración con signo invertido: el banco tiene un {tipo_b} de "
+                   f"{abs(b['importe']):,.2f} del {b['fecha']:%d/%m/%Y}{nombre_b}.")
+        out[ie] = (f"Posible registración con signo invertido: el {ref} del {a['fecha']:%d/%m/%Y} "
+                   f"registra {a['importe']:,.2f} (signo contrario).")
+    return out
+
+
 def _armar_lineas_cc(P, hasta):
     pend = P[P["estado"] == "pendiente"].copy()
     lineas, det, centavos_neteo = [], [], []
@@ -2369,8 +2446,17 @@ def _armar_lineas_cc(P, hasta):
             sec = ("CRED_BANCO" if efecto > 0 else "DEB_BANCO") if abs(se) >= abs(sm) else \
                 ("SAL_MAYOR" if efecto > 0 else "ING_MAYOR")
             etiqueta = f"{CATEGORIAS_AGRUPADAS[cat]} {mes}"
-            obs = (f"Pendiente anterior {abs(se):,.2f} neto de lo cargado con fecha ya conciliada {abs(sm):,.2f} "
-                   f"(asientos " + ", ".join(g["referencia"].astype(str).str.replace("Asiento ", "")) + ")")
+            # Detalle de qué se netea: pendientes anteriores del banco contra lo del mayor (pendiente
+            # anterior del mayor, si lo hay, + lo cargado con fecha ya conciliada)
+            pa_m = pa.loc[pa["lado"] == "M", "importe"].sum()
+            gm = g.loc[g["lado"] == "M", "importe"].sum()
+            asis = ", ".join(g["referencia"].astype(str).str.replace("Asiento ", ""))
+            partes = ([f"pendiente anterior del mayor {abs(pa_m):,.2f}"] if abs(pa_m) > TOL_EXACTO else []) + \
+                [f"cargado con fecha ya conciliada {abs(gm):,.2f} (asientos {asis})"]
+            obs = (f"Banco {abs(se):,.2f} (pendiente anterior) contra mayor {abs(sm):,.2f}: " + " + ".join(partes)
+                   if abs(pa_m) > TOL_EXACTO else
+                   f"Pendiente anterior {abs(se):,.2f} neto de lo cargado con fecha ya conciliada {abs(sm):,.2f} "
+                   f"(asientos {asis})")
         else:
             sec = _seccion("M", sm)
             etiqueta = f"{CATEGORIAS_AGRUPADAS[cat]} {mes} cargado con fecha ya conciliada"
@@ -2378,6 +2464,7 @@ def _armar_lineas_cc(P, hasta):
         agregar(sec, g["fecha"].max(), etiqueta, abs(efecto), obs, g2, "Retroactivo")
     resto = resto.drop(list(retro_agr.index) + usados)
 
+    invertidos = _signos_invertidos(resto)
     for _, f in resto.sort_values(["origen", "fecha"]).iterrows():
         sec = _seccion(f["lado"], f["importe"])
         if f["origen"] == "Período":
@@ -2405,6 +2492,12 @@ def _armar_lineas_cc(P, hasta):
                 obs = (f"{quien}Cargado después de la conciliación anterior con fecha ya conciliada y no "
                        f"corresponde a ningún pendiente anterior: posible duplicado de un {tipo} ya "
                        f"registrado. Verificar qué movimiento del banco lo respalda.")
+        if f.name in invertidos:
+            if f["origen"] == "Retroactivo":
+                # reemplaza el aviso de posible duplicado: aquí la contrapartida en el banco existe
+                obs = f"{invertidos[f.name]} Cargado después de la conciliación anterior con fecha ya conciliada."
+            else:
+                obs = f"{invertidos[f.name]} {obs if isinstance(obs, str) and obs not in ('nan', 'None') else ''}".strip()
         agregar(sec, f["fecha"], concepto, abs(f["importe"]), obs, pd.DataFrame([f]), f["origen"])
 
     lineas = pd.DataFrame(lineas, columns=["linea", "seccion", "fecha", "concepto", "importe_hoja", "obs", "origen"])
