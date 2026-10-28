@@ -5,6 +5,25 @@ el cuadro de conceptos: cruza las ventas de Rappi contra Dean y HIO, cruza las
 facturas y las acreditaciones contra el mayor de recaudación, y deja armado el
 cuadro de pendientes del mes siguiente. Devuelve el mismo zip del cruce más el
 libro 'Conciliacion.xlsx'.
+
+Revisión 28/10/2026 (cierre de septiembre):
+- El cuadro de pendientes puede traer todos los meses apilados: se trabaja
+  sobre el último bloque y el resto se conserva como histórico.
+- El mayor se recorta al último día del mes (venía con asientos de octubre).
+- Las acreditaciones pendientes se leen sólo del bloque 'Acreditaciones de …
+  Registradas en …' del último mes (antes tomaba líneas de meses viejos).
+- Cruce de facturas por período: si el mayor tiene más importe que las facturas
+  del período (otras ya registradas), o no hay combinación que explique la
+  diferencia, la factura pasa al cruce por número en vez de quedar como
+  'diferencia'.
+- Formatos exigidos en el cuadro de pendientes: facturas
+  'A-nnnn-nnnnnnnn Periodo dd-mm-aaaa al dd-mm-aaaa' y liquidaciones
+  'Liquidacion dd/mm/aaaa a dd/mm/aaaa'. Otros formatos no se leen.
+- Las facturas no asignadas que ya están en el pendientes, o que son de un
+  período posterior al mes, no se vuelven a imputar.
+- El bloque del mes se arma con una línea por concepto (sumado) en orden
+  alfabético, como el cuadro manual; la 'Diferencia de centavos' va al pie del
+  bloque 'Diferencia de Venta y extracto' del mes.
 """
 
 import calendar
@@ -33,16 +52,9 @@ MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
 TOLERANCIA_FACTURA = 0.01
 TOLERANCIA_ACREDITACION = 5
 
-# Las búsquedas por combinación son exponenciales: con pocas filas se prueban
-# todas, y si hay muchas se limita el tamaño de la combinación para que la app
-# no quede colgada. Cuando se recorta, queda avisado en las advertencias.
 MAX_FILAS_COMBINACION_COMPLETA = 15
 MAX_TAM_COMBINACION_RECORTADA = 3
 
-
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
 
 def _avisar(advertencias, mensaje):
     if advertencias is not None:
@@ -50,9 +62,6 @@ def _avisar(advertencias, mensaje):
 
 
 def _normalizar(texto):
-    """Minúsculas, sin tildes ni signos: para encontrar columnas escritas de
-    cualquier manera, incluso con los nombres rotos que traen algunos reportes
-    ('Serie / NÃºmero' en vez de 'Serie / Número')."""
     if texto is None:
         return ''
     sin_tildes = unicodedata.normalize('NFKD', str(texto))
@@ -61,7 +70,6 @@ def _normalizar(texto):
 
 
 def _buscar_col(df, *claves, obligatoria=True, nombre_humano=None):
-    """Primera columna cuyo nombre normalizado contiene todas las claves."""
     claves_norm = [_normalizar(c) for c in claves]
     for col in df.columns:
         col_norm = _normalizar(col)
@@ -76,7 +84,6 @@ def _buscar_col(df, *claves, obligatoria=True, nombre_humano=None):
 
 
 def _renombrar_columnas(df, mapa):
-    """mapa: {'Nombre Canónico': ('clave1', 'clave2'), ...}"""
     renombres = {}
     for canonico, claves in mapa.items():
         if canonico in df.columns:
@@ -87,7 +94,6 @@ def _renombrar_columnas(df, mapa):
 
 
 def _leer_bytes(archivo):
-    """Bytes de un archivo subido, sin dejarlo consumido para el próximo uso."""
     if hasattr(archivo, 'getvalue'):
         return archivo.getvalue()
     try:
@@ -109,16 +115,12 @@ def _tiene_columnas(df, grupos_clave):
 
 
 def _leer_reporte(archivo, etiqueta, grupos_clave=()):
-    """Lee un reporte Excel y verifica que sea el que corresponde a ese
-    casillero. Si el archivo trae filas de título arriba de los encabezados,
-    busca la fila que tiene las columnas esperadas y la usa como encabezado."""
     datos = _leer_bytes(archivo)
     df = pd.read_excel(_como_archivo(datos))
 
     if not grupos_clave or _tiene_columnas(df, grupos_clave):
         return df
 
-    # El encabezado puede estar más abajo (títulos, logos, filtros del export).
     crudo = pd.read_excel(_como_archivo(datos), header=None, nrows=15)
     for i in range(len(crudo)):
         fila = [_normalizar(v) for v in crudo.iloc[i].tolist()]
@@ -135,8 +137,6 @@ def _leer_reporte(archivo, etiqueta, grupos_clave=()):
 
 
 def _leer_pendientes(archivo, etiqueta):
-    """El cuadro de pendientes viene sin encabezados: texto en la segunda
-    columna y montos en la cuarta."""
     df = pd.read_excel(_como_archivo(_leer_bytes(archivo)), header=None)
 
     if df.shape[1] < 4:
@@ -156,8 +156,49 @@ def _leer_pendientes(archivo, etiqueta):
     return df
 
 
+def separar_historico_y_ultimo_bloque(df_pendientes, advertencias=None):
+    """El archivo de conciliación acumula un bloque por mes (cada uno arranca
+    con una fecha y 'Saldo según Mayor Contable al ...'). Se trabaja sólo sobre
+    el último bloque; el resto queda como histórico y se vuelve a escribir tal
+    cual adelante del bloque nuevo. Devuelve (historico, ultimo_bloque)."""
+    texto = df_pendientes.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else _normalizar(x))
+    idx_saldo = [i for i, t in texto.items() if t.startswith("saldosegunmayorcontable")]
+    inicio = idx_saldo[-1]
+    # La fila de fecha que encabeza el bloque va con él.
+    if inicio > 0 and isinstance(df_pendientes.iloc[inicio - 1, 1], (pd.Timestamp, dt.date, dt.datetime)):
+        inicio -= 1
+    elif inicio > 1 and df_pendientes.iloc[inicio - 1].isna().all() and \
+            isinstance(df_pendientes.iloc[inicio - 2, 1], (pd.Timestamp, dt.date, dt.datetime)):
+        inicio -= 2
+    if len(idx_saldo) > 1:
+        _avisar(advertencias,
+                f"El cuadro de pendientes trae {len(idx_saldo)} meses apilados: se tomó el último "
+                f"(fila {inicio + 1}) y los anteriores se conservan como histórico.")
+    historico = df_pendientes.iloc[:inicio].reset_index(drop=True)
+    ultimo = df_pendientes.iloc[inicio:].reset_index(drop=True)
+    return historico, ultimo
+
+
+def filtrar_mayor_hasta_fin_de_mes(recaudacion, anio, mes_numero, advertencias=None):
+    """El mayor suele exportarse con asientos del mes siguiente (facturas que
+    se registran en los primeros días de octubre, por ejemplo). Todo lo
+    posterior al último día del mes que se concilia queda afuera: si no, el
+    saldo final no es el del cierre y facturas todavía no registradas al cierre
+    aparecen como cobradas."""
+    df = recaudacion.copy()
+    col_fecha = next((c for c in df.columns if _normalizar(c) == 'fecha'), None) or \
+        _buscar_col(df, 'fecha', nombre_humano='Fecha')
+    fechas = pd.to_datetime(df[col_fecha], errors='coerce', dayfirst=True)
+    tope = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
+    posteriores = fechas > tope
+    if posteriores.any():
+        _avisar(advertencias,
+                f"Mayor: se excluyeron {int(posteriores.sum())} asiento/s posteriores al "
+                f"{tope:%d/%m/%Y} (quedan para el mes siguiente).")
+    return df[~posteriores].reset_index(drop=True)
+
+
 def _normalizar_id(serie):
-    """IDs que a veces vienen como float ('123456.0') y a veces como texto."""
     def _conv(x):
         if pd.isna(x):
             return None
@@ -169,8 +210,6 @@ def _normalizar_id(serie):
 
 
 def _hasta_fecha(serie, tope):
-    """Máscara booleana 'la fecha es de este mes o anterior'. Las filas sin
-    fecha quedan afuera (se imputan al mes siguiente)."""
     fechas = pd.to_datetime(serie, errors='coerce')
     if fechas.empty:
         return pd.Series([], dtype=bool, index=serie.index)
@@ -178,8 +217,6 @@ def _hasta_fecha(serie, tope):
 
 
 def _buscar_subset(registros_df, objetivo_valor, col_valor="Importe", advertencias=None):
-    """Busca la combinación de filas cuya suma da el objetivo. Devuelve los
-    índices de la primera combinación que cierra, o None."""
     registros = list(registros_df.itertuples())
     objetivo = round(abs(objetivo_valor), 2)
 
@@ -202,13 +239,7 @@ def _buscar_subset(registros_df, objetivo_valor, col_valor="Importe", advertenci
     return None
 
 
-# ─────────────────────────────────────────────
-# IMPORTAR Y DEPURAR VENTAS
-# ─────────────────────────────────────────────
-
 def importar_ventas_rappi(archivos_liq):
-    """Hoja 'Detalle' de cada liquidación (encabezados en la segunda fila), solo
-    las filas cuya 'Tipo de transacción' es ORDEN."""
     dfs = []
     for nombre, datos in archivos_liq:
         try:
@@ -226,9 +257,6 @@ def importar_ventas_rappi(archivos_liq):
 
 
 def depurar_venta_rappi(df):
-    """Parte 'Fecha de creación orden' en 'Fecha' y 'Hora', pasa los IDs a texto
-    y agrega 'Venta Neta' = Venta Bruta + Descuento de Producto asumido por el
-    aliado (el descuento viene en negativo)."""
     df = df.copy()
 
     meses = {'ene': '01', 'feb': '02', 'mar': '03', 'abr': '04',
@@ -291,8 +319,6 @@ def depurar_venta_rappi(df):
 
 
 def depurar_dean_rappi(df, advertencias=None):
-    """Parte 'Fecha' en 'Fecha' y 'Hora', tira las filas sin fecha (totales y
-    separadores del reporte) y agrega 'Importe' = Online + Efectivo."""
     df = _renombrar_columnas(df.copy(), {
         'Fecha':    ('fecha',),
         'Online':   ('online',),
@@ -320,14 +346,7 @@ def depurar_dean_rappi(df, advertencias=None):
     return df
 
 
-# ─────────────────────────────────────────────
-# CRUCES DE VENTAS
-# ─────────────────────────────────────────────
-
 def cruzar_hio_documento_metodo(df_hio_documento, df_hio_metodo):
-    """Cruza el reporte de documentos contra el de métodos de pago filtrado por
-    RAPPI, por 'Serie / Número'. El match es el HIO combinado que después se
-    cruza contra Rappi."""
     df_hio_metodo = _renombrar_columnas(df_hio_metodo.copy(), {
         'Serie / Número': ('serie',),
         'Medio Pago':     ('medio', 'pago'),
@@ -364,8 +383,6 @@ def cruzar_hio_documento_metodo(df_hio_documento, df_hio_metodo):
 
 
 def cruzar_dean(df_venta_rappi_dep, df_dean_dep):
-    """Ventas Rappi de las tiendas Dean contra el sistema de Dean, por ID de
-    orden. El match de Rappi trae 'Importe Dean' y 'Diferencia'."""
     df_rappi_dean = df_venta_rappi_dep[
         df_venta_rappi_dep["Nombre de la tienda"].astype(str).str.contains("Dean", case=False, na=False)
     ].copy()
@@ -405,8 +422,6 @@ def cruzar_dean(df_venta_rappi_dep, df_dean_dep):
 
 
 def cruzar_hio(df_hio, df_venta_rappi_dep):
-    """Ventas Rappi (sin Dean ni Atalaya, que se cruzan aparte) contra HIO, por
-    ID de orden vs Localizador."""
     df_rappi_hio = df_venta_rappi_dep[
         ~df_venta_rappi_dep["Nombre de la tienda"].astype(str).str.contains(
             "dean|atalaya", case=False, na=False, regex=True
@@ -449,8 +464,6 @@ def cruzar_hio(df_hio, df_venta_rappi_dep):
 
 
 def cruzar_hio_fecha_venta(falta_rappi_hio1, falta_hio1):
-    """Segundo cruce de HIO: lo que no coincidió por Localizador se cruza por
-    Fecha + Venta. Si hay más de un candidato, gana la hora más próxima."""
     def _hora_a_timedelta(serie):
         def _conv(x):
             if pd.isna(x):
@@ -505,32 +518,21 @@ def cruzar_hio_fecha_venta(falta_rappi_hio1, falta_hio1):
     return match_hio2, match_hio_rappi2, falta_rappi_hio2, falta_hio2
 
 
-# ─────────────────────────────────────────────
-# TOTALES DE VENTA
-# ─────────────────────────────────────────────
-
 def calcular_total_dean(df_venta_rappi_dep, df_dean_dep):
-    """Diferencia de venta D&D del mes: venta neta de Rappi de las tiendas Dean
-    menos lo registrado en el sistema de Dean. None si no hay local Dean."""
     rappi_dean = df_venta_rappi_dep[
         df_venta_rappi_dep["Nombre de la tienda"].astype(str).str.contains("dean", case=False, na=False)
     ]
-
     if rappi_dean.empty and df_dean_dep.empty:
         return None
-
     return round(rappi_dean["Venta Neta"].sum() - df_dean_dep["Importe"].sum(), 2)
 
 
 def calcular_total_hio(match_hio_rappi1, falta_rappi_hio2, falta_hio2):
-    """Diferencia de venta HIO del mes. None si no hay nada de HIO."""
     if match_hio_rappi1.empty and falta_rappi_hio2.empty and falta_hio2.empty:
         return None
-
     diferencia_localizador = match_hio_rappi1["Diferencia"].sum()
     total_falta_hio = falta_rappi_hio2["Venta"].sum()
     total_falta_rappi = falta_hio2["Venta Neta"].sum()
-
     return round(-diferencia_localizador + total_falta_hio - total_falta_rappi, 2)
 
 
@@ -542,14 +544,14 @@ def calcular_venta_hio(df_hio):
     return round(df_hio["Venta"].sum(), 2)
 
 
-# ─────────────────────────────────────────────
-# LECTURA DEL CUADRO DE CONCEPTOS
-# ─────────────────────────────────────────────
-
 PATRON_FACTURA_NUM = re.compile(r'^A-\d{4}-\d{8}$')
 PATRON_FACTURA_CTA_DIA = re.compile(r'^[A-Za-z]+\d+$')
 PATRON_LIQUIDACION = re.compile(r'^Liquidacion (\d{2})/(\d{2})/(\d{4}) a (\d{2})/(\d{2})/(\d{4})$')
 PATRON_FECHA_PAGO = re.compile(r'^Fecha de Pago (\d{2})/(\d{2})/(\d{4})$')
+# '<Nro Factura> Periodo dd-mm-aaaa al dd-mm-aaaa' (como se escribe en el pendientes)
+PATRON_FACTURA_CON_PERIODO = re.compile(
+    r'^(A-\d{4}-\d{8}|[A-Za-z]+\d+)\s+Periodo\s+(?:del\s+)?(\d{2}-\d{2}-\d{4})\s+al\s+(\d{2}-\d{2}-\d{4})$'
+)
 
 
 def _texto_concepto(row):
@@ -557,10 +559,6 @@ def _texto_concepto(row):
 
 
 def extraer_facturas_cuadro_conceptos(df_cuadro_conceptos):
-    """Las filas del cuadro que son facturas ('A-nnnn-nnnnnnnn' o cuentas al día
-    tipo 'VARACC21023015'). Cada factura hereda el 'Periodo' y la 'Fecha de Pago'
-    de la liquidación que la encabeza, y el 'Orden' (posición en el cuadro) para
-    poder reconstruir después el orden intercalado."""
     periodo_actual, fecha_pago_actual = None, None
     filas = []
 
@@ -586,25 +584,73 @@ def extraer_facturas_cuadro_conceptos(df_cuadro_conceptos):
             fecha_pago_actual = pd.Timestamp(int(ap), int(mp), int(dp))
             continue
 
-        if PATRON_FACTURA_NUM.match(texto) or PATRON_FACTURA_CTA_DIA.match(texto):
-            formato = "numerico" if PATRON_FACTURA_NUM.match(texto) else "cuentas_al_dia"
+        # Una factura no asignada puede venir con su período escrito al lado
+        # ('A-0002-02046013 Periodo 01-10-2026 al 04-10-2026'): se usa ese.
+        m_fac = PATRON_FACTURA_CON_PERIODO.match(texto)
+        if m_fac:
+            nro, periodo_propio = m_fac.group(1), f"Periodo {m_fac.group(2)} al {m_fac.group(3)}"
+        else:
+            nro, periodo_propio = texto, None
+
+        if PATRON_FACTURA_NUM.match(nro) or PATRON_FACTURA_CTA_DIA.match(nro):
+            formato = "numerico" if PATRON_FACTURA_NUM.match(nro) else "cuentas_al_dia"
             filas.append({
                 "Orden": idx,
-                "Nro Factura": texto,
+                "Nro Factura": nro,
                 "Importe": round(float(monto), 2),
                 "Formato": formato,
-                "Periodo": periodo_actual,
+                "Periodo": periodo_actual or periodo_propio,
                 "Fecha de Pago": fecha_pago_actual,
+                "Asignada": periodo_actual is not None,
             })
 
     return pd.DataFrame(
-        filas, columns=["Orden", "Nro Factura", "Importe", "Formato", "Periodo", "Fecha de Pago"]
+        filas, columns=["Orden", "Nro Factura", "Importe", "Formato", "Periodo", "Fecha de Pago", "Asignada"]
     ).reset_index(drop=True)
 
 
+def depurar_facturas_no_asignadas(facturas_periodo_actual, facturas_pendientes, anio, mes_numero,
+                                  advertencias=None):
+    """Las facturas que no matchearon con ninguna liquidación del mes pueden ser
+    de dos clases que no corresponden a este cierre:
+    - las que ya figuran en el cuadro de pendientes del mes anterior (se cruzan
+      por ese lado; si quedaran acá también, se contarían dos veces);
+    - las de períodos posteriores al mes (se subieron facturas de octubre al
+      conciliar septiembre): van al mes que viene.
+    Las demás (sin liquidación y sin período posterior) se dejan, con aviso."""
+    df = facturas_periodo_actual.copy()
+    if df.empty:
+        return df
+
+    ya_pendientes = set(facturas_pendientes["Nro Factura"]) if facturas_pendientes is not None else set()
+    tope = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
+
+    def _inicio_periodo(p):
+        m = re.match(r'^Periodo (\d{2})-(\d{2})-(\d{4})', str(p))
+        return pd.Timestamp(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else pd.NaT
+
+    no_asignada = ~df["Asignada"].astype(bool)
+    repetida = no_asignada & df["Nro Factura"].isin(ya_pendientes)
+    posterior = no_asignada & (df["Periodo"].apply(_inicio_periodo) > tope)
+    sin_dato = no_asignada & ~repetida & ~posterior
+
+    if repetida.any():
+        _avisar(advertencias,
+                f"Facturas no asignadas que ya estaban en el cuadro de pendientes (se cruzan por ahí): "
+                f"{', '.join(df.loc[repetida, 'Nro Factura'])}.")
+    if posterior.any():
+        _avisar(advertencias,
+                f"Facturas de períodos posteriores al {tope:%d/%m/%Y}, se dejan para el mes siguiente: "
+                f"{', '.join(df.loc[posterior, 'Nro Factura'])}.")
+    if sin_dato.any():
+        _avisar(advertencias,
+                f"Facturas sin liquidación del mes (se cruzan igual contra el mayor): "
+                f"{', '.join(df.loc[sin_dato, 'Nro Factura'])}.")
+
+    return df[~repetida & ~posterior].reset_index(drop=True)
+
+
 def extraer_conceptos_cuadro_conceptos(df_cuadro_conceptos):
-    """Los conceptos sueltos del cuadro: todo lo que no es factura, ni 'Valor
-    total a transferir', ni encabezado (tienda / liquidación / fecha de pago)."""
     tienda_actual, periodo_actual, fecha_pago_actual = None, None, None
     filas = []
 
@@ -636,7 +682,8 @@ def extraer_conceptos_cuadro_conceptos(df_cuadro_conceptos):
 
         if texto == "Valor total a transferir":
             continue
-        if PATRON_FACTURA_NUM.match(texto) or PATRON_FACTURA_CTA_DIA.match(texto):
+        if PATRON_FACTURA_NUM.match(texto) or PATRON_FACTURA_CTA_DIA.match(texto) \
+                or PATRON_FACTURA_CON_PERIODO.match(texto):
             continue
 
         filas.append({
@@ -654,7 +701,6 @@ def extraer_conceptos_cuadro_conceptos(df_cuadro_conceptos):
 
 
 def extraer_liquidaciones_cuadro_conceptos(df_cuadro_conceptos):
-    """Una fila por liquidación, con su 'Valor total a transferir'."""
     tienda_actual, concepto_actual, fecha_pago_actual = None, None, None
     filas = []
 
@@ -696,9 +742,6 @@ def extraer_liquidaciones_cuadro_conceptos(df_cuadro_conceptos):
 
 
 def detectar_mes_cuadro_conceptos(df_cuadro_conceptos, advertencias=None):
-    """El mes que se está cerrando, a partir de los períodos de liquidación del
-    cuadro: el mes/año más frecuente entre las fechas de inicio, así una
-    liquidación que arranca a fin del mes anterior no desvía la detección."""
     meses = []
     for _, row in df_cuadro_conceptos.iterrows():
         m = PATRON_LIQUIDACION.match(_texto_concepto(row))
@@ -727,10 +770,6 @@ def _resolver_mes(anio, mes_numero, cuadro_conceptos, advertencias=None):
     return anio, mes_numero
 
 
-# ─────────────────────────────────────────────
-# CRUCE DE FACTURAS CONTRA RECAUDACIÓN
-# ─────────────────────────────────────────────
-
 def _preparar_recaudacion(recaudacion):
     df_rec = _renombrar_columnas(recaudacion.copy(), {
         'Comentario':  ('comentario',),
@@ -743,16 +782,11 @@ def _preparar_recaudacion(recaudacion):
 
 
 def _homologar_factura(nro):
-    """'A-0002-01921352' -> '0002-01921352', que es como viene en el mayor."""
     m = re.match(r'^A-(\d{4}-\d{8})$', str(nro).strip())
     return m.group(1) if m else None
 
 
 def cruzar_facturas_periodo_actual(recaudacion, facturas_periodo_actual, advertencias=None):
-    """Cruza las facturas del cuadro contra el mayor en tres etapas: por período,
-    por número de factura y por combinación contra créditos agrupados. Lo que no
-    cierra queda en 'falta', conservando 'Orden' y 'Fecha de Pago' para poder
-    imputarlo al mes que corresponde."""
     def _digitos(texto):
         return re.sub(r'\D', '', str(texto))
 
@@ -783,9 +817,14 @@ def cruzar_facturas_periodo_actual(recaudacion, facturas_periodo_actual, adverte
             filas_match.append({"Periodo": periodo, "Nro Factura": None,
                                 "Importe": importe_total, "Haber": haber})
             continue
-        idx_faltante = _buscar_subset(grupo, diff, advertencias=advertencias)
+        # Si el mayor tiene MÁS que las facturas del grupo, el excedente es de
+        # otras facturas del mismo período ya registradas: el total por período
+        # no sirve y se pasa al cruce por número. Si tiene MENOS, se busca qué
+        # facturas faltan; si ninguna combinación lo explica, también se pasa
+        # al cruce por número en lugar de darlo por diferencia.
+        idx_faltante = _buscar_subset(grupo, diff, advertencias=advertencias) if diff < 0 else None
         if idx_faltante is None:
-            filas_diferencia.append({"Periodo": periodo, "Nro Factura": None, "Diferencia": diff})
+            candidatas.append(grupo)
             continue
         candidatas.append(grupo.loc[idx_faltante])
         resto = grupo.drop(index=idx_faltante)
@@ -845,8 +884,6 @@ def cruzar_facturas_periodo_actual(recaudacion, facturas_periodo_actual, adverte
 
 
 def extraer_facturas_pendientes(df_pendientes):
-    """Del cuadro de pendientes (sin encabezados: columna 1 texto, columna 3
-    monto), las líneas '<Nro Factura> Periodo dd-mm-aaaa al dd-mm-aaaa'."""
     patron_completo = re.compile(
         r'^(A-\d{4}-\d{8}|[A-Za-z]+\d+)\s+Periodo\s+(?:del\s+)?(\d{2}-\d{2}-\d{4})\s+al\s+(\d{2}-\d{2}-\d{4})$'
     )
@@ -857,16 +894,15 @@ def extraer_facturas_pendientes(df_pendientes):
     filas = []
     for idx, t in texto.items():
         m = patron_completo.match(t)
-        if not m:
+        if not m or pd.isna(monto[idx]):
             continue
-        nro_factura = m.group(1)
+        nro_factura, periodo = m.group(1), f"Periodo {m.group(2)} al {m.group(3)}"
         formato = "numerico" if PATRON_FACTURA_NUM.match(nro_factura) else (
             "cuentas_al_dia" if PATRON_FACTURA_CTA_DIA.match(nro_factura) else None
         )
         filas.append({
             "Nro Factura": nro_factura,
-            "Periodo": f"Periodo {m.group(2)} al {m.group(3)}",
-            # El archivo mezcla signos según la sección contable de origen.
+            "Periodo": periodo,
             "Importe": round(abs(monto[idx]), 2),
             "Formato": formato,
         })
@@ -875,10 +911,6 @@ def extraer_facturas_pendientes(df_pendientes):
 
 
 def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=None):
-    """Mismas tres etapas que el cruce del período actual, pero los comentarios
-    del mayor vienen en formatos dispares ('Periodo del 29-06 al 30-06',
-    'DEL 27/07 AL 31/07', 'DE 17/08 AL 23/08/2026'), así que el período se
-    normaliza a día+mes de las dos fechas, que es lo único confiable."""
     patron_fecha = re.compile(r'(\d{1,2})[/-](\d{1,2})(?:[/-]\d{2,4})?')
 
     def _clave_periodo(texto):
@@ -900,7 +932,6 @@ def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=No
 
     filas_match, filas_diferencia, candidatas_etapa2 = [], [], []
 
-    # ── ETAPA 1: por período ──
     for periodo, grupo in facturas_pendientes.groupby("Periodo"):
         importe_total = round(grupo["Importe"].sum(), 2)
         clave = _clave_periodo(periodo)
@@ -916,9 +947,14 @@ def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=No
                                 "Importe": importe_total, "Haber": haber})
             continue
 
-        idx_faltante = _buscar_subset(grupo, diff, advertencias=advertencias)
+        # Si el mayor tiene MÁS que las facturas del grupo, el excedente es de
+        # otras facturas del mismo período ya registradas: el total por período
+        # no sirve y se pasa al cruce por número. Si tiene MENOS, se busca qué
+        # facturas faltan; si ninguna combinación lo explica, también se pasa
+        # al cruce por número en lugar de darlo por diferencia.
+        idx_faltante = _buscar_subset(grupo, diff, advertencias=advertencias) if diff < 0 else None
         if idx_faltante is None:
-            filas_diferencia.append({"Periodo": periodo, "Nro Factura": None, "Diferencia": diff})
+            candidatas_etapa2.append(grupo)
             continue
 
         candidatas_etapa2.append(grupo.loc[idx_faltante])
@@ -930,7 +966,6 @@ def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=No
     df_candidatas = pd.concat(candidatas_etapa2, ignore_index=True) if candidatas_etapa2 else \
         pd.DataFrame(columns=["Nro Factura", "Periodo", "Importe", "Formato"])
 
-    # ── ETAPA 2: por Nro Factura ──
     haber_por_factura = df_rec.dropna(subset=["Su factura"]).groupby("Su factura")["Haber"].sum()
 
     filas_falta_pre_etapa3 = []
@@ -951,7 +986,6 @@ def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=No
             filas_diferencia.append({"Periodo": fila["Periodo"], "Nro Factura": fila["Nro Factura"],
                                      "Diferencia": diff})
 
-    # ── ETAPA 3: contra créditos agrupados (sin 'Su factura' propia) ──
     agregados = (
         df_rec[df_rec["_clave_periodo"].notna() & df_rec["Su factura"].isna()]
         .groupby("_clave_periodo", as_index=False)["Haber"].sum()
@@ -983,26 +1017,29 @@ def cruzar_facturas_pendientes(recaudacion, facturas_pendientes, advertencias=No
 
 
 def extraer_acreditaciones_pendientes(pendientes_mes_anterior):
-    """Las liquidaciones que quedaron a cobrar este mes: las líneas
-    'Liquidacion dd/mm/aaaa a dd/mm/aaaa' del cuadro de pendientes."""
-    patron = re.compile(r'^Liquidacion \d{2}/\d{2}/\d{4} a \d{2}/\d{2}/\d{4}$')
+    """Sólo las liquidaciones del bloque 'Acreditaciones de <mes> Registradas
+    en <mes siguiente>' (no cualquier 'Liquidacion ...' que ande por el cuadro),
+    en el formato 'Liquidacion dd/mm/aaaa a dd/mm/aaaa'."""
+    patron_header = re.compile(r'^Acreditaciones de .+ Registradas en .+$', re.IGNORECASE)
 
     texto = pendientes_mes_anterior.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else str(x).strip())
     monto = pd.to_numeric(pendientes_mes_anterior.iloc[:, 3], errors="coerce")
 
-    filas = [
-        {"Concepto": t, "Importe": round(abs(monto[idx]), 2)}
-        for idx, t in texto.items() if patron.match(t)
-    ]
+    filas, dentro = [], False
+    for idx, t in texto.items():
+        if patron_header.match(t) and not t.lower().startswith("gastos"):
+            dentro = True
+            continue
+        if not dentro:
+            continue
+        if PATRON_LIQUIDACION.match(t) and pd.notna(monto[idx]):
+            filas.append({"Concepto": t, "Importe": round(abs(monto[idx]), 2)})
+        else:
+            dentro = False
     return pd.DataFrame(filas, columns=["Concepto", "Importe"]).reset_index(drop=True)
 
 
 def separar_acreditaciones_negativas(liquidaciones_mes_actual):
-    """Una liquidación con 'Valor total a transferir' negativo no se cobra, así
-    que Rappi nunca la acredita: si se dejara en el cruce, el mayor quedaría
-    siempre corto contra lo esperado y el buscador de combinaciones se pondría a
-    adivinar qué liquidación explica la diferencia. Se aparta y va derecho al
-    cuadro de pendientes."""
     negativas = liquidaciones_mes_actual[liquidaciones_mes_actual["Importe"] < 0].reset_index(drop=True)
     positivas = liquidaciones_mes_actual[liquidaciones_mes_actual["Importe"] >= 0].reset_index(drop=True)
     return positivas, negativas
@@ -1010,10 +1047,6 @@ def separar_acreditaciones_negativas(liquidaciones_mes_actual):
 
 def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anterior,
                           anio, mes_numero, advertencias=None):
-    """Chequea que las acreditaciones del mes estén bien cargadas en el mayor:
-    liquidaciones del cuadro con fecha de pago dentro del mes, más las que venían
-    pendientes, contra las entradas 'Acreditación Rappi mm-aaaa'. Si no cuadra,
-    busca qué liquidación explica la diferencia."""
     patron_acred = re.compile(rf'acreditaci[oó]n\s+rappi\s+{mes_numero:02d}[-/]{anio}', re.IGNORECASE)
     df_rec = _renombrar_columnas(recaudacion.copy(), {
         'Comentario': ('comentario',),
@@ -1024,7 +1057,6 @@ def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anter
 
     ultimo_dia_mes = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
 
-    # Las liquidaciones negativas no se acreditan: quedan afuera del cruce.
     positivas, negativas = separar_acreditaciones_negativas(liquidaciones_mes_actual)
     es_del_mes = _hasta_fecha(positivas["Fecha de Pago"], ultimo_dia_mes)
 
@@ -1091,17 +1123,23 @@ def cruzar_acreditaciones(recaudacion, liquidaciones_mes_actual, acred_mes_anter
             acred_pendientes_mes_siguiente, acreditacion_faltante, resumen)
 
 
-# ─────────────────────────────────────────────
-# ARMADO DEL CUADRO DE PENDIENTES
-# ─────────────────────────────────────────────
+def _encabezar_bloque_con_fecha(df, anio, mes_numero):
+    """Si el bloque arranca con una celda de fecha (como en el cuadro manual),
+    la actualiza al último día del mes; si no, la agrega."""
+    df = df.reset_index(drop=True)
+    fecha = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
+    primera = df.iloc[0, 1] if len(df) else None
+    if isinstance(primera, (pd.Timestamp, dt.date, dt.datetime)):
+        df.iloc[0, 1] = fecha
+        return df
+    return pd.concat([_bloque(df, [fecha], [None]), df], ignore_index=True)
+
 
 def _fila_vacia(df, k=1):
     return pd.DataFrame([[None] * df.shape[1]] * k, columns=df.columns).astype(object)
 
 
 def _bloque(df, textos, montos):
-    """Bloque con la misma forma que el cuadro: texto en la columna 2, monto en
-    la columna 4 (que es donde están en el archivo de pendientes)."""
     b = pd.DataFrame([[None] * df.shape[1] for _ in textos], columns=df.columns).astype(object)
     b.iloc[:, 1] = textos
     b.iloc[:, 3] = montos
@@ -1114,9 +1152,6 @@ def _texto_col(df):
 
 def actualizar_pendientes_mes_anterior(df_pendientes_raw, facturas_pendientes,
                                        match_facturas_pendientes):
-    """Saca del cuadro de pendientes las facturas que se cobraron: las que
-    matchearon puntualmente y las de los períodos que cerraron completos. El
-    resto del archivo queda intacto."""
     facturas_individuales = set(
         match_facturas_pendientes.loc[match_facturas_pendientes["Nro Factura"].notna(), "Nro Factura"]
     )
@@ -1149,16 +1184,7 @@ def actualizar_pendientes_mes_anterior(df_pendientes_raw, facturas_pendientes,
 def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
                         falta_facturas_periodo_actual, anio=None, mes_numero=None,
                         cuadro_conceptos=None, con_anio=True, advertencias=None,
-                        acreditaciones_negativas=None):
-    """Reorganiza el cuadro al cerrar el mes:
-    - Baja el bloque 'Gastos Faltan Registrar Acreditaciones de <mes anterior>
-      Registradas en <mes actual>' a una línea debajo del bloque del mes anterior.
-    - Inserta '<Mes> <Año>' + 'Gastos Faltan Registrar' con los conceptos y las
-      facturas sin cargar cuya fecha de pago cae dentro del mes.
-    - Deja en el lugar que ocupaba el bloque viejo el de este mes contra el mes
-      siguiente, antes de 'Diferencia para llegar al saldo extracto Rappi', que
-      es lo que hace que entre en esa suma.
-    Los montos se escriben con el signo invertido."""
+                        acreditaciones_negativas=None, agrupar_conceptos=True):
     anio, mes_numero = _resolver_mes(anio, mes_numero, cuadro_conceptos, advertencias)
 
     encabezado_mes = f"{MESES_ES[mes_numero]} {anio}" if con_anio else MESES_ES[mes_numero]
@@ -1195,6 +1221,18 @@ def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
         return f'{fila["Nro Factura"]} {periodo}'
 
     def _combinar_y_ordenar(conceptos, facturas):
+        """Con agrupar_conceptos=True se arma como el cuadro manual: una línea
+        por concepto (sumado entre liquidaciones) y las facturas una por una,
+        todo ordenado alfabéticamente. Si no, se intercalan en el orden del
+        cuadro de conceptos (una línea por liquidación y concepto)."""
+        if agrupar_conceptos:
+            items = []
+            if len(conceptos):
+                sumas = conceptos.groupby("Concepto", sort=True)["Monto"].sum()
+                items += [(c, c, round(m, 2)) for c, m in sumas.items()]
+            items += [(_texto_factura(f), _texto_factura(f), f["Importe"]) for _, f in facturas.iterrows()]
+            items.sort(key=lambda x: str(x[0]).casefold())
+            return items
         items = [(f["Orden"], f["Concepto"], f["Monto"]) for _, f in conceptos.iterrows()]
         items += [(f["Orden"], _texto_factura(f), f["Importe"]) for _, f in facturas.iterrows()]
         items.sort(key=lambda x: x[0])
@@ -1214,9 +1252,6 @@ def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
         [None, None] + [-round(m, 2) for _, _, m in items_mes]
     )
 
-    # Las liquidaciones negativas van en su propio bloque, arriba de 'Total Saldo
-    # del mes' y en positivo. Escritas con el prefijo 'Acreditaciones Negativas'
-    # no las levanta ningún extractor del pendientes el mes que viene.
     bloque_negativas = _fila_vacia(df, 0)
     if acreditaciones_negativas is not None and len(acreditaciones_negativas):
         bloque_negativas = _bloque(
@@ -1266,9 +1301,6 @@ def actualizar_acreditaciones_pendientes(pendientes_actualizado2, acred_match_me
                                          acred_pendientes_mes_siguiente, acreditacion_faltante,
                                          anio=None, mes_numero=None, cuadro_conceptos=None,
                                          advertencias=None):
-    """Reemplaza el bloque 'Acreditaciones de <mes anterior> Registradas en <mes
-    actual>': saca las que ya se acreditaron, deja las que faltan registrar y
-    agrega las del mes corriente que se cobran el mes que viene."""
     anio, mes_numero = _resolver_mes(anio, mes_numero, cuadro_conceptos, advertencias)
 
     patron_header = re.compile(r'^Acreditaciones de .+ Registradas en .+$', re.IGNORECASE)
@@ -1282,7 +1314,6 @@ def actualizar_acreditaciones_pendientes(pendientes_actualizado2, acred_match_me
     nombre_mes_siguiente = MESES_ES[1] if mes_numero == 12 else MESES_ES[mes_numero + 1]
     encabezado = f"Acreditaciones de {nombre_mes} Registradas en {nombre_mes_siguiente}"
 
-    # Primero las que faltan registrar, después las que se cobran el mes que viene.
     bloque_items = [(f["Concepto"], f["Importe"]) for _, f in acreditacion_faltante.iterrows()]
     bloque_items += [(f["Concepto"], f["Importe"]) for _, f in acred_pendientes_mes_siguiente.iterrows()]
 
@@ -1309,9 +1340,6 @@ def actualizar_acreditaciones_pendientes(pendientes_actualizado2, acred_match_me
 def agregar_diferencia_venta(pendientes_actualizado3, total_dean, total_hio,
                              anio=None, mes_numero=None, cuadro_conceptos=None,
                              advertencias=None):
-    """Agrega el bloque 'Diferencia de Venta y extracto <Mes> <Año>' con las
-    líneas 'Total D&D' y 'Total HIO'. Si un total es None (la sociedad no tiene
-    ese local) esa línea no va; si es cero, se escribe igual."""
     anio, mes_numero = _resolver_mes(anio, mes_numero, cuadro_conceptos, advertencias)
 
     encabezado = f"Diferencia de Venta y extracto {MESES_ES[mes_numero]} {anio}"
@@ -1330,23 +1358,48 @@ def agregar_diferencia_venta(pendientes_actualizado3, total_dean, total_hio,
         textos.append("Total HIO")
         montos.append(round(total_hio, 2))
 
-    if not [i for i, t in texto.items() if t.lower().startswith("diferencia de venta y extracto")]:
+    # La línea de centavos del mes cierra este bloque; actualizar_saldo_mayor
+    # le pone el valor.
+    textos.append("Diferencia de centavos")
+    montos.append(0)
+
+    idx_dv = [i for i, t in texto.items() if t.lower().startswith("diferencia de venta y extracto")]
+    if not idx_dv:
         _avisar(advertencias,
                 "No se encontró ningún bloque 'Diferencia de Venta y extracto': se agregó al final.")
+        antes = df.copy()
+        while len(antes) and antes.iloc[-1].isna().all():
+            antes = antes.iloc[:-1]
+        return pd.concat([antes, _fila_vacia(df), _bloque(df, textos, montos)], ignore_index=True)
 
-    antes = df.copy()
-    while len(antes) and antes.iloc[-1].isna().all():
-        antes = antes.iloc[:-1]
+    # Va a continuación del último bloque de diferencias de venta (hasta su
+    # primera fila en blanco), no al final del archivo, donde puede haber
+    # restos sueltos del cuadro manual.
+    fin = idx_dv[-1] + 1
+    while fin < len(df) and not df.iloc[fin].isna().all():
+        fin += 1
 
-    return pd.concat([antes, _fila_vacia(df), _bloque(df, textos, montos)], ignore_index=True)
+    # Una 'Diferencia de centavos' suelta después del último bloque (la que
+    # dejó el cierre anterior cuando no tuvo bloque propio) se reemplaza por la
+    # de este mes: la cadena de totales es acumulada, así que no se pierde nada.
+    resto = df.iloc[fin:].copy()
+    sueltas = _texto_col(resto).str.lower().str.startswith("diferencia de centavos")
+    if sueltas.any():
+        _avisar(advertencias,
+                f"Se reemplazó {int(sueltas.sum())} línea/s 'Diferencia de centavos' suelta/s "
+                f"por la de {MESES_ES[mes_numero]}.")
+        resto = resto[~sueltas]
+    while len(resto) and resto.iloc[0].isna().all():
+        resto = resto.iloc[1:]
+
+    partes = [df.iloc[:fin], _fila_vacia(df), _bloque(df, textos, montos)]
+    if len(resto):
+        partes += [_fila_vacia(df), resto]
+    return pd.concat(partes, ignore_index=True)
 
 
 def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, venta_hio,
                            anio, mes_numero, advertencias=None):
-    """Cierra el cuadro: actualiza el saldo del mayor, agrega la diferencia de
-    centavos del mes y recalcula la cadena de totales encadenados hasta que todo
-    cierre en cero. Si las ventas del mes todavía no están cargadas en el mayor,
-    se agregan debajo del saldo."""
     ultimo_dia = calendar.monthrange(anio, mes_numero)[1]
     fecha_str = f"{ultimo_dia:02d}/{mes_numero:02d}/{anio}"
     etiqueta_hio = f"Ventas {mes_numero:02d}-{anio} HIO"
@@ -1378,7 +1431,6 @@ def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, ven
     def _suma(desde, hasta):
         return round(pd.to_numeric(df.iloc[desde:hasta, 3], errors="coerce").sum(), 2)
 
-    # ── Saldo según Mayor ──
     pos_saldo = _pos("saldo según mayor contable")
     if pos_saldo is None:
         raise ValueError("No se encontró la línea 'Saldo según Mayor Contable' en el cuadro de pendientes.")
@@ -1398,23 +1450,9 @@ def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, ven
                 f"Las ventas del mes no estaban cargadas en el mayor: se agregaron "
                 f"{len(faltantes)} línea/s al cuadro.")
 
-    # ── Diferencia de centavos del mes, al final del bloque de diferencias ──
-    pos_ultima_cent = _pos("diferencia de centavos", ultima=True)
-    pos_dif = _pos("diferencia para llegar al saldo")
-    if pos_ultima_cent is not None and pos_dif is not None and pos_ultima_cent > pos_dif:
-        insert_en = pos_ultima_cent + 1
-        t = df.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else str(x).strip().lower())
-        while insert_en < len(df) and (t[insert_en] == "" or t[insert_en].startswith(
-                ("diferencia de venta", "total d&d", "total hio"))):
-            if t[insert_en] == "" and not (
-                insert_en + 1 < len(df) and t[insert_en + 1].startswith(
-                    ("diferencia de venta", "total d&d", "total hio"))):
-                break
-            insert_en += 1
-        df = pd.concat([df.iloc[:insert_en], _fila("Diferencia de centavos", 0),
-                        df.iloc[insert_en:]], ignore_index=True)
+    # La línea 'Diferencia de centavos' del mes ya viene en el bloque de
+    # 'Diferencia de Venta y extracto' que agrega agregar_diferencia_venta.
 
-    # ── Recalcular la cadena ──
     resumen = {'saldo_mayor': saldo_final}
 
     pos_saldo = _pos("saldo según mayor contable")
@@ -1445,10 +1483,6 @@ def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, ven
     return df, resumen
 
 
-# ─────────────────────────────────────────────
-# EXPORTACIÓN
-# ─────────────────────────────────────────────
-
 AMARILLO = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 NEGRITA = Font(bold=True)
 
@@ -1473,7 +1507,6 @@ def _es_titulo(texto):
 
 
 def _nombre_hoja_valido(nombre, advertencias=None):
-    """Excel no admite : \\ / ? * [ ] ni más de 31 caracteres."""
     limpio = re.sub(r'[:\\/?*\[\]]', '-', nombre).strip()
     if len(limpio) > 31:
         limpio = limpio[:31].strip()
@@ -1486,9 +1519,6 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
                                 df_venta_rappi_dep, match_rappi_dean1, falta_rappi_dean1,
                                 falta_dean1, match_hio_rappi1, match_hio2, match_hio_rappi2,
                                 falta_rappi_hio2, falta_hio2, advertencias=None):
-    """Arma el libro 'Conciliacion.xlsx': el cuadro conciliado, el mayor, los
-    reportes y todos los cruces. En la hoja de conciliación se replica el formato
-    del cuadro manual: títulos en negrita y 'Total Saldo del mes' en amarillo."""
     hojas = [
         ("Conciliación", conciliacion),
         ("Mayor", recaudacion),
@@ -1504,8 +1534,6 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
         ("Falta Rappi (sobra HIO)", falta_rappi_hio2),
         ("Falta HIO (sobra Rappi)", falta_hio2),
     ]
-
-    # La conciliación va sin encabezado: es el cuadro crudo, sin nombres de columna.
     con_encabezado = {nombre for nombre, _ in hojas if nombre != "Conciliación"}
 
     buf = io.BytesIO()
@@ -1544,28 +1572,16 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
     return buf
 
 
-# ─────────────────────────────────────────────
-# FUNCIÓN PRINCIPAL → devuelve ZIP en memoria
-# ─────────────────────────────────────────────
-
 def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_documento,
                                    archivo_hio_metodo, archivo_dean, archivo_recaudacion,
                                    archivo_pendientes):
-    """Conciliación completa de EASA: corre el cruce de facturas contra
-    liquidaciones, cruza las ventas contra Dean y HIO, cruza facturas y
-    acreditaciones contra el mayor y deja armado el cuadro de pendientes del mes
-    siguiente. Devuelve el zip del cruce más 'Conciliacion.xlsx', y las cifras
-    del proceso."""
     advertencias = []
 
-    # Los archivos de liquidación se usan dos veces (el cruce de facturas y las
-    # ventas de la hoja Detalle), así que se leen una sola vez a memoria.
     liq_datos = [(getattr(a, 'name', f'liquidacion_{i}.xlsx'), _leer_bytes(a))
                  for i, a in enumerate(archivos_liq)]
     pdf_datos = [(getattr(a, 'name', f'factura_{i}.pdf'), _leer_bytes(a))
                  for i, a in enumerate(archivos_pdf)]
 
-    # ── Cruce de facturas contra liquidaciones (módulo de liquidaciones) ──
     piezas = procesar_rappi(
         [_como_archivo(datos, nombre) for nombre, datos in liq_datos],
         [_como_archivo(datos, nombre) for nombre, datos in pdf_datos],
@@ -1577,7 +1593,6 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     if anio is None:
         raise ValueError("No se pudo detectar el mes: el cuadro de conceptos no tiene liquidaciones.")
 
-    # ── Ventas: Rappi vs Dean y vs HIO ──
     df_venta_rappi = importar_ventas_rappi(liq_datos)
     if df_venta_rappi.empty:
         raise ValueError("Las liquidaciones no traen órdenes en la hoja 'Detalle'.")
@@ -1605,24 +1620,31 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     venta_dean = calcular_venta_dean(df_dean_dep)
     venta_hio = calcular_venta_hio(df_hio)
 
-    # ── Facturas y conceptos contra el mayor ──
     df_recaudacion = _leer_reporte(archivo_recaudacion, 'Cuenta recaudación Rappi (mayor)',
                                    [('comentario',), ('haber',), ('saldo',), ('sufactura',)])
-    pendientes_mes_anterior = _leer_pendientes(archivo_pendientes, 'Cuadro de pendientes del mes anterior')
+    # Sólo asientos hasta el cierre del mes: el mayor suele venir con los
+    # primeros días del mes siguiente.
+    df_recaudacion = filtrar_mayor_hasta_fin_de_mes(df_recaudacion, anio, mes, advertencias)
 
-    facturas_periodo_actual = extraer_facturas_cuadro_conceptos(cuadro_conceptos)
-    (match_facturas_periodo_actual, falta_facturas_periodo_actual,
-     diferencia_factura_periodo_actual) = cruzar_facturas_periodo_actual(
-        df_recaudacion, facturas_periodo_actual, advertencias)
+    # El archivo acumula todos los meses: se trabaja sobre el último bloque y el
+    # resto se conserva como histórico.
+    pendientes_completo = _leer_pendientes(archivo_pendientes, 'Cuadro de pendientes del mes anterior')
+    historico, pendientes_mes_anterior = separar_historico_y_ultimo_bloque(pendientes_completo, advertencias)
 
     facturas_pendientes = extraer_facturas_pendientes(pendientes_mes_anterior)
     (match_facturas_pendientes, falta_facturas_pendientes,
      diferencia_factura_pendientes) = cruzar_facturas_pendientes(
         df_recaudacion, facturas_pendientes, advertencias)
 
+    facturas_periodo_actual = extraer_facturas_cuadro_conceptos(cuadro_conceptos)
+    facturas_periodo_actual = depurar_facturas_no_asignadas(
+        facturas_periodo_actual, facturas_pendientes, anio, mes, advertencias)
+    (match_facturas_periodo_actual, falta_facturas_periodo_actual,
+     diferencia_factura_periodo_actual) = cruzar_facturas_periodo_actual(
+        df_recaudacion, facturas_periodo_actual, advertencias)
+
     conceptos_mes_actual = extraer_conceptos_cuadro_conceptos(cuadro_conceptos)
 
-    # ── Armado del cuadro de pendientes del mes siguiente ──
     liquidaciones_mes_actual = extraer_liquidaciones_cuadro_conceptos(cuadro_conceptos)
     _, acreditaciones_negativas = separar_acreditaciones_negativas(liquidaciones_mes_actual)
 
@@ -1647,7 +1669,12 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     conciliacion, resumen_saldo = actualizar_saldo_mayor(
         pendientes, df_recaudacion, venta_dean, venta_hio, anio, mes, advertencias)
 
-    # ── Salida ──
+    # La fecha que encabeza el bloque pasa a ser el cierre de este mes, y el
+    # bloque nuevo se escribe a continuación del histórico (como el cuadro manual).
+    conciliacion = _encabezar_bloque_con_fecha(conciliacion, anio, mes)
+    if len(historico):
+        conciliacion = pd.concat([historico, _fila_vacia(conciliacion, 2), conciliacion], ignore_index=True)
+
     buf_conciliacion = construir_conciliacion_xlsx(
         conciliacion, df_recaudacion, df_dean_dep, df_hio, df_venta_rappi_dep,
         match_rappi_dean1, falta_rappi_dean1, falta_dean1, match_hio_rappi1,
@@ -1662,35 +1689,26 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     stats = construir_stats_rappi(piezas)
     stats['advertencias'] = advertencias
     stats['conciliacion'] = {
-        'mes':                  mes,
-        'anio':                 anio,
-        'nombre_mes':           MESES_ES[mes],
-        'ventas_rappi':         len(df_venta_rappi_dep),
-        'match_dean':           len(match_dean1),
-        'falta_rappi_dean':     len(falta_rappi_dean1),
-        'falta_dean':           len(falta_dean1),
-        'match_hio':            len(match_hio),
-        'match_hio_fecha':      len(match_hio2),
-        'falta_rappi_hio':      len(falta_rappi_hio2),
-        'falta_hio':            len(falta_hio2),
-        'hio_sin_metodo':       len(falta_documento),
-        'hio_sin_documento':    len(falta_metodo),
-        'total_dean':           total_dean,
-        'total_hio':            total_hio,
-        'venta_dean':           venta_dean,
-        'venta_hio':            venta_hio,
-        'match_facturas':       len(match_facturas_periodo_actual),
-        'falta_facturas':       len(falta_facturas_periodo_actual),
-        'dif_facturas':         len(diferencia_factura_periodo_actual),
-        'match_pendientes':     len(match_facturas_pendientes),
-        'falta_pendientes':     len(falta_facturas_pendientes),
-        'dif_pendientes':       len(diferencia_factura_pendientes),
-        'acred_mayor':          resumen_acred['total_mayor'],
-        'acred_esperado':       resumen_acred['esperado'],
-        'acred_diferencia':     resumen_acred['diferencia'],
-        'acred_faltantes':      len(acreditacion_faltante),
-        'acred_negativas':      len(acreditaciones_negativas),
-        'acred_mes_siguiente':  len(acred_pendientes_mes_siguiente),
+        'mes': mes, 'anio': anio, 'nombre_mes': MESES_ES[mes],
+        'ventas_rappi': len(df_venta_rappi_dep),
+        'match_dean': len(match_dean1), 'falta_rappi_dean': len(falta_rappi_dean1),
+        'falta_dean': len(falta_dean1), 'match_hio': len(match_hio),
+        'match_hio_fecha': len(match_hio2), 'falta_rappi_hio': len(falta_rappi_hio2),
+        'falta_hio': len(falta_hio2), 'hio_sin_metodo': len(falta_documento),
+        'hio_sin_documento': len(falta_metodo), 'total_dean': total_dean,
+        'total_hio': total_hio, 'venta_dean': venta_dean, 'venta_hio': venta_hio,
+        'match_facturas': len(match_facturas_periodo_actual),
+        'falta_facturas': len(falta_facturas_periodo_actual),
+        'dif_facturas': len(diferencia_factura_periodo_actual),
+        'match_pendientes': len(match_facturas_pendientes),
+        'falta_pendientes': len(falta_facturas_pendientes),
+        'dif_pendientes': len(diferencia_factura_pendientes),
+        'acred_mayor': resumen_acred['total_mayor'],
+        'acred_esperado': resumen_acred['esperado'],
+        'acred_diferencia': resumen_acred['diferencia'],
+        'acred_faltantes': len(acreditacion_faltante),
+        'acred_negativas': len(acreditaciones_negativas),
+        'acred_mes_siguiente': len(acred_pendientes_mes_siguiente),
         **resumen_saldo,
     }
     return zip_buf, stats
