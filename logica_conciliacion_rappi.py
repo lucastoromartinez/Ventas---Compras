@@ -6,21 +6,38 @@ facturas y las acreditaciones contra el mayor de recaudación, y deja armado el
 cuadro de pendientes del mes siguiente. Devuelve el mismo zip del cruce más el
 libro 'Conciliacion.xlsx'.
 
+Input del mes siguiente: el Conciliacion.xlsx completo que devuelve la app. Se
+lee la hoja 'Conciliación' y, sólo si llegan facturas atrasadas, la hoja
+'Cuadro de conceptos'. (Un Excel con la sola hoja de conciliación también se
+acepta, pero sin el reemplazo automático de facturas atrasadas.)
+
+Formatos que se leen del cuadro de pendientes:
+- Facturas: 'A-nnnn-nnnnnnnn Periodo dd-mm-aaaa al dd-mm-aaaa' (las provisorias
+  tipo 'VARACC21023015 Periodo …' se aceptan; al llegar la definitiva hay que
+  corregirles el número a mano).
+- Liquidaciones a acreditar: 'Liquidacion dd/mm/aaaa a dd/mm/aaaa'.
+
 Revisión 28/10/2026 (cierre de septiembre):
 - El cuadro de pendientes puede traer todos los meses apilados: se trabaja
   sobre el último bloque y el resto se conserva como histórico.
 - El mayor se recorta al último día del mes (venía con asientos de octubre).
 - Las acreditaciones pendientes se leen sólo del bloque 'Acreditaciones de …
   Registradas en …' del último mes (antes tomaba líneas de meses viejos).
-- Cruce de facturas por período: si el mayor tiene más importe que las facturas
-  del período (otras ya registradas), o no hay combinación que explique la
-  diferencia, la factura pasa al cruce por número en vez de quedar como
+- Cruce de facturas por período: si el mayor tiene más importe que las
+  facturas del período (otras ya registradas), o ninguna combinación explica
+  la diferencia, la factura pasa al cruce por número en vez de quedar como
   'diferencia'.
-- Formatos exigidos en el cuadro de pendientes: facturas
-  'A-nnnn-nnnnnnnn Periodo dd-mm-aaaa al dd-mm-aaaa' y liquidaciones
-  'Liquidacion dd/mm/aaaa a dd/mm/aaaa'. Otros formatos no se leen.
 - Las facturas no asignadas que ya están en el pendientes, o que son de un
   período posterior al mes, no se vuelven a imputar.
+- Facturas atrasadas: cuando llega la factura de una liquidación de un mes
+  anterior, se sacan del pendientes los conceptos que cubre, se pone la
+  factura con su período y la diferencia va a 'Diferencia Percepción de IVA'
+  (el reemplazo que antes se hacía a mano). Vinculación por período y total
+  (margen 2%); si no hay una única liquidación posible, avisa y no toca nada.
+- Conciliacion.xlsx incluye la hoja 'Cuadro de conceptos', con las
+  liquidaciones de meses anteriores que siguen sin factura al final.
+- Las líneas 'Ventas mm-aaaa …' que un cierre anterior agregó debajo del saldo
+  se sacan cuando esas ventas ya están registradas en el mayor.
 - El bloque del mes se arma con una línea por concepto (sumado) en orden
   alfabético, como el cuadro manual; la 'Diferencia de centavos' va al pie del
   bloque 'Diferencia de Venta y extracto' del mes.
@@ -137,7 +154,12 @@ def _leer_reporte(archivo, etiqueta, grupos_clave=()):
 
 
 def _leer_pendientes(archivo, etiqueta):
-    df = pd.read_excel(_como_archivo(_leer_bytes(archivo)), header=None)
+    """Acepta el Conciliacion.xlsx completo que devuelve la app (toma la hoja
+    'Conciliación') o un Excel con esa sola hoja (toma la primera)."""
+    datos = _leer_bytes(archivo)
+    hojas = pd.ExcelFile(_como_archivo(datos)).sheet_names
+    hoja = next((h for h in hojas if _normalizar(h) == "conciliacion"), hojas[0])
+    df = pd.read_excel(_como_archivo(datos), sheet_name=hoja, header=None)
 
     if df.shape[1] < 4:
         raise ValueError(
@@ -1437,6 +1459,19 @@ def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, ven
     df.iloc[pos_saldo, 1] = f"Saldo según Mayor Contable al {fecha_str}"
     df.iloc[pos_saldo, 3] = saldo_final
 
+    # Líneas de ventas que un cierre anterior agregó porque todavía no estaban
+    # en el mayor: si ya se registraron, se sacan (si no, se contarían dos
+    # veces); si siguen faltando, se dejan.
+    texto_df = df.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+    es_venta = texto_df.str.match(r'^Ventas\b.*\d{2}-\d{4}', na=False)
+    ya_en_mayor = es_venta & texto_df.isin(set(comentario))
+    if ya_en_mayor.any():
+        _avisar(advertencias,
+                f"Se sacaron {int(ya_en_mayor.sum())} línea/s de ventas de cierres anteriores que "
+                f"ya están registradas en el mayor: {', '.join(texto_df[ya_en_mayor])}.")
+        df = df[~ya_en_mayor].reset_index(drop=True)
+        pos_saldo = _pos("saldo según mayor contable")
+
     faltantes = []
     if not comentario.eq(etiqueta_hio).any():
         faltantes.append((etiqueta_hio, round(venta_hio, 2)))
@@ -1483,6 +1518,277 @@ def actualizar_saldo_mayor(pendientes_actualizado4, recaudacion, venta_dean, ven
     return df, resumen
 
 
+# ─────────────────────────────────────────────
+# FACTURAS ATRASADAS: reemplazo de conceptos por la factura
+# ─────────────────────────────────────────────
+
+# Conceptos que cubre cada tipo de factura (nombres como salen en el cuadro de
+# conceptos, sin 'SUM of'). Lo demás (Descuentos por inversión de Rappi DAR,
+# Compensaciones, Costo Canceladas, Retenciones) no lo factura Rappi y queda.
+CONCEPTOS_FACTURA_SERVICIOS = [
+    "Uso y alquiler de plataforma Rappi",
+    "Descuento por inversión de Rappi  a aplicar sobre Uso y alquiler de plataforma Rappi DAR",
+    "Tarifa transaccional",
+    "IVA Uso y alquiler de plataforma Rappi",
+    "Descuento por inversión de Rappi a aplicar sobre el IVA Uso y alquiler de plataforma Rappi DAR",
+    "Percepcion",
+    "Descuento por inversión de Rappi a aplicar sobre la Percepción de BA DAR",
+    "Percepcion Cordoba",
+    "Descuento por inversión de Rappi a aplicar sobre la Percepción de Córdoba DAR",
+    "Percepción Tucuman",
+    "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE TUCUMAN DAR",
+    "Percepción Corrientes",
+    "Descuento por inversión de Rappi a aplicar sobre la PERCEPCIÓN DE CORRIENTES DAR",
+    "Impuestos Percepción de IVA",
+]
+CONCEPTOS_FACTURA_PUBLICIDAD = [
+    "Cuota de RappiAds",
+    "IVA Rappi Ads",
+    "Percepción Campañas",
+    "Percepción Campañas Tucuman",
+    "Percepción Campañas Corrientes",
+    "Percepción Campañas Cordoba",
+]
+_FACT_SERV = {_normalizar(c) for c in CONCEPTOS_FACTURA_SERVICIOS}
+_FACT_PUB = {_normalizar(c) for c in CONCEPTOS_FACTURA_PUBLICIDAD}
+# Concepto que indica que la liquidación quedó sin factura de ese tipo.
+_ANCLA = {"servicios": _normalizar("Uso y alquiler de plataforma Rappi"),
+          "publicidad": _normalizar("Cuota de RappiAds")}
+
+TITULO_LIQ_ANTERIORES = "Liquidaciones de meses anteriores sin factura"
+TOLERANCIA_FACTURA_ATRASADA = 0.02     # 2% del total de la factura
+LINEA_DIFERENCIA_PERCEPCION = "Diferencia Percepción de IVA"
+
+
+def _leer_cuadro_conceptos_anterior(archivo, advertencias=None):
+    """Hoja 'Cuadro de conceptos' del Conciliacion.xlsx del mes anterior. Si el
+    archivo no la tiene (cierres viejos o un Excel con la sola hoja de
+    conciliación) devuelve None y las facturas atrasadas no se reemplazan."""
+    datos = _leer_bytes(archivo)
+    hojas = pd.ExcelFile(_como_archivo(datos)).sheet_names
+    hoja = next((h for h in hojas if _normalizar(h) == "cuadrodeconceptos"), None)
+    if hoja is None:
+        return None
+    df = pd.read_excel(_como_archivo(datos), sheet_name=hoja)
+    df = _renombrar_columnas(df, {"Concepto": ("concepto",), "Monto": ("monto",)})
+    return df[["Concepto", "Monto"]]
+
+
+def extraer_liquidaciones_sin_factura(df_cuadro):
+    """Del cuadro de conceptos (del mes y de arrastres anteriores), las
+    liquidaciones que quedaron sin factura de servicios y/o de publicidad, con
+    los importes de los conceptos que esa factura va a cubrir."""
+    liqs, actual = [], None
+    tienda = None
+
+    def _cerrar():
+        if actual is None:
+            return
+        for tipo, conjunto in (("servicios", _FACT_SERV), ("publicidad", _FACT_PUB)):
+            conceptos = [(c, m) for c, m in actual["conceptos"] if _normalizar(c) in conjunto]
+            if any(_normalizar(c) == _ANCLA[tipo] for c, _ in conceptos):
+                liqs.append({"Tienda": actual["Tienda"], "Liquidacion": actual["Liquidacion"],
+                             "Periodo": actual["Periodo"], "Fecha de Pago": actual["Fecha de Pago"],
+                             "Tipo": tipo, "Conceptos": conceptos,
+                             "Total": round(sum(m for _, m in conceptos), 2)})
+
+    for _, row in df_cuadro.iterrows():
+        texto = _texto_concepto(row)
+        monto = row["Monto"]
+        if texto in ("Facturas no asignadas", TITULO_LIQ_ANTERIORES):
+            _cerrar(); actual = None
+            continue
+        if texto == "":
+            continue
+        m_liq = PATRON_LIQUIDACION.match(texto)
+        if m_liq:
+            _cerrar()
+            d1, m1, a1, d2, m2, a2 = m_liq.groups()
+            actual = {"Tienda": tienda, "Liquidacion": texto,
+                      "Periodo": f"Periodo {d1}-{m1}-{a1} al {d2}-{m2}-{a2}",
+                      "Fecha de Pago": None, "conceptos": []}
+            continue
+        m_pago = PATRON_FECHA_PAGO.match(texto)
+        if m_pago and actual is not None:
+            dp, mp, ap = m_pago.groups()
+            actual["Fecha de Pago"] = pd.Timestamp(int(ap), int(mp), int(dp))
+            continue
+        if pd.isna(monto):
+            tienda = texto
+            continue
+        if actual is not None and texto != "Valor total a transferir":
+            actual["conceptos"].append((texto, round(float(monto), 2)))
+    _cerrar()
+    return liqs
+
+
+def _rango_bloque(df, inicio):
+    """Filas del bloque que arranca en 'inicio' (título) hasta la primera fila
+    en blanco."""
+    fin = inicio + 1
+    while fin < len(df) and not df.iloc[fin].isna().all():
+        fin += 1
+    return inicio, fin
+
+
+def _ubicar_bloque_destino(df, liq, anio, mes_numero):
+    """Dónde están hoy los conceptos de esa liquidación en el pendientes:
+    - se cobró en el mismo mes -> bloque '<Mes> [Año]' / 'Gastos Faltan Registrar';
+    - se cobró el mes siguiente (o no se sabe) -> bloque 'Gastos Faltan
+      Registrar Acreditaciones de <mes> Registradas en <mes siguiente>'."""
+    texto = _texto_col(df)
+    mes_ant = 12 if mes_numero == 1 else mes_numero - 1
+    anio_ant = anio - 1 if mes_numero == 1 else anio
+    fin_mes_ant = pd.Timestamp(anio_ant, mes_ant, calendar.monthrange(anio_ant, mes_ant)[1])
+
+    idx_total = [i for i, t in texto.items() if t.lower().startswith("total saldo del mes")]
+    pos_total = idx_total[0] if idx_total else len(df)
+
+    cobrada_en_el_mes = liq["Fecha de Pago"] is not None and liq["Fecha de Pago"] <= fin_mes_ant
+    if not cobrada_en_el_mes:
+        patron = re.compile(r'^Gastos Faltan Registrar Acreditaciones de .+ Registradas en .+$', re.IGNORECASE)
+        idx = [i for i, t in texto.items() if patron.match(t) and i > pos_total]
+    else:
+        patron = re.compile(rf'^{MESES_ES[mes_ant]}(\s+\d{{4}})?$', re.IGNORECASE)
+        idx = [i for i, t in texto.items() if patron.match(t) and i < pos_total]
+    return _rango_bloque(df, idx[-1]) if idx else None
+
+
+def _reemplazar_en_bloque(df, rango, liq, nro, periodo_factura, importe, advertencias):
+    """Saca del bloque los conceptos de la liquidación, agrega la factura y la
+    diferencia de percepción de IVA. Devuelve el df nuevo o None si los
+    conceptos no están en el bloque (no toca nada)."""
+    ini, fin = rango
+    filas = [(df.iloc[i, 1], df.iloc[i, 3]) for i in range(ini, fin)]
+    # Títulos al principio del bloque (filas sin monto)
+    n_tit = 0
+    while n_tit < len(filas) and pd.isna(filas[n_tit][1]):
+        n_tit += 1
+    titulos = filas[:n_tit]
+    # Se agrupan por concepto (un cuadro armado sin agrupar trae el mismo
+    # concepto repetido una vez por liquidación).
+    items = []
+    for t, m in filas[n_tit:]:
+        if pd.isna(m):
+            continue
+        existente = next((it for it in items if _normalizar(it[0]) == _normalizar(t)), None)
+        if existente is not None:
+            existente[1] += float(m)
+        else:
+            items.append([str(t).strip(), float(m)])
+
+    # En el pendientes los conceptos van con el signo invertido respecto del
+    # cuadro de conceptos: a cada línea se le suma el importe del cuadro.
+    for concepto, monto_cuadro in liq["Conceptos"]:
+        linea = next((it for it in items if _normalizar(it[0]) == _normalizar(concepto)), None)
+        if linea is None:
+            _avisar(advertencias,
+                    f"Factura {nro}: no se encontró '{concepto}' en el bloque de pendientes de "
+                    f"{liq['Liquidacion']}; no se reemplazó, revisar a mano.")
+            return None
+        linea[1] = linea[1] + monto_cuadro
+
+    items = [it for it in items if abs(it[1]) >= 0.005]
+
+    diferencia = round(importe - liq["Total"], 2)
+    items.append([f"{nro} {periodo_factura}", -round(importe, 2)])
+    linea_dif = next((it for it in items if _normalizar(it[0]) == _normalizar(LINEA_DIFERENCIA_PERCEPCION)), None)
+    if linea_dif is not None:
+        linea_dif[1] += diferencia
+    elif abs(diferencia) >= 0.005:
+        items.append([LINEA_DIFERENCIA_PERCEPCION, diferencia])
+
+    items.sort(key=lambda it: it[0].casefold())
+    nuevo = _bloque(df, [t for t, _ in titulos] + [t for t, _ in items],
+                    [None] * len(titulos) + [round(m, 6) for _, m in items])
+    return pd.concat([df.iloc[:ini], nuevo, df.iloc[fin:]], ignore_index=True)
+
+
+def aplicar_facturas_atrasadas(pendientes, liqs_sin_factura, facturas_periodo_actual,
+                               anio, mes_numero, advertencias=None):
+    """Hace el reemplazo que se hacía a mano: cuando llega la factura de una
+    liquidación de un mes anterior, saca del pendientes los conceptos que esa
+    factura cubre, pone la factura con su período y suma la diferencia a
+    'Diferencia Percepción de IVA'. La factura queda como pendiente y después
+    se cruza contra el mayor como cualquier otra.
+    Devuelve (pendientes, nros_reemplazados, liqs_que_siguen_sin_factura)."""
+    if not liqs_sin_factura or facturas_periodo_actual.empty:
+        return pendientes, [], liqs_sin_factura
+
+    mes_ant = 12 if mes_numero == 1 else mes_numero - 1
+    anio_ant = anio - 1 if mes_numero == 1 else anio
+    fin_mes_ant = pd.Timestamp(anio_ant, mes_ant, calendar.monthrange(anio_ant, mes_ant)[1])
+
+    def _fin_periodo(p):
+        m = re.match(r'^Periodo \d{2}-\d{2}-\d{4} al (\d{2})-(\d{2})-(\d{4})$', str(p))
+        return pd.Timestamp(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else pd.NaT
+
+    ya_pendientes = set(extraer_facturas_pendientes(pendientes)["Nro Factura"])
+    atrasadas = facturas_periodo_actual[
+        ~facturas_periodo_actual["Asignada"].astype(bool)
+        & ~facturas_periodo_actual["Nro Factura"].isin(ya_pendientes)
+        & (facturas_periodo_actual["Periodo"].apply(_fin_periodo) <= fin_mes_ant)
+    ]
+
+    restantes = list(liqs_sin_factura)
+    reemplazadas = []
+    for _, fac in atrasadas.iterrows():
+        importe = round(float(fac["Importe"]), 2)
+        candidatas = [l for l in restantes if l["Periodo"] == fac["Periodo"]
+                      and abs(importe - l["Total"]) <= max(TOLERANCIA_FACTURA_ATRASADA * importe, 5)]
+        if not candidatas:
+            _avisar(advertencias,
+                    f"Factura atrasada {fac['Nro Factura']} ({fac['Periodo']}, {importe:,.2f}): no se encontró "
+                    f"la liquidación sin factura que le corresponde; revisar a mano.")
+            continue
+        candidatas.sort(key=lambda l: abs(importe - l["Total"]))
+        if len(candidatas) > 1 and abs(abs(importe - candidatas[0]["Total"]) -
+                                       abs(importe - candidatas[1]["Total"])) < 1:
+            _avisar(advertencias,
+                    f"Factura atrasada {fac['Nro Factura']}: coincide con más de una liquidación "
+                    f"del {fac['Periodo']}; no se reemplazó, revisar a mano.")
+            continue
+        liq = candidatas[0]
+
+        rango = _ubicar_bloque_destino(pendientes, liq, anio, mes_numero)
+        if rango is None:
+            _avisar(advertencias,
+                    f"Factura atrasada {fac['Nro Factura']}: no se encontró el bloque de pendientes de "
+                    f"{liq['Liquidacion']}; revisar a mano.")
+            continue
+        nuevo = _reemplazar_en_bloque(pendientes, rango, liq, fac["Nro Factura"], fac["Periodo"],
+                                      importe, advertencias)
+        if nuevo is None:
+            continue
+        pendientes = nuevo
+        restantes.remove(liq)
+        reemplazadas.append(fac["Nro Factura"])
+        _avisar(advertencias,
+                f"Factura atrasada {fac['Nro Factura']} reemplazó los conceptos de {liq['Tienda']} "
+                f"{liq['Liquidacion']} ({liq['Tipo']}); diferencia de percepción de IVA "
+                f"{importe - liq['Total']:,.2f}.")
+
+    return pendientes, reemplazadas, restantes
+
+
+def cuadro_conceptos_con_arrastre(cuadro_conceptos, liqs_anteriores_sin_factura):
+    """La hoja 'Cuadro de conceptos' que se exporta: la del mes y, al final, las
+    liquidaciones de meses anteriores que siguen sin factura, para que el mes
+    que viene se puedan reemplazar si llega la factura."""
+    if not liqs_anteriores_sin_factura:
+        return cuadro_conceptos
+    filas = [(None, None), (None, None), (TITULO_LIQ_ANTERIORES, None)]
+    for l in liqs_anteriores_sin_factura:
+        filas.append((l["Tienda"], None))
+        filas.append((l["Liquidacion"], None))
+        if l["Fecha de Pago"] is not None:
+            filas.append((f"Fecha de Pago {l['Fecha de Pago']:%d/%m/%Y}", None))
+        filas += [(c, m) for c, m in l["Conceptos"]]
+        filas.append((None, None))
+    extra = pd.DataFrame(filas, columns=["Concepto", "Monto"])
+    return pd.concat([cuadro_conceptos[["Concepto", "Monto"]], extra], ignore_index=True)
+
+
 AMARILLO = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 NEGRITA = Font(bold=True)
 
@@ -1518,12 +1824,15 @@ def _nombre_hoja_valido(nombre, advertencias=None):
 def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
                                 df_venta_rappi_dep, match_rappi_dean1, falta_rappi_dean1,
                                 falta_dean1, match_hio_rappi1, match_hio2, match_hio_rappi2,
-                                falta_rappi_hio2, falta_hio2, advertencias=None):
+                                falta_rappi_hio2, falta_hio2, advertencias=None,
+                                cuadro_conceptos=None):
     hojas = [
         ("Conciliación", conciliacion),
         ("Mayor", recaudacion),
         ("Dean", df_dean_dep),
         ("HIO Combinado", df_hio),
+        ("Cuadro de conceptos", cuadro_conceptos if cuadro_conceptos is not None
+         else pd.DataFrame(columns=["Concepto", "Monto"])),
         ("Rappi", df_venta_rappi_dep),
         ("Match Dean", match_rappi_dean1),
         ("Falta Rappi (Sobra Dean)", falta_rappi_dean1),
@@ -1631,12 +1940,29 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     pendientes_completo = _leer_pendientes(archivo_pendientes, 'Cuadro de pendientes del mes anterior')
     historico, pendientes_mes_anterior = separar_historico_y_ultimo_bloque(pendientes_completo, advertencias)
 
+    facturas_periodo_actual = extraer_facturas_cuadro_conceptos(cuadro_conceptos)
+
+    # Facturas que llegan este mes de liquidaciones de meses anteriores: se
+    # reemplazan en el pendientes los conceptos que cubren (lo que antes se
+    # hacía a mano). El detalle por liquidación sale de la hoja 'Cuadro de
+    # conceptos' del cierre anterior.
+    cuadro_anterior = _leer_cuadro_conceptos_anterior(archivo_pendientes, advertencias)
+    if cuadro_anterior is None:
+        liqs_anteriores_sin_factura = []
+        _avisar(advertencias, "El cuadro de pendientes no trae la hoja 'Cuadro de conceptos': "
+                              "las facturas atrasadas no se reemplazan automáticamente.")
+    else:
+        liqs_anteriores_sin_factura = extraer_liquidaciones_sin_factura(cuadro_anterior)
+    (pendientes_mes_anterior, facturas_reemplazadas,
+     liqs_siguen_sin_factura) = aplicar_facturas_atrasadas(
+        pendientes_mes_anterior, liqs_anteriores_sin_factura, facturas_periodo_actual,
+        anio, mes, advertencias)
+
     facturas_pendientes = extraer_facturas_pendientes(pendientes_mes_anterior)
     (match_facturas_pendientes, falta_facturas_pendientes,
      diferencia_factura_pendientes) = cruzar_facturas_pendientes(
         df_recaudacion, facturas_pendientes, advertencias)
 
-    facturas_periodo_actual = extraer_facturas_cuadro_conceptos(cuadro_conceptos)
     facturas_periodo_actual = depurar_facturas_no_asignadas(
         facturas_periodo_actual, facturas_pendientes, anio, mes, advertencias)
     (match_facturas_periodo_actual, falta_facturas_periodo_actual,
@@ -1678,7 +2004,8 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     buf_conciliacion = construir_conciliacion_xlsx(
         conciliacion, df_recaudacion, df_dean_dep, df_hio, df_venta_rappi_dep,
         match_rappi_dean1, falta_rappi_dean1, falta_dean1, match_hio_rappi1,
-        match_hio2, match_hio_rappi2, falta_rappi_hio2, falta_hio2, advertencias)
+        match_hio2, match_hio_rappi2, falta_rappi_hio2, falta_hio2, advertencias,
+        cuadro_conceptos=cuadro_conceptos_con_arrastre(cuadro_conceptos, liqs_siguen_sin_factura))
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
