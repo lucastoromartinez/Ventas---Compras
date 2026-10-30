@@ -1316,6 +1316,14 @@ def _diferencias(fila: pd.Series) -> dict[str, float]:
     }
 
 
+SIN_EXPLICACION = "Sin explicación automática: ver apertura de diferencias"
+MOTIVOS_GRAVADO_TOTAL = {"Gravado", "Total"}
+
+
+def _motivos(comentario) -> set[str]:
+    return {m.strip() for m in str(comentario).split(", ") if m.strip()}
+
+
 def _explicar_gravado_total(fila: pd.Series, tol: float) -> str:
     """Busca qué columna explica la diferencia de Gravado / Total."""
     d = _diferencias(fila)
@@ -1413,7 +1421,7 @@ def _explicar_gravado_total(fila: pd.Series, tol: float) -> str:
                 )
             expl.append(txt)
 
-    return " | ".join(expl) if expl else "Sin explicación automática: ver apertura de diferencias"
+    return " | ".join(expl) if expl else SIN_EXPLICACION
 
 
 def _explicar_no_gravado(fila: pd.Series) -> str:
@@ -1493,6 +1501,30 @@ def _armar_diagnostico(ancho: pd.DataFrame, explicaciones: list[str]) -> pd.Data
     return pd.concat([salida, difs, ancho.drop(columns=["comentario"])], axis=1)
 
 
+def quitar_gravado_total_explicados(
+    revisar: pd.DataFrame,
+    df_arca_dep: pd.DataFrame,
+    df_sistema_dep: pd.DataFrame,
+    tol_pesos: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Saca de `revisar` las filas cuyos únicos motivos son Gravado y/o Total
+    y que tienen explicación automática. Si la fila tiene otro motivo
+    (ej. Fecha) o no se explica, queda en `revisar`.
+    """
+    revisar = revisar.reset_index(drop=True)
+    if revisar.empty:
+        return revisar
+    candidatas = revisar["comentario"].apply(lambda c: bool(_motivos(c)) and _motivos(c) <= MOTIVOS_GRAVADO_TOTAL)
+    if not candidatas.any():
+        return revisar
+    ancho, _, _ = expandir_revisar(revisar, df_arca_dep, df_sistema_dep)
+    explicada = pd.Series(False, index=revisar.index)
+    for i in revisar.index[candidatas]:
+        explicada.loc[i] = _explicar_gravado_total(ancho.loc[i], tol_pesos) != SIN_EXPLICACION
+    return revisar[~explicada].reset_index(drop=True)
+
+
 def generar_diagnosticos(
     revisar: pd.DataFrame,
     no_gravado: pd.DataFrame,
@@ -1508,8 +1540,9 @@ def generar_diagnosticos(
     ng_ancho, fechas, importes = expandir_revisar(no_gravado, df_arca_dep, df_sistema_dep)
     rev_ancho, _, _ = expandir_revisar(revisar, df_arca_dep, df_sistema_dep)
 
-    motivos = rev_ancho["comentario"].astype(str).str.split(", ")
-    gt_ancho = rev_ancho[motivos.apply(lambda m: "Gravado" in m or "Total" in m)].reset_index(drop=True)
+    gt_ancho = rev_ancho[
+        rev_ancho["comentario"].apply(lambda c: bool(_motivos(c) & MOTIVOS_GRAVADO_TOTAL))
+    ].reset_index(drop=True)
 
     diag_ng = _armar_diagnostico(ng_ancho, [_explicar_no_gravado(f) for _, f in ng_ancho.iterrows()])
     diag_gt = _armar_diagnostico(gt_ancho, [_explicar_gravado_total(f, tol_pesos) for _, f in gt_ancho.iterrows()])
@@ -1642,9 +1675,10 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
 
     falta_sistema_final = netear_falta_sistema(falta_sistema3, tol_pesos=tol_pesos)
 
-    # Las filas de "no_gravado" (diferencias de composición explicadas)
-    # también quedan en "revisar", con su motivo en el comentario.
-    revisar3 = pd.concat([revisar3, no_gravado], ignore_index=True)
+    # Las diferencias de Gravado / Total con explicación automática salen
+    # de "revisar" (quedan en diagnostico_gravado_total), igual que las de
+    # composición de No Gravado van a "no_gravado".
+    revisar3 = quitar_gravado_total_explicados(revisar3, df_arca_dep, df_sistema_dep, tol_pesos=tol_pesos)
 
     stats = {
         "match":             len(match),
