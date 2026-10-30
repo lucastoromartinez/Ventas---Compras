@@ -463,6 +463,9 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
 # agrupa en Otros Tributos). Puede ser más de una a la vez (ej. IIBB
 # CABA + Perc. IVA juntas). No incluye IVA 10,5/21/27%: son un concepto
 # distinto, no forman parte de Otros Tributos.
+# Diferencias de Gravado / Total con |sistema / arca - 1| <= 0,1% no van a "revisar".
+TOL_RELATIVA_IMPORTES = 0.001
+
 PERCEP_COLS_NO_GRAVADO = [
     "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "Perc. Gcias.", "Perc. IVA", "SIRCREB", "Imp. Int.",
 ]
@@ -497,6 +500,8 @@ def revisar_inconsistencias_en_match(
         más cualquier otro motivo que la fila tenga sin explicar (ej.
         "Iva 0% registrado como no gravado, Fecha").
       - Imp. Total_sistema vs Imp. Total_arca      → tolerancia +/- tol_pesos
+      Gravado y Total tampoco se marcan si la diferencia relativa
+      |sistema / arca - 1| es <= TOL_RELATIVA_IMPORTES (0,1%).
 
     Regla extra:
       - Si el motivo es SOLO "No Gravado" y Tipo de Comprobante == 11, NO incluir (Factura C)
@@ -566,14 +571,19 @@ def revisar_inconsistencias_en_match(
 
     grav_sis  = _to_num(df[c_grav_sis ]).fillna(0.0).round(2)
     grav_arca = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
-    mask_grav_raw = (grav_sis - grav_arca).abs() > tol
+    def _difiere(sis: pd.Series, arca: pd.Series) -> pd.Series:
+        # Diferencia mayor a tol_pesos y, además, mayor a la tolerancia relativa
+        relativa = (sis / arca.where(arca != 0) - 1).abs()
+        return ((sis - arca).abs() > tol) & ~(relativa <= TOL_RELATIVA_IMPORTES)
+
+    mask_grav_raw = _difiere(grav_sis, grav_arca)
 
     nograv_sis  = _to_num(df[c_nograv_sis ]).fillna(0.0).round(2)
     nograv_arca = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
 
     total_sis  = _to_num(df[c_total_sis ]).fillna(0.0).round(2)
     total_arca = _to_num(df[c_total_arca]).fillna(0.0).round(2)
-    mask_total = (total_sis - total_arca).abs() > tol
+    mask_total = _difiere(total_sis, total_arca)
 
     if c_tipo_comp is not None:
         tipo_comp    = pd.to_numeric(df[c_tipo_comp], errors="coerce")
@@ -1065,9 +1075,205 @@ def _forzar_importes_float(df: pd.DataFrame, columnas: list[str] = COLUMNAS_IMPO
     return df
 
 
+# ─────────────────────────────────────────────
+# REVISAR CON TODAS LAS COLUMNAS DE SISTEMA Y ARCA
+# ─────────────────────────────────────────────
+
+# Orden de salida de "revisar": cada par (sistema, arca) queda lado a lado;
+# None indica que el concepto existe en una sola de las dos fuentes.
+ORDEN_REVISAR_ANCHO: list[tuple[str | None, str | None]] = [
+    ("Fecha",                "Fecha de EmisiÃ³n"),
+    ("Fecha Contable",       None),
+    ("Razón Social",         "DenominaciÃ³n Emisor"),
+    ("CUIT_norm",            "Nro. Doc. Emisor"),
+    (None,                   "Tipo Doc. Emisor"),
+    ("Condición",            None),
+    ("Tipo Doc.",            "Tipo de Comprobante"),
+    ("Pto. Venta",           "Pto. Venta"),
+    ("N°Comprobante",        "N°Comprobante"),
+    (None,                   "CÃ³d. AutorizaciÃ³n"),
+    (None,                   "Moneda"),
+    (None,                   "Tipo Cambio"),
+    ("Imp. Neto Gravado",    "Imp. Neto Gravado Total"),
+    (None,                   "Imp. Neto Gravado IVA 0%"),
+    (None,                   "Imp. Neto Gravado IVA 2,5%"),
+    (None,                   "Imp. Neto Gravado IVA 5%"),
+    (None,                   "Imp. Neto Gravado IVA 10,5%"),
+    (None,                   "Imp. Neto Gravado IVA 21%"),
+    (None,                   "Imp. Neto Gravado IVA 27%"),
+    ("Imp. Neto No Gravado", "Imp. Neto No Gravado"),
+    (None,                   "Imp. Op. Exentas"),
+    (None,                   "IVA 2,5%"),
+    (None,                   "IVA 5%"),
+    ("IVA 10,5%",            "IVA 10,5%"),
+    ("IVA 21%",              "IVA 21%"),
+    ("IVA 27%",              "IVA 27%"),
+    (None,                   "Total IVA"),
+    ("Imp. Int.",            None),
+    ("Perc. Gcias.",         None),
+    ("Perc. IVA",            None),
+    ("Perc. IIBB CABA",      None),
+    ("Perc. IIBB BS AS",     None),
+    ("Perc. SUSS",           None),
+    ("SIRCREB",              None),
+    (None,                   "Otros Tributos"),
+    ("Total",                "Imp. Total"),
+    (None,                   "Tipo Doc. Receptor"),
+    (None,                   "Nro. Doc. Receptor"),
+]
+
+COLUMNAS_IMPORTE_SISTEMA = [
+    "Imp. Neto Gravado", "Imp. Neto No Gravado", "IVA 10,5%", "IVA 21%", "IVA 27%",
+    "Imp. Int.", "Perc. Gcias.", "Perc. IVA", "Perc. IIBB CABA", "Perc. IIBB BS AS",
+    "Perc. SUSS", "SIRCREB", "Total",
+]
+
+
+def _arreglar_encoding(nombre: str) -> str:
+    try:
+        return nombre.encode("latin1").decode("utf8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return nombre
+
+
+def _clave_valor(v) -> str:
+    if pd.isna(v):
+        return ""
+    try:
+        return f"{float(v):.2f}"
+    except (TypeError, ValueError):
+        return str(v).strip()
+
+
+def _clave_fecha(v) -> str:
+    f = pd.to_datetime(v, errors="coerce")
+    return "" if pd.isna(f) else f.strftime("%Y-%m-%d")
+
+
+def expandir_revisar(
+    revisar: pd.DataFrame,
+    df_arca_dep: pd.DataFrame,
+    df_sistema_dep: pd.DataFrame,
+) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """
+    Reemplaza las columnas resumidas de `revisar` por todas las columnas
+    de sistema (sufijo _sis) y de ARCA (sufijo _arca), tomadas de los
+    DataFrames depurados. Cada fila se ubica por Pto. Venta + N°Comprobante
+    + CUIT + Total (+ Fecha en ARCA). Devuelve el DataFrame y las columnas
+    de fecha e importe para el formato.
+    """
+    sis  = df_sistema_dep.reset_index(drop=True)
+    arca = df_arca_dep.reset_index(drop=True)
+    c_fecha_arca = "Fecha de EmisiÃ³n"
+
+    idx_sis: dict[tuple, list[int]] = {}
+    for i, r in sis.iterrows():
+        k = (_clave_valor(r["Pto. Venta"]), _clave_valor(r["N°Comprobante"]),
+             _clave_valor(r["CUIT_norm"]), _clave_valor(r.get("Total")))
+        idx_sis.setdefault(k, []).append(i)
+
+    idx_arca: dict[tuple, list[int]] = {}
+    for i, r in arca.iterrows():
+        k = (_clave_valor(r["Pto. Venta"]), _clave_valor(r["N°Comprobante"]),
+             _clave_valor(r["Nro. Doc. Emisor"]), _clave_valor(r.get("Imp. Total")),
+             _clave_fecha(r.get(c_fecha_arca)))
+        idx_arca.setdefault(k, []).append(i)
+
+    def _tomar(indice: dict, k: tuple, usados: dict) -> int | None:
+        cands = indice.get(k, [])
+        if not cands:
+            return None
+        n = usados.get(k, 0)
+        usados[k] = n + 1
+        return cands[min(n, len(cands) - 1)]
+
+    usados_sis: dict = {}
+    usados_arca: dict = {}
+    filas_sis, filas_arca = [], []
+    for _, r in revisar.iterrows():
+        i_sis = None
+        if pd.notna(r.get("cuit_sistema")):
+            i_sis = _tomar(idx_sis, (
+                _clave_valor(r.get("Pto. Venta_sistema")), _clave_valor(r.get("N°Comprobante_sistema")),
+                _clave_valor(r.get("cuit_sistema")), _clave_valor(r.get("Imp. Total_sistema")),
+            ), usados_sis)
+        i_arca = None
+        if pd.notna(r.get("cuit_arca")):
+            i_arca = _tomar(idx_arca, (
+                _clave_valor(r.get("Pto. Venta_arca")), _clave_valor(r.get("N°Comprobante_arca")),
+                _clave_valor(r.get("cuit_arca")), _clave_valor(r.get("Imp. Total_arca")),
+                _clave_fecha(r.get("Fecha_arca")),
+            ), usados_arca)
+        filas_sis.append(i_sis)
+        filas_arca.append(i_arca)
+
+    def _lado(df: pd.DataFrame, filas: list) -> pd.DataFrame:
+        vacio = pd.Series(index=df.columns, dtype=object)
+        return pd.DataFrame(
+            [df.loc[i] if i is not None else vacio for i in filas], columns=df.columns
+        ).reset_index(drop=True)
+
+    lado_sis  = _lado(sis, filas_sis)
+    lado_arca = _lado(arca, filas_arca)
+
+    # Si la fila no se ubicó en la fuente depurada, se conservan los datos
+    # resumidos que ya traía revisar.
+    respaldo_sis = {
+        "Fecha": "Fecha_Sistema", "Pto. Venta": "Pto. Venta_sistema",
+        "N°Comprobante": "N°Comprobante_sistema", "CUIT_norm": "cuit_sistema",
+        "Imp. Neto Gravado": "Gravado_sistema", "Imp. Neto No Gravado": "No Gravado_sistema",
+        "Total": "Imp. Total_sistema",
+    }
+    respaldo_arca = {
+        c_fecha_arca: "Fecha_arca", "Pto. Venta": "Pto. Venta_arca",
+        "N°Comprobante": "N°Comprobante_arca", "Nro. Doc. Emisor": "cuit_arca",
+        "Imp. Neto Gravado Total": "Gravado_arca", "Imp. Neto No Gravado": "No gravado_arca",
+        "Imp. Op. Exentas": "Exentas_arca", "Otros Tributos": "Otros Tributos_arca",
+        "Imp. Total": "Imp. Total_arca",
+    }
+    rev = revisar.reset_index(drop=True)
+    for lado, filas, respaldo in ((lado_sis, filas_sis, respaldo_sis), (lado_arca, filas_arca, respaldo_arca)):
+        faltan = [n for n, i in enumerate(filas) if i is None]
+        for col, col_rev in respaldo.items():
+            if faltan and col in lado.columns and col_rev in rev.columns:
+                lado.loc[faltan, col] = rev.loc[faltan, col_rev].values
+
+    columnas_sis  = [c for c in lado_sis.columns  if not str(c).startswith("_")]
+    columnas_arca = [c for c in lado_arca.columns if not str(c).startswith("_")]
+
+    orden: list[tuple[str, str]] = []
+    for c_sis, c_arca in ORDEN_REVISAR_ANCHO:
+        if c_sis in columnas_sis:
+            orden.append(("sis", c_sis))
+        if c_arca in columnas_arca:
+            orden.append(("arca", c_arca))
+    ya = set(orden)
+    orden += [("sis", c) for c in columnas_sis if ("sis", c) not in ya]
+    orden += [("arca", c) for c in columnas_arca if ("arca", c) not in ya]
+
+    salida = pd.DataFrame({"comentario": rev["comentario"].values})
+    cols_fecha, cols_importe = [], []
+    for lado_nombre, c in orden:
+        df_lado = lado_sis if lado_nombre == "sis" else lado_arca
+        base    = "CUIT" if c == "CUIT_norm" else _arreglar_encoding(str(c))
+        nombre  = f"{base}_{lado_nombre}"
+        salida[nombre] = df_lado[c].values
+        if "fecha" in str(c).lower():
+            cols_fecha.append(nombre)
+        elif (lado_nombre == "sis" and c in COLUMNAS_IMPORTE_SISTEMA) or (lado_nombre == "arca" and c in COLUMNAS_IMPORTE):
+            cols_importe.append(nombre)
+
+    for c in cols_importe:
+        salida[c] = pd.to_numeric(salida[c], errors="coerce").astype(float)
+
+    return salida, cols_fecha, cols_importe
+
+
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
+    df_arca_dep: pd.DataFrame | None = None,
+    df_sistema_dep: pd.DataFrame | None = None,
 ) -> bytes:
     DATE_FORMAT   = "DD/MM/YYYY"
     AMOUNT_FORMAT = "#,##0.00"
@@ -1104,7 +1310,18 @@ def generar_excel_en_memoria(
                 amount_col_indices.append(i)
         return df, date_col_indices, amount_col_indices
 
-    rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
+    if df_arca_dep is not None and df_sistema_dep is not None:
+        rev_out, rev_date_cols, rev_amount_cols = expandir_revisar(revisar, df_arca_dep, df_sistema_dep)
+        rev_prep = rev_out.copy()
+        rev_date_idx, rev_amount_idx = [], []
+        for i, col in enumerate(rev_prep.columns, start=1):
+            if col in rev_date_cols:
+                rev_prep[col] = pd.to_datetime(rev_prep[col], errors="coerce")
+                rev_date_idx.append(i)
+            elif col in rev_amount_cols:
+                rev_amount_idx.append(i)
+    else:
+        rev_prep, rev_date_idx, rev_amount_idx = _prep_df(rev_out, rev_date_cols)
     fs_prep,  fs_date_idx,  fs_amount_idx  = _prep_df(fs_out,  fs_date_cols)
 
     def _style_sheet(ws, date_col_indices: list[int], amount_col_indices: list[int]) -> None:
@@ -1142,6 +1359,7 @@ def generar_excel_en_memoria(
         wb = writer.book
         _style_sheet(wb["revisar"],       rev_date_idx, rev_amount_idx)
         _style_sheet(wb["falta_sistema"], fs_date_idx, fs_amount_idx)
+        wb["revisar"].freeze_panes = "B2"
 
     return buf.getvalue()
 
@@ -1180,6 +1398,9 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
         "faltante_sistema":  len(falta_sistema_final),
     }
 
-    buf_reporte = generar_excel_en_memoria(revisar3, falta_sistema_final)
+    buf_reporte = generar_excel_en_memoria(
+        revisar3, falta_sistema_final,
+        df_arca_dep=df_arca_dep, df_sistema_dep=df_sistema_dep,
+    )
 
     return buf_reporte, stats
