@@ -463,6 +463,9 @@ def cruce1(df_arca_dep: pd.DataFrame, df_sistema_dep: pd.DataFrame, tolerancia_t
 # agrupa en Otros Tributos). Puede ser más de una a la vez (ej. IIBB
 # CABA + Perc. IVA juntas). No incluye IVA 10,5/21/27%: son un concepto
 # distinto, no forman parte de Otros Tributos.
+# Diferencias de Gravado / Total con |sistema / arca - 1| <= 0,1% no van a "revisar".
+TOL_RELATIVA_IMPORTES = 0.001
+
 PERCEP_COLS_NO_GRAVADO = [
     "Perc. IIBB CABA", "Perc. IIBB BS AS", "Perc. SUSS", "Perc. Gcias.", "Perc. IVA", "SIRCREB", "Imp. Int.",
 ]
@@ -497,6 +500,8 @@ def revisar_inconsistencias_en_match(
         más cualquier otro motivo que la fila tenga sin explicar (ej.
         "Iva 0% registrado como no gravado, Fecha").
       - Imp. Total_sistema vs Imp. Total_arca      → tolerancia +/- tol_pesos
+      Gravado y Total tampoco se marcan si la diferencia relativa
+      |sistema / arca - 1| es <= TOL_RELATIVA_IMPORTES (0,1%).
 
     Regla extra:
       - Si el motivo es SOLO "No Gravado" y Tipo de Comprobante == 11, NO incluir (Factura C)
@@ -566,14 +571,19 @@ def revisar_inconsistencias_en_match(
 
     grav_sis  = _to_num(df[c_grav_sis ]).fillna(0.0).round(2)
     grav_arca = _to_num(df[c_grav_arca]).fillna(0.0).round(2)
-    mask_grav_raw = (grav_sis - grav_arca).abs() > tol
+    def _difiere(sis: pd.Series, arca: pd.Series) -> pd.Series:
+        # Diferencia mayor a tol_pesos y, además, mayor a la tolerancia relativa
+        relativa = (sis / arca.where(arca != 0) - 1).abs()
+        return ((sis - arca).abs() > tol) & ~(relativa <= TOL_RELATIVA_IMPORTES)
+
+    mask_grav_raw = _difiere(grav_sis, grav_arca)
 
     nograv_sis  = _to_num(df[c_nograv_sis ]).fillna(0.0).round(2)
     nograv_arca = _to_num(df[c_nograv_arca]).fillna(0.0).round(2)
 
     total_sis  = _to_num(df[c_total_sis ]).fillna(0.0).round(2)
     total_arca = _to_num(df[c_total_arca]).fillna(0.0).round(2)
-    mask_total = (total_sis - total_arca).abs() > tol
+    mask_total = _difiere(total_sis, total_arca)
 
     if c_tipo_comp is not None:
         tipo_comp    = pd.to_numeric(df[c_tipo_comp], errors="coerce")
