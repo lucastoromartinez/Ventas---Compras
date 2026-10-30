@@ -1269,6 +1269,259 @@ def expandir_revisar(
     return salida, cols_fecha, cols_importe
 
 
+
+# ─────────────────────────────────────────────
+# DIAGNÓSTICOS (no gravado / gravado y total)
+# ─────────────────────────────────────────────
+
+ALICUOTAS_IVA = {"10,5%": 0.105, "21%": 0.21, "27%": 0.27}
+ALICUOTAS_IVA_SOLO_ARCA = {"2,5%": 0.025, "5%": 0.05}
+PERCEP_COLS_SIS_ANCHO = [f"{c}_sis" for c in PERCEP_COLS_NO_GRAVADO]
+
+COLUMNAS_DIFERENCIA = [
+    "Dif Gravado",
+    "Dif No Gravado + Exentas",
+    "Dif IVA",
+    "Dif Percepciones vs Otros Tributos",
+    "Dif Total",
+    "Sistema: componentes - Total",
+]
+
+
+def _num(fila: pd.Series, col: str) -> float:
+    v = pd.to_numeric(fila.get(col), errors="coerce")
+    return 0.0 if pd.isna(v) else float(v)
+
+
+def _fmt_importe(x: float) -> str:
+    return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _diferencias(fila: pd.Series) -> dict[str, float]:
+    g_s, g_a = _num(fila, "Imp. Neto Gravado_sis"), _num(fila, "Imp. Neto Gravado Total_arca")
+    ng_s     = _num(fila, "Imp. Neto No Gravado_sis")
+    ng_a     = _num(fila, "Imp. Neto No Gravado_arca") + _num(fila, "Imp. Op. Exentas_arca")
+    iva_s    = sum(_num(fila, f"IVA {k}_sis") for k in ALICUOTAS_IVA)
+    iva_a    = sum(_num(fila, f"IVA {k}_arca") for k in list(ALICUOTAS_IVA) + list(ALICUOTAS_IVA_SOLO_ARCA))
+    perc_s   = sum(_num(fila, c) for c in PERCEP_COLS_SIS_ANCHO)
+    ot_a     = _num(fila, "Otros Tributos_arca")
+    t_s, t_a = _num(fila, "Total_sis"), _num(fila, "Imp. Total_arca")
+    return {
+        "Dif Gravado":                        round(g_s - g_a, 2),
+        "Dif No Gravado + Exentas":           round(ng_s - ng_a, 2),
+        "Dif IVA":                            round(iva_s - iva_a, 2),
+        "Dif Percepciones vs Otros Tributos": round(perc_s - ot_a, 2),
+        "Dif Total":                          round(t_s - t_a, 2),
+        "Sistema: componentes - Total":       round(g_s + ng_s + iva_s + perc_s - t_s, 2),
+    }
+
+
+def _explicar_gravado_total(fila: pd.Series, tol: float) -> str:
+    """Busca qué columna explica la diferencia de Gravado / Total."""
+    d = _diferencias(fila)
+    ok = lambda x, t=tol: abs(x) <= t
+
+    g_s, g_a = _num(fila, "Imp. Neto Gravado_sis"), _num(fila, "Imp. Neto Gravado Total_arca")
+    ng_s     = _num(fila, "Imp. Neto No Gravado_sis")
+    iva_s    = {k: _num(fila, f"IVA {k}_sis") for k in ALICUOTAS_IVA}
+    iva_a    = {k: _num(fila, f"IVA {k}_arca") for k in ALICUOTAS_IVA}
+    bases_a  = {k: _num(fila, f"Imp. Neto Gravado IVA {k}_arca") for k in ALICUOTAS_IVA}
+    perc_s   = sum(_num(fila, c) for c in PERCEP_COLS_SIS_ANCHO)
+    ot_a     = _num(fila, "Otros Tributos_arca")
+    t_s, t_a = _num(fila, "Total_sis"), _num(fila, "Imp. Total_arca")
+
+    # 1) Comprobante registrado en el sistema sin importes
+    if ok(t_s, 0.005) and ok(g_s, 0.005) and ok(ng_s, 0.005) and not ok(t_a):
+        txt = "Comprobante registrado en sistema sin importes"
+        tc = _num(fila, "Tipo Cambio_arca")
+        if tc and abs(tc - 1) > 1e-9:
+            txt += f" (comprobante en {fila.get('Moneda_arca')}, tipo de cambio {_fmt_importe(tc)})"
+        return txt
+
+    expl = []
+
+    # 2) Los componentes del sistema no suman su propio Total
+    if not ok(d["Sistema: componentes - Total"]):
+        g_implicito = t_s - (ng_s + sum(iva_s.values()) + perc_s)
+        if ok(g_implicito - g_a) and not ok(g_s - g_a):
+            ratio = g_s / g_a if g_a else np.nan
+            veces = (
+                f" (≈ {ratio:.2f} veces el de ARCA)"
+                if np.isfinite(ratio) and round(ratio) > 1 and abs(ratio - round(ratio)) < 0.01 else ""
+            )
+            expl.append(
+                f"Gravado mal cargado en sistema: {_fmt_importe(g_s)} en lugar de {_fmt_importe(g_a)}{veces}; "
+                f"el Total del sistema sí coincide con ARCA"
+            )
+        else:
+            expl.append(
+                f"Los componentes del sistema suman {_fmt_importe(t_s + d['Sistema: componentes - Total'])} "
+                f"y su Total es {_fmt_importe(t_s)}"
+            )
+
+    # 3) Otros Tributos de ARCA cargados como Gravado (+ IVA) en el sistema
+    otros_como_gravado = False
+    if not ok(d["Dif Percepciones vs Otros Tributos"]) and not ok(d["Dif Gravado"]):
+        falta_ot = ot_a - perc_s
+        t_rel = max(tol, 0.001 * abs(falta_ot))
+        if ok(d["Dif Gravado"] - falta_ot, t_rel):
+            expl.append(f"Otros Tributos de ARCA ({_fmt_importe(ot_a)}) cargados como Gravado en sistema")
+            otros_como_gravado = True
+        elif ok(d["Dif Gravado"] + d["Dif IVA"] - falta_ot, t_rel):
+            expl.append(
+                f"Otros Tributos de ARCA ({_fmt_importe(ot_a)}) cargados como Gravado + IVA en sistema "
+                f"(Gravado +{_fmt_importe(d['Dif Gravado'])}, IVA +{_fmt_importe(d['Dif IVA'])})"
+            )
+            otros_como_gravado = True
+
+    # 4) Otros Tributos no registrados (o por otro importe) en el sistema
+    if (
+        not ok(d["Dif Percepciones vs Otros Tributos"]) and ok(d["Dif Gravado"])
+        and ok(d["Dif Total"] - d["Dif Percepciones vs Otros Tributos"])
+    ):
+        if ok(perc_s, 0.005):
+            expl.append(f"Otros Tributos de ARCA ({_fmt_importe(ot_a)}) no registrados en sistema (sin percepciones cargadas)")
+        else:
+            expl.append(
+                f"Percepciones del sistema ({_fmt_importe(perc_s)}) distintas de Otros Tributos de ARCA ({_fmt_importe(ot_a)})"
+            )
+
+    # 5) IVA mal cargado
+    difs_iva = {k: iva_s[k] - iva_a[k] for k in ALICUOTAS_IVA if not ok(iva_s[k] - iva_a[k])}
+    if difs_iva and not otros_como_gravado:
+        alicuota_errada = False
+        for k_s, tasa_s in ALICUOTAS_IVA.items():
+            for k_a in ALICUOTAS_IVA:
+                if (
+                    k_s != k_a and not ok(bases_a[k_a]) and ok(iva_a[k_s]) and ok(iva_s[k_a])
+                    and ok(iva_s[k_s] - bases_a[k_a] * tasa_s)
+                ):
+                    expl.append(
+                        f"IVA cargado al {k_s} en lugar de {k_a} "
+                        f"(sistema IVA {k_s} {_fmt_importe(iva_s[k_s])}; ARCA IVA {k_a} {_fmt_importe(iva_a[k_a])})"
+                    )
+                    alicuota_errada = True
+        if not alicuota_errada:
+            det = "; ".join(
+                f"IVA {k}: sistema {_fmt_importe(iva_s[k])} vs ARCA {_fmt_importe(iva_a[k])}" for k in difs_iva
+            )
+            txt = f"IVA mal cargado en sistema ({det})"
+            bases_s = {k: iva_s[k] / ALICUOTAS_IVA[k] for k in difs_iva if iva_s[k]}
+            if bases_s and ok(d["Dif Gravado"], 5):
+                txt += ". Bases implícitas del sistema: " + ", ".join(
+                    f"{k} {_fmt_importe(b)} (ARCA {_fmt_importe(bases_a[k])})" for k, b in bases_s.items()
+                )
+            expl.append(txt)
+
+    return " | ".join(expl) if expl else "Sin explicación automática: ver apertura de diferencias"
+
+
+def _explicar_no_gravado(fila: pd.Series) -> str:
+    """Detalla con importes el motivo de composición que ya trae el comentario."""
+    motivos = [m.strip() for m in str(fila.get("comentario", "")).split(", ") if m.strip()]
+    if not motivos:
+        return ""
+    motivo, otros = motivos[0], motivos[1:]
+
+    ng_s = _num(fila, "Imp. Neto No Gravado_sis")
+    if motivo == "No Gravado coincide con Otros Tributos":
+        txt = (f"No Gravado del sistema ({_fmt_importe(ng_s)}) corresponde a Otros Tributos de ARCA "
+               f"({_fmt_importe(_num(fila, 'Otros Tributos_arca'))})")
+    elif motivo == "No Gravado coincide con Exentas":
+        txt = (f"No Gravado del sistema ({_fmt_importe(ng_s)}) informado en ARCA como Exentas "
+               f"({_fmt_importe(_num(fila, 'Imp. Op. Exentas_arca'))})")
+    elif motivo == "Iva 0% registrado como no gravado":
+        g0_a = _num(fila, "Imp. Neto Gravado IVA 0%_arca")
+        if abs(g0_a) > 0.005:
+            txt = (f"Neto gravado IVA 0% de ARCA ({_fmt_importe(g0_a)}) "
+                   f"registrado como No Gravado en sistema (No Gravado sistema {_fmt_importe(ng_s)}, "
+                   f"ARCA {_fmt_importe(_num(fila, 'Imp. Neto No Gravado_arca'))})")
+        else:
+            # ARCA no informa neto al 0%: el sistema movió importe entre Gravado y No Gravado
+            d = _diferencias(fila)
+            txt = (f"ARCA no informa neto IVA 0%: en sistema el Gravado difiere en {_fmt_importe(d['Dif Gravado'])} "
+                   f"y se compensa con No Gravado ({_fmt_importe(d['Dif No Gravado + Exentas'])})")
+            if abs(d["Dif IVA"]) > 0.005 and abs(d["Dif IVA"] + d["Dif Percepciones vs Otros Tributos"]) <= 1:
+                txt += (f"; el IVA del sistema difiere en {_fmt_importe(d['Dif IVA'])} y se compensa con "
+                        f"Otros Tributos de ARCA ({_fmt_importe(_num(fila, 'Otros Tributos_arca'))})")
+    elif "registrada(s) junto con No Gravado" in motivo:
+        cols = motivo.split(" registrada(s)")[0].split(" + ")
+        perc = sum(_num(fila, f"{c}_sis") for c in cols)
+        txt = (f"{' + '.join(cols)} ({_fmt_importe(perc)}) registrada(s) dentro de No Gravado: "
+               f"No Gravado sistema {_fmt_importe(ng_s)} + percepciones = Otros Tributos ARCA "
+               f"({_fmt_importe(_num(fila, 'Otros Tributos_arca'))})")
+    else:
+        txt = motivo
+    if otros:
+        txt += f" | Además: {', '.join(otros)}"
+    return txt
+
+
+def _armar_diagnostico(ancho: pd.DataFrame, explicaciones: list[str]) -> pd.DataFrame:
+    """
+    Columnas: comentario, explicacion, Razón Social, CUIT, Fecha, Comprobante,
+    apertura de diferencias y, después, todas las columnas de sistema y ARCA
+    en el mismo orden que "revisar". Los datos de identificación se toman
+    del sistema y, si la fila no lo tiene, de ARCA.
+    """
+    ancho = ancho.reset_index(drop=True)
+
+    def _primero(col_sis: str, col_arca: str) -> pd.Series:
+        a = ancho[col_sis] if col_sis in ancho.columns else pd.Series(pd.NA, index=ancho.index)
+        b = ancho[col_arca] if col_arca in ancho.columns else pd.Series(pd.NA, index=ancho.index)
+        return a.where(a.notna() & (a.astype(str).str.strip() != ""), b)
+
+    def _comprobante(fila: pd.Series) -> str:
+        for lado in ("sis", "arca"):
+            pto, nro = fila.get(f"Pto. Venta_{lado}"), fila.get(f"N°Comprobante_{lado}")
+            if pd.notna(pto) and pd.notna(nro) and str(nro).strip():
+                pto = str(pto).split(".")[0].strip()
+                nro = str(nro).split(".")[0].strip()
+                return f"{pto.zfill(4) if pto.isdigit() else pto}-{nro.zfill(8) if nro.isdigit() else nro}"
+        return ""
+
+    cuit = _primero("CUIT_sis", "Nro. Doc. Emisor_arca").astype(str).str.split(".").str[0]
+    salida = pd.DataFrame({
+        "comentario":   ancho["comentario"],
+        "explicacion":  explicaciones,
+        "Razón Social": _primero("Razón Social_sis", "Denominación Emisor_arca").astype(str).str.strip(),
+        "CUIT":         cuit.where(cuit != "nan", ""),
+        "Fecha":        pd.to_datetime(_primero("Fecha_sis", "Fecha de Emisión_arca"), errors="coerce"),
+        "Comprobante":  [_comprobante(f) for _, f in ancho.iterrows()],
+    })
+    difs = pd.DataFrame([_diferencias(f) for _, f in ancho.iterrows()], columns=COLUMNAS_DIFERENCIA)
+    return pd.concat([salida, difs, ancho.drop(columns=["comentario"])], axis=1)
+
+
+def generar_diagnosticos(
+    revisar: pd.DataFrame,
+    no_gravado: pd.DataFrame,
+    df_arca_dep: pd.DataFrame,
+    df_sistema_dep: pd.DataFrame,
+    tol_pesos: float = 1.0,
+) -> dict[str, tuple[pd.DataFrame, list[str], list[str]]]:
+    """
+    Arma las solapas diagnostico_no_gravado y diagnostico_gravado_total
+    (todavía no se exportan en el reporte de la app). Devuelve, por solapa,
+    el DataFrame y sus columnas de fecha e importe para el formato.
+    """
+    ng_ancho, fechas, importes = expandir_revisar(no_gravado, df_arca_dep, df_sistema_dep)
+    rev_ancho, _, _ = expandir_revisar(revisar, df_arca_dep, df_sistema_dep)
+
+    motivos = rev_ancho["comentario"].astype(str).str.split(", ")
+    gt_ancho = rev_ancho[motivos.apply(lambda m: "Gravado" in m or "Total" in m)].reset_index(drop=True)
+
+    diag_ng = _armar_diagnostico(ng_ancho, [_explicar_no_gravado(f) for _, f in ng_ancho.iterrows()])
+    diag_gt = _armar_diagnostico(gt_ancho, [_explicar_gravado_total(f, tol_pesos) for _, f in gt_ancho.iterrows()])
+
+    fechas_diag   = ["Fecha"] + fechas
+    importes_diag = COLUMNAS_DIFERENCIA + importes
+    return {
+        "diagnostico_no_gravado":    (diag_ng, fechas_diag, importes_diag),
+        "diagnostico_gravado_total": (diag_gt, fechas_diag, importes_diag),
+    }
+
+
 def generar_excel_en_memoria(
     revisar: pd.DataFrame,
     falta_sistema: pd.DataFrame,
@@ -1388,6 +1641,10 @@ def correr_cruce(archivo_arca, archivo_sistema, tol_pesos: float = 1.0):
     )
 
     falta_sistema_final = netear_falta_sistema(falta_sistema3, tol_pesos=tol_pesos)
+
+    # Las filas de "no_gravado" (diferencias de composición explicadas)
+    # también quedan en "revisar", con su motivo en el comentario.
+    revisar3 = pd.concat([revisar3, no_gravado], ignore_index=True)
 
     stats = {
         "match":             len(match),
