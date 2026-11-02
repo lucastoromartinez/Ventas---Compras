@@ -267,11 +267,18 @@ with tab_conciliacion:
             key="conc_easa_recaudacion"
         )
 
-        st.markdown('<div class="upload-label">Cuadro de pendientes del mes anterior (Excel)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Conciliación del mes anterior (Conciliacion.xlsx completo)</div>', unsafe_allow_html=True)
         conc_pendientes = st.file_uploader(
             "conc_pendientes", type=["xlsx", "xls"], label_visibility="collapsed",
             key="conc_easa_pendientes"
         )
+
+        st.markdown('<div class="upload-label">Extracto bancario Rappi (Excel — opcional)</div>', unsafe_allow_html=True)
+        conc_banco = st.file_uploader(
+            "conc_banco", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_easa_banco"
+        )
+        st.markdown('<div class="liq-detail" style="margin-top:-0.4rem;margin-bottom:0.6rem">Si se carga, cada liquidación se cruza con su transferencia y lo que no corresponde a ninguna liquidación queda como Acreditación Rappi sin liquidación. Sin el extracto, las acreditaciones se cruzan contra el total del mayor.</div>', unsafe_allow_html=True)
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
@@ -283,7 +290,7 @@ with tab_conciliacion:
                 ("el reporte HIO por método de pago", conc_hio_met),
                 ("el reporte de Dean", conc_dean),
                 ("la cuenta recaudación Rappi", conc_recaudacion),
-                ("el cuadro de pendientes", conc_pendientes),
+                ("la conciliación del mes anterior", conc_pendientes),
             ] if not valor
         ]
         if faltantes:
@@ -301,7 +308,8 @@ with tab_conciliacion:
                 try:
                     zip_buf, stats = correr_conciliacion_rappi_easa(
                         conc_liq, conc_pdf, conc_hio_doc, conc_hio_met,
-                        conc_dean, conc_recaudacion, conc_pendientes
+                        conc_dean, conc_recaudacion, conc_pendientes,
+                        archivo_banco=conc_banco
                     )
                     st.session_state["resultado_conciliacion_easa"] = {"zip": zip_buf, "stats": stats}
                 except Exception as e:
@@ -349,8 +357,8 @@ with tab_conciliacion:
             </div>
             <div class="liq-card">
                 <div class="liq-id">Acreditaciones {c['mes']:02d}-{c['anio']}</div>
-                <div class="liq-detail">Mayor: {_pesos(c['acred_mayor'])} &nbsp;|&nbsp; Esperado: {_pesos(c['acred_esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos(c['acred_diferencia'])}</div>
-                <div class="liq-detail">Sin registrar: {c['acred_faltantes']} &nbsp;|&nbsp; Negativas: {c['acred_negativas']} &nbsp;|&nbsp; A cobrar el mes que viene: {c['acred_mes_siguiente']}</div>
+                <div class="liq-detail">Mayor: {_pesos(c['acred_mayor'])} &nbsp;|&nbsp; {"Banco: " + _pesos(c.get('acred_banco')) if c.get('acred_banco') is not None else "Esperado: " + _pesos(c['acred_esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos(c['acred_diferencia'])}</div>
+                <div class="liq-detail">Sin cobrar: {c['acred_faltantes']} &nbsp;|&nbsp; Negativas: {c['acred_negativas']} &nbsp;|&nbsp; A cobrar el mes que viene: {c['acred_mes_siguiente']} &nbsp;|&nbsp; Sin liquidación: {c.get('acred_sin_liquidacion', 0)}</div>
             </div>
             <div class="liq-card">
                 <div class="liq-id">Cierre del cuadro</div>
@@ -445,11 +453,18 @@ with tab_conciliacion:
             key="conc_ronda_recaudacion"
         )
 
-        st.markdown('<div class="upload-label">Cuadro de pendientes del mes anterior (Excel)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Conciliación del mes anterior (Conciliacion.xlsx completo)</div>', unsafe_allow_html=True)
         ronda_pendientes = st.file_uploader(
             "ronda_pendientes", type=["xlsx", "xls"], label_visibility="collapsed",
             key="conc_ronda_pendientes"
         )
+
+        st.markdown('<div class="upload-label">Extracto bancario Rappi (Excel — opcional)</div>', unsafe_allow_html=True)
+        ronda_banco = st.file_uploader(
+            "ronda_banco", type=["xlsx", "xls"], label_visibility="collapsed",
+            key="conc_ronda_banco"
+        )
+        st.markdown('<div class="liq-detail" style="margin-top:-0.4rem;margin-bottom:0.6rem">Si se carga, cada liquidación se cruza con su transferencia y lo que no corresponde a ninguna liquidación queda como Acreditación Rappi sin liquidación. Sin el extracto, las acreditaciones se cruzan contra el total del mayor.</div>', unsafe_allow_html=True)
 
         st.markdown("<hr class='divider'>", unsafe_allow_html=True)
 
@@ -461,7 +476,7 @@ with tab_conciliacion:
                 ("el reporte HIO por método de pago", ronda_hio_met),
                 ("el reporte de Atalaya", ronda_atalaya),
                 ("la cuenta recaudación Rappi", ronda_recaudacion),
-                ("el cuadro de pendientes", ronda_pendientes),
+                ("la conciliación del mes anterior", ronda_pendientes),
             ] if not valor
         ]
         if faltantes_ronda:
@@ -479,7 +494,8 @@ with tab_conciliacion:
                 try:
                     zip_buf, stats, _ = correr_conciliacion_rappi_ronda(
                         ronda_liq, ronda_pdf, ronda_recaudacion,
-                        ronda_hio_doc, ronda_hio_met, ronda_atalaya, ronda_pendientes
+                        ronda_hio_doc, ronda_hio_met, ronda_atalaya, ronda_pendientes,
+                        archivo_banco=ronda_banco
                     )
                     st.session_state["resultado_conciliacion_ronda"] = {"zip": zip_buf, "stats": stats}
                 except Exception as e:
@@ -527,8 +543,8 @@ with tab_conciliacion:
             </div>
             <div class="liq-card">
                 <div class="liq-id">Acreditaciones {s['mes_numero']:02d}-{s['anio']}</div>
-                <div class="liq-detail">Mayor: {_pesos_ronda(ac['mayor'])} &nbsp;|&nbsp; Esperado: {_pesos_ronda(ac['esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos_ronda(ac['diferencia'])}</div>
-                <div class="liq-detail">Sin registrar: {ac['faltantes']} &nbsp;|&nbsp; Negativas: {ac['negativas']} &nbsp;|&nbsp; A cobrar el mes que viene: {ac['mes_siguiente']}</div>
+                <div class="liq-detail">Mayor: {_pesos_ronda(ac['mayor'])} &nbsp;|&nbsp; {"Banco: " + _pesos_ronda(ac.get('banco')) if ac.get('banco') is not None else "Esperado: " + _pesos_ronda(ac['esperado'])} &nbsp;|&nbsp; Diferencia: {_pesos_ronda(ac['diferencia'])}</div>
+                <div class="liq-detail">Sin cobrar: {ac['faltantes']} &nbsp;|&nbsp; Negativas: {ac['negativas']} &nbsp;|&nbsp; A cobrar el mes que viene: {ac['mes_siguiente']} &nbsp;|&nbsp; Sin liquidación: {ac.get('sin_liquidacion', 0)}</div>
             </div>
             """, unsafe_allow_html=True)
 
