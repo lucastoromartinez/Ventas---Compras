@@ -41,6 +41,16 @@ Revisión 28/10/2026 (cierre de septiembre):
 - El bloque del mes se arma con una línea por concepto (sumado) en orden
   alfabético, como el cuadro manual; la 'Diferencia de centavos' va al pie del
   bloque 'Diferencia de Venta y extracto' del mes.
+
+Revisión 02/11/2026:
+- Extracto bancario como input opcional (archivo_banco). Rappi transfiere cada
+  liquidación por separado, así que se cruza transferencia contra liquidación:
+  las no cobradas quedan en 'Acreditaciones de … Registradas en …' y las
+  transferencias sin liquidación van al bloque 'Acreditaciones Rappi sin
+  liquidación' ('Acreditación Rappi sin liquidación dd/mm/aaaa Comprobante N').
+  El mes siguiente esas líneas se compensan con pagos netos o con la
+  liquidación que las explique. Sin extracto, todo funciona como antes y ese
+  bloque se arrastra sin cambios. Hoja 'Cruce banco' con el detalle.
 """
 
 import calendar
@@ -1322,8 +1332,12 @@ def agregar_seccion_mes(df_pendientes_actualizado, conceptos_mes_actual,
 def actualizar_acreditaciones_pendientes(pendientes_actualizado2, acred_match_mes_anterior,
                                          acred_pendientes_mes_siguiente, acreditacion_faltante,
                                          anio=None, mes_numero=None, cuadro_conceptos=None,
-                                         advertencias=None):
+                                         advertencias=None, sin_liquidacion=None):
+    """Rehace el bloque 'Acreditaciones de <mes> Registradas en <mes sig>' y, a
+    continuación, el de 'Acreditaciones Rappi sin liquidación' (sólo existe si
+    se cargó el extracto bancario en este cierre o en uno anterior)."""
     anio, mes_numero = _resolver_mes(anio, mes_numero, cuadro_conceptos, advertencias)
+    pendientes_actualizado2 = sacar_bloque_sin_liquidacion(pendientes_actualizado2)
 
     patron_header = re.compile(r'^Acreditaciones de .+ Registradas en .+$', re.IGNORECASE)
     patron_liq = re.compile(r'^Liquidaci[oó]n .+$', re.IGNORECASE)
@@ -1344,6 +1358,11 @@ def actualizar_acreditaciones_pendientes(pendientes_actualizado2, acred_match_me
         [encabezado] + [c for c, _ in bloque_items],
         [None] + [-round(m, 2) for _, m in bloque_items]
     )
+    if sin_liquidacion is not None and len(sin_liquidacion):
+        bloque = pd.concat([bloque, _fila_vacia(pendientes_actualizado2), _bloque(
+            pendientes_actualizado2,
+            [TITULO_SIN_LIQUIDACION] + list(sin_liquidacion["Concepto"]),
+            [None] + [round(m, 2) for m in sin_liquidacion["Importe"]])], ignore_index=True)
 
     if not idx_header:
         _avisar(advertencias, "No se encontró el bloque de acreditaciones: se agregó al final.")
@@ -1789,6 +1808,322 @@ def cuadro_conceptos_con_arrastre(cuadro_conceptos, liqs_anteriores_sin_factura)
     return pd.concat([cuadro_conceptos[["Concepto", "Monto"]], extra], ignore_index=True)
 
 
+# ─────────────────────────────────────────────
+# EXTRACTO BANCARIO (INPUT OPCIONAL)
+# ─────────────────────────────────────────────
+# Rappi transfiere cada liquidación por separado; el mayor las agrupa en pocos
+# asientos 'Acreditaciones Rappi mm/aaaa'. Con el extracto se sabe qué
+# liquidación se cobró y cuál no, en vez de deducirlo por combinación de
+# importes contra el total del mayor. Las transferencias que no corresponden a
+# ninguna liquidación quedan como 'Acreditación Rappi sin liquidación' hasta que
+# se identifiquen (pago neto de una liquidación posterior, ajuste, etc.).
+
+TITULO_SIN_LIQUIDACION = "Acreditaciones Rappi sin liquidación"
+PATRON_SIN_LIQUIDACION = re.compile(
+    r'^Acreditaci[oó]n Rappi sin liquidaci[oó]n (\d{2})/(\d{2})/(\d{4})(?:\s+Comprobante\s+(\S+))?\s*$',
+    re.IGNORECASE)
+TOLERANCIA_BANCO = 0.05            # redondeo entre la transferencia y la liquidación
+TOLERANCIA_DESFASAJE_BANCO = 5     # banco vs mayor
+MAX_TAM_PAGO_NETO = 4              # acreditaciones sin liquidación que puede descontar un pago
+
+
+def _importe_banco(valor):
+    """Acepta números o texto en formato argentino ('1.661.212,86')."""
+    if pd.isna(valor):
+        return np.nan
+    if isinstance(valor, (int, float, np.number)):
+        return float(valor)
+    s = str(valor).strip().replace('$', '').replace(' ', '')
+    if ',' in s:
+        s = s.replace('.', '').replace(',', '.')
+    try:
+        return float(s)
+    except ValueError:
+        return np.nan
+
+
+def leer_movimientos_banco_rappi(archivo, anio, mes_numero, advertencias=None):
+    """Transferencias de Rappi del extracto bancario dentro del mes.
+    Devuelve DataFrame [Fecha, Importe, Comprobante] ordenado por fecha.
+    Columnas: 'fecha', 'créditos' (o 'haber' / 'importe' / 'monto') y,
+    si está, 'comprobante'. Si alguna columna de texto menciona RAPPI, se
+    toman sólo esas filas; si no, se asume que el archivo es sólo de Rappi."""
+    df = _leer_reporte(archivo, 'Extracto bancario (Rappi)', [('fecha',)])
+    col_fecha = next((c for c in df.columns if _normalizar(c) == 'fecha'), None) or \
+        _buscar_col(df, 'fecha', nombre_humano='Fecha')
+    col_importe = None
+    for claves in (('credito',), ('haber',), ('importe',), ('monto',)):
+        col_importe = _buscar_col(df, *claves, obligatoria=False)
+        if col_importe is not None:
+            break
+    if col_importe is None:
+        raise ValueError("El extracto bancario no tiene una columna de créditos/importe. "
+                         f"Columnas encontradas: {list(df.columns)}")
+    col_comp = _buscar_col(df, 'comprobante', obligatoria=False) or \
+        _buscar_col(df, 'referencia', obligatoria=False)
+
+    es_rappi = df.apply(lambda fila: ' '.join(str(v) for v in fila), axis=1)\
+        .str.contains('rappi', case=False, na=False)
+    if es_rappi.any():
+        df = df[es_rappi]
+    else:
+        _avisar(advertencias, "El extracto bancario no menciona RAPPI en ninguna fila: "
+                              "se tomaron todos los créditos como transferencias de Rappi.")
+
+    fechas = pd.to_datetime(df[col_fecha], errors='coerce', dayfirst=True)
+    importes = df[col_importe].apply(_importe_banco).round(2)
+    inicio = pd.Timestamp(anio, mes_numero, 1)
+    fin = pd.Timestamp(anio, mes_numero, calendar.monthrange(anio, mes_numero)[1])
+    en_mes = (fechas >= inicio) & (fechas <= fin)
+    fuera = (~en_mes & fechas.notna() & (importes > 0)).sum()
+    if fuera:
+        _avisar(advertencias, f"Extracto bancario: se excluyeron {int(fuera)} transferencia/s "
+                              f"fuera de {MESES_ES[mes_numero]} {anio}.")
+    sel = en_mes & (importes > 0)
+    out = pd.DataFrame({
+        "Fecha": fechas[sel].dt.normalize(),
+        "Importe": importes[sel],
+        "Comprobante": _normalizar_id(df.loc[sel, col_comp]) if col_comp else None,
+    })
+    return out.sort_values("Fecha", kind="stable").reset_index(drop=True)
+
+
+def texto_sin_liquidacion(fecha, comprobante=None):
+    texto = f"Acreditación Rappi sin liquidación {pd.Timestamp(fecha):%d/%m/%Y}"
+    return f"{texto} Comprobante {comprobante}" if comprobante else texto
+
+
+def extraer_sin_liquidacion_pendientes(pendientes):
+    """Líneas 'Acreditación Rappi sin liquidación dd/mm/aaaa Comprobante N' del
+    cierre anterior. Importe positivo (ya se acreditó en el mayor sin una
+    liquidación que lo respalde)."""
+    texto = pendientes.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+    monto = pd.to_numeric(pendientes.iloc[:, 3], errors="coerce")
+    filas = []
+    for i, t in texto.items():
+        m = PATRON_SIN_LIQUIDACION.match(t)
+        if m and pd.notna(monto[i]):
+            filas.append({"Fila": i, "Concepto": t,
+                          "Fecha": pd.Timestamp(int(m.group(3)), int(m.group(2)), int(m.group(1))),
+                          "Comprobante": m.group(4), "Importe": round(abs(monto[i]), 2)})
+    return pd.DataFrame(filas, columns=["Fila", "Concepto", "Fecha", "Comprobante", "Importe"])
+
+
+def _combinacion(importes, objetivo, tol, tam_max):
+    """Primera combinación (índices) de hasta tam_max importes que suma objetivo ± tol."""
+    items = list(importes.items())
+    for tam in range(1, min(tam_max, len(items)) + 1):
+        for c in itertools.combinations(items, tam):
+            if abs(round(sum(v for _, v in c), 2) - objetivo) <= tol:
+                return [k for k, _ in c]
+    return None
+
+
+def cruzar_liquidaciones_con_banco(depositos, liquidaciones, sin_liq_anterior, total_mayor,
+                                   advertencias=None):
+    """
+    Cruza las transferencias del banco con las liquidaciones a cobrar.
+
+    liquidaciones: DataFrame [Concepto, Importe, Fecha de Pago (puede ser NaT)]
+        con las pendientes del mes anterior y las positivas del mes.
+    sin_liq_anterior: acreditaciones sin liquidación del cierre anterior.
+    total_mayor: 'Acreditaciones Rappi mm/aaaa' del mayor.
+
+    1. Desfasaje banco/mayor: si el banco tiene más que el mayor, las
+       transferencias de los últimos días que explican la diferencia se
+       registran el mes siguiente (sus liquidaciones siguen pendientes).
+    2. Una transferencia por liquidación (importe ± 0,05; primero la de la
+       fecha de pago, después la de fecha más cercana).
+    3. Pagos netos: transferencia + acreditaciones sin liquidación anteriores
+       = liquidación. Y liquidaciones cubiertas sólo por acreditaciones sin
+       liquidación anteriores (Rappi pagó antes de liquidar).
+    4. Si el mayor tiene más que el banco, las liquidaciones no cobradas que
+       explican la diferencia se dan por cobradas (están en el mayor).
+    Lo que sobra del banco queda como acreditación sin liquidación.
+
+    Devuelve dict: no_cobradas (índices de liquidaciones), sin_liquidacion
+    (DataFrame [Concepto, Importe] a escribir), detalle (hoja de control),
+    total_banco, total_mayor, diferencia.
+    """
+    dep = depositos.copy()
+    liq = liquidaciones.copy()
+    if "Fecha de Pago" not in liq.columns:
+        liq["Fecha de Pago"] = pd.NaT
+    liq["Fecha de Pago"] = pd.to_datetime(liq["Fecha de Pago"], errors="coerce")
+    ant = sin_liq_anterior.copy().reset_index(drop=True)
+
+    usados_dep, cobradas, usados_ant = set(), {}, set()   # cobradas: idx liq -> descripción
+    detalle = []
+
+    # 1. Desfasaje: transferencias del banco que el mayor todavía no registró
+    total_banco = round(dep["Importe"].sum(), 2)
+    exceso = round(total_banco - total_mayor, 2)
+    excluidos = set()
+    if exceso > TOLERANCIA_DESFASAJE_BANCO:
+        acumulado = 0.0
+        for fecha in sorted(dep["Fecha"].unique(), reverse=True):
+            grupo = dep.index[dep["Fecha"] == fecha]
+            acumulado = round(acumulado + dep.loc[grupo, "Importe"].sum(), 2)
+            excluidos |= set(grupo)
+            if abs(acumulado - exceso) <= TOLERANCIA_DESFASAJE_BANCO:
+                break
+            if acumulado > exceso + TOLERANCIA_DESFASAJE_BANCO:
+                excluidos = set()
+                break
+        else:
+            excluidos = set()
+        if not excluidos:
+            # Último intento: una combinación de transferencias de los últimos días
+            ult = dep[dep["Fecha"] >= dep["Fecha"].max() - pd.Timedelta(days=3)]["Importe"]
+            idx = _combinacion(ult, exceso, TOLERANCIA_DESFASAJE_BANCO, MAX_TAM_COMBINACION_RECORTADA)
+            excluidos = set(idx or [])
+        if excluidos:
+            _avisar(advertencias,
+                    f"Banco vs mayor: el banco tiene {exceso:,.2f} más que el mayor; se tomaron como "
+                    f"registradas el mes siguiente {len(excluidos)} transferencia/s del "
+                    + ", ".join(sorted({f'{f:%d/%m}' for f in dep.loc[sorted(excluidos), 'Fecha']})) + ".")
+            for i in sorted(excluidos):
+                detalle.append({"Fecha": dep.at[i, "Fecha"], "Comprobante": dep.at[i, "Comprobante"],
+                                "Importe banco": dep.at[i, "Importe"], "Liquidación": None,
+                                "Importe liquidación": None,
+                                "Resultado": "Registrada en el mayor el mes siguiente"})
+        usados_dep |= excluidos
+
+    # 2. Una transferencia por liquidación
+    orden = liq.sort_values("Fecha de Pago", na_position="first", kind="stable").index
+    for misma_fecha in (True, False):
+        for i in orden:
+            if i in cobradas:
+                continue
+            fp, importe = liq.at[i, "Fecha de Pago"], liq.at[i, "Importe"]
+            cand = dep[~dep.index.isin(usados_dep) & ((dep["Importe"] - importe).abs() <= TOLERANCIA_BANCO)]
+            if misma_fecha:
+                cand = cand[cand["Fecha"] == fp] if pd.notna(fp) else cand.iloc[0:0]
+            if cand.empty:
+                continue
+            if pd.notna(fp):
+                j = (cand["Fecha"] - fp).abs().sort_values(kind="stable").index[0]
+            else:
+                j = cand.index[0]
+            usados_dep.add(j)
+            cobradas[i] = "Transferencia"
+            detalle.append({"Fecha": dep.at[j, "Fecha"], "Comprobante": dep.at[j, "Comprobante"],
+                            "Importe banco": dep.at[j, "Importe"], "Liquidación": liq.at[i, "Concepto"],
+                            "Importe liquidación": importe, "Resultado": "Cobrada"})
+
+    # 3a. Pagos netos de acreditaciones sin liquidación anteriores
+    for j in dep.index:
+        if j in usados_dep or ant.empty:
+            continue
+        for i in orden:
+            if i in cobradas:
+                continue
+            falta = round(liq.at[i, "Importe"] - dep.at[j, "Importe"], 2)
+            if falta <= TOLERANCIA_BANCO:
+                continue
+            libres = ant.loc[~ant.index.isin(usados_ant), "Importe"]
+            idx = _combinacion(libres, falta, TOLERANCIA_BANCO, MAX_TAM_PAGO_NETO)
+            if idx is None:
+                continue
+            usados_dep.add(j)
+            usados_ant |= set(idx)
+            cobradas[i] = "Pago neto"
+            detalle.append({"Fecha": dep.at[j, "Fecha"], "Comprobante": dep.at[j, "Comprobante"],
+                            "Importe banco": dep.at[j, "Importe"], "Liquidación": liq.at[i, "Concepto"],
+                            "Importe liquidación": liq.at[i, "Importe"],
+                            "Resultado": "Cobrada neta de " + ", ".join(ant.loc[idx, "Concepto"])})
+            _avisar(advertencias, f"{liq.at[i, 'Concepto']} ({liq.at[i, 'Importe']:,.2f}) se cobró "
+                                  f"neta de acreditaciones sin liquidación anteriores por {falta:,.2f}.")
+            break
+
+    # 3b. Liquidaciones que ya se habían cobrado como acreditación sin liquidación
+    if not ant.empty:
+        for i in orden:
+            if i in cobradas:
+                continue
+            libres = ant.loc[~ant.index.isin(usados_ant), "Importe"]
+            idx = _combinacion(libres, liq.at[i, "Importe"], TOLERANCIA_BANCO, MAX_TAM_PAGO_NETO)
+            if idx is None:
+                continue
+            usados_ant |= set(idx)
+            cobradas[i] = "Cobrada antes"
+            detalle.append({"Fecha": None, "Comprobante": None, "Importe banco": None,
+                            "Liquidación": liq.at[i, "Concepto"], "Importe liquidación": liq.at[i, "Importe"],
+                            "Resultado": "Cobrada antes como " + ", ".join(ant.loc[idx, "Concepto"])})
+            _avisar(advertencias, f"{liq.at[i, 'Concepto']} ({liq.at[i, 'Importe']:,.2f}) corresponde a "
+                                  "acreditación/es sin liquidación del cierre anterior.")
+
+    # 4. El mayor tiene más que el banco: liquidaciones registradas sin transferencia en el extracto
+    nuevas = dep[~dep.index.isin(usados_dep)]
+    acreditado = round(dep.loc[[j for j in usados_dep if j not in excluidos], "Importe"].sum()
+                       + nuevas["Importe"].sum(), 2)
+    falta_banco = round(total_mayor - acreditado, 2)
+    explicado_mayor = 0.0
+    if falta_banco > TOLERANCIA_DESFASAJE_BANCO:
+        pendientes_idx = liq.index[~liq.index.isin(list(cobradas))]
+        idx = _combinacion(liq.loc[pendientes_idx, "Importe"], falta_banco,
+                           TOLERANCIA_DESFASAJE_BANCO, MAX_TAM_COMBINACION_RECORTADA)
+        if idx is not None:
+            explicado_mayor = round(liq.loc[idx, "Importe"].sum(), 2)
+            for i in idx:
+                cobradas[i] = "Mayor"
+                detalle.append({"Fecha": None, "Comprobante": None, "Importe banco": None,
+                                "Liquidación": liq.at[i, "Concepto"], "Importe liquidación": liq.at[i, "Importe"],
+                                "Resultado": "Registrada en el mayor sin transferencia en el extracto"})
+            _avisar(advertencias, f"Banco vs mayor: el mayor tiene {falta_banco:,.2f} más que el banco; se "
+                                  f"tomaron como cobradas {len(idx)} liquidación/es que lo explican. "
+                                  "Revisar que el extracto esté completo.")
+        else:
+            _avisar(advertencias, f"Banco vs mayor: el mayor tiene {falta_banco:,.2f} más que las "
+                                  "transferencias del extracto y ninguna liquidación lo explica.")
+
+    # Lo que sobra del banco: acreditaciones sin liquidación (nuevas + arrastradas)
+    sin_liq = [(texto_sin_liquidacion(r.Fecha, r.Comprobante), round(r.Importe, 2))
+               for r in nuevas.itertuples()]
+    for r in nuevas.itertuples():
+        detalle.append({"Fecha": r.Fecha, "Comprobante": r.Comprobante, "Importe banco": r.Importe,
+                        "Liquidación": None, "Importe liquidación": None,
+                        "Resultado": "Sin liquidación (identificar en el portal de Rappi)"})
+    arrastradas = ant[~ant.index.isin(usados_ant)]
+    sin_liq = [(r.Concepto, r.Importe) for r in arrastradas.itertuples()] + sin_liq
+    if len(nuevas):
+        _avisar(advertencias, f"Extracto bancario: {len(nuevas)} transferencia/s de Rappi por "
+                              f"{nuevas['Importe'].sum():,.2f} no corresponden a ninguna liquidación: "
+                              f"quedan como '{TITULO_SIN_LIQUIDACION}'.")
+
+    for i in liq.index:
+        if i not in cobradas:
+            detalle.append({"Fecha": None, "Comprobante": None, "Importe banco": None,
+                            "Liquidación": liq.at[i, "Concepto"], "Importe liquidación": liq.at[i, "Importe"],
+                            "Resultado": "No cobrada en el mes"})
+
+    no_cobradas = [i for i in liq.index if i not in cobradas]
+    return {
+        "no_cobradas": no_cobradas,
+        "sin_liquidacion": pd.DataFrame(sin_liq, columns=["Concepto", "Importe"]),
+        "detalle": pd.DataFrame(detalle, columns=["Fecha", "Comprobante", "Importe banco", "Liquidación",
+                                                  "Importe liquidación", "Resultado"]),
+        "total_banco": total_banco,
+        "total_mayor": total_mayor,
+        "diferencia": round(total_mayor - acreditado - explicado_mayor, 2),
+    }
+
+
+def sacar_bloque_sin_liquidacion(df):
+    """Saca el bloque 'Acreditaciones Rappi sin liquidación' (encabezado, líneas
+    y la fila vacía que lo precede) para volver a escribirlo actualizado."""
+    texto = df.iloc[:, 1].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+    sacar = set()
+    for i, t in texto.items():
+        if t.lower() == TITULO_SIN_LIQUIDACION.lower():
+            sacar.add(i)
+            if i > 0 and df.loc[i - 1].isna().all():
+                sacar.add(i - 1)
+        elif PATRON_SIN_LIQUIDACION.match(t):
+            sacar.add(i)
+    return df.drop(index=sorted(sacar)).reset_index(drop=True)
+
+
 AMARILLO = PatternFill(start_color="FFFFFF00", end_color="FFFFFF00", fill_type="solid")
 NEGRITA = Font(bold=True)
 
@@ -1825,7 +2160,7 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
                                 df_venta_rappi_dep, match_rappi_dean1, falta_rappi_dean1,
                                 falta_dean1, match_hio_rappi1, match_hio2, match_hio_rappi2,
                                 falta_rappi_hio2, falta_hio2, advertencias=None,
-                                cuadro_conceptos=None):
+                                cuadro_conceptos=None, cruce_banco=None):
     hojas = [
         ("Conciliación", conciliacion),
         ("Mayor", recaudacion),
@@ -1843,6 +2178,8 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
         ("Falta Rappi (sobra HIO)", falta_rappi_hio2),
         ("Falta HIO (sobra Rappi)", falta_hio2),
     ]
+    if cruce_banco is not None:
+        hojas.insert(5, ("Cruce banco", cruce_banco))
     con_encabezado = {nombre for nombre, _ in hojas if nombre != "Conciliación"}
 
     buf = io.BytesIO()
@@ -1883,7 +2220,13 @@ def construir_conciliacion_xlsx(conciliacion, recaudacion, df_dean_dep, df_hio,
 
 def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_documento,
                                    archivo_hio_metodo, archivo_dean, archivo_recaudacion,
-                                   archivo_pendientes):
+                                   archivo_pendientes, archivo_banco=None):
+    """archivo_banco (opcional): extracto bancario con las transferencias de
+    Rappi del mes. Si se carga, las liquidaciones cobradas se determinan por
+    transferencia y lo que no corresponde a ninguna liquidación queda como
+    'Acreditación Rappi sin liquidación'. Si no, se sigue cruzando contra el
+    total del mayor (y las acreditaciones sin liquidación anteriores se
+    arrastran sin cambios)."""
     advertencias = []
 
     liq_datos = [(getattr(a, 'name', f'liquidacion_{i}.xlsx'), _leer_bytes(a))
@@ -1985,11 +2328,39 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
     (acred_match_mes_anterior, acred_match_mes_corriente,
      acred_pendientes_mes_siguiente, acreditacion_faltante,
      resumen_acred) = cruzar_acreditaciones(
-        df_recaudacion, liquidaciones_mes_actual, acred_mes_anterior, anio, mes, advertencias)
+        df_recaudacion, liquidaciones_mes_actual, acred_mes_anterior, anio, mes,
+        advertencias if archivo_banco is None else [])
+
+    # Extracto bancario (opcional): reemplaza la deducción por combinación de
+    # importes por el cruce transferencia por transferencia.
+    sin_liq_anterior = extraer_sin_liquidacion_pendientes(pendientes_mes_anterior)
+    sin_liquidacion = sin_liq_anterior[["Concepto", "Importe"]]
+    cruce_banco = None
+    if archivo_banco is not None:
+        depositos = leer_movimientos_banco_rappi(archivo_banco, anio, mes, advertencias)
+        positivas, _ = separar_acreditaciones_negativas(liquidaciones_mes_actual)
+        pool = pd.concat([
+            acred_mes_anterior[["Concepto", "Importe"]].assign(**{"Fecha de Pago": pd.NaT, "_origen": "anterior"}),
+            positivas[["Concepto", "Importe", "Fecha de Pago"]].assign(_origen="corriente"),
+        ], ignore_index=True)
+        cruce_banco = cruzar_liquidaciones_con_banco(
+            depositos, pool, sin_liq_anterior, resumen_acred['total_mayor'], advertencias)
+        no_cob = pool.loc[cruce_banco["no_cobradas"]]
+        ultimo_dia = pd.Timestamp(anio, mes, calendar.monthrange(anio, mes)[1])
+        del_mes_sig = (no_cob["_origen"] == "corriente") & ~_hasta_fecha(no_cob["Fecha de Pago"], ultimo_dia)
+        acreditacion_faltante = no_cob[~del_mes_sig][["Concepto", "Importe"]].reset_index(drop=True)
+        acred_pendientes_mes_siguiente = no_cob[del_mes_sig][["Concepto", "Importe"]].reset_index(drop=True)
+        sin_liquidacion = cruce_banco["sin_liquidacion"]
+        resumen_acred['banco'] = cruce_banco["total_banco"]
+        resumen_acred['diferencia'] = cruce_banco["diferencia"]
+    elif len(sin_liq_anterior):
+        _avisar(advertencias, f"Hay {len(sin_liq_anterior)} acreditación/es sin liquidación del cierre "
+                              "anterior: sin el extracto bancario se arrastran sin cambios.")
 
     pendientes = actualizar_acreditaciones_pendientes(
         pendientes, acred_match_mes_anterior, acred_pendientes_mes_siguiente,
-        acreditacion_faltante, anio=anio, mes_numero=mes, advertencias=advertencias)
+        acreditacion_faltante, anio=anio, mes_numero=mes, advertencias=advertencias,
+        sin_liquidacion=sin_liquidacion)
     pendientes = agregar_diferencia_venta(
         pendientes, total_dean, total_hio, anio=anio, mes_numero=mes, advertencias=advertencias)
     conciliacion, resumen_saldo = actualizar_saldo_mayor(
@@ -2005,7 +2376,8 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
         conciliacion, df_recaudacion, df_dean_dep, df_hio, df_venta_rappi_dep,
         match_rappi_dean1, falta_rappi_dean1, falta_dean1, match_hio_rappi1,
         match_hio2, match_hio_rappi2, falta_rappi_hio2, falta_hio2, advertencias,
-        cuadro_conceptos=cuadro_conceptos_con_arrastre(cuadro_conceptos, liqs_siguen_sin_factura))
+        cuadro_conceptos=cuadro_conceptos_con_arrastre(cuadro_conceptos, liqs_siguen_sin_factura),
+        cruce_banco=None if cruce_banco is None else cruce_banco["detalle"])
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -2036,6 +2408,8 @@ def correr_conciliacion_rappi_easa(archivos_liq, archivos_pdf, archivo_hio_docum
         'acred_faltantes': len(acreditacion_faltante),
         'acred_negativas': len(acreditaciones_negativas),
         'acred_mes_siguiente': len(acred_pendientes_mes_siguiente),
+        'acred_banco': resumen_acred.get('banco'),
+        'acred_sin_liquidacion': len(sin_liquidacion),
         **resumen_saldo,
     }
     return zip_buf, stats
