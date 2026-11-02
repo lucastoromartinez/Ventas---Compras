@@ -51,7 +51,17 @@ Revisión 30/10/2026 (mismas reglas que EASA):
 - Las líneas 'Ventas mm-aaaa …' de cierres anteriores se sacan cuando ya están
   registradas en el mayor.
 - Conciliacion.xlsx incluye la hoja 'Cuadro de conceptos'.
-Requiere logica_conciliacion_rappi (EASA) en su versión del 28/10/2026 o posterior.
+Revisión 02/11/2026 (septiembre):
+- Las facturas se cruzan sólo contra los movimientos del mes: el mayor puede
+  venir con los de meses anteriores (ya cruzados en su cierre).
+- Etapa 3b: créditos sin período ni 'Su factura' ('Pago S/F') se cruzan por
+  combinación de importes contra las facturas que quedan.
+- Extracto bancario como input opcional (archivo_banco): cada liquidación se
+  cruza con su transferencia; las no cobradas quedan en 'Acreditaciones de …
+  Registradas en …' y las transferencias sin liquidación en el bloque
+  'Acreditaciones Rappi sin liquidación', que el mes siguiente se compensa
+  (pago neto o liquidación que lo explique). Sin extracto, igual que antes.
+Requiere logica_conciliacion_rappi (EASA) en su versión del 02/11/2026 o posterior.
 """
 
 import io
@@ -89,6 +99,11 @@ from logica_conciliacion_rappi import (
     extraer_liquidaciones_sin_factura,
     cuadro_conceptos_con_arrastre,
     _reemplazar_en_bloque,
+    # Extracto bancario (opcional)
+    TITULO_SIN_LIQUIDACION,
+    leer_movimientos_banco_rappi,
+    extraer_sin_liquidacion_pendientes,
+    cruzar_liquidaciones_con_banco,
 )
 
 
@@ -693,9 +708,19 @@ def cruzar_atalaya(df_venta_rappi, reporte_atalaya):
 # FACTURAS vs MAYOR
 # ─────────────────────────────────────────────
 
-def preparar_mayor(recaudacion):
-    """Filas de facturas del mayor (sin saldo anterior ni acreditaciones)."""
+def preparar_mayor(recaudacion, anio=None, mes=None, avisos=None):
+    """Filas de facturas del mayor (sin saldo anterior ni acreditaciones). Con
+    anio/mes, sólo las del mes que se concilia: el mayor puede exportarse con
+    los movimientos de meses anteriores, que ya se cruzaron en su cierre."""
     df = recaudacion.copy()
+    if anio is not None and mes is not None and "Fecha" in df.columns:
+        fechas = pd.to_datetime(df["Fecha"], errors="coerce", dayfirst=True)
+        inicio = pd.Timestamp(anio, mes, 1)
+        anteriores = fechas < inicio
+        if anteriores.any():
+            _avisar(avisos, f"Mayor: {int(anteriores.sum())} movimiento/s anteriores al "
+                            f"{inicio:%d/%m/%Y} no se cruzan (corresponden a cierres anteriores).")
+        df = df[~anteriores | fechas.isna()]
     comentario = df["Comentario"].astype(str)
     es_factura = ~comentario.str.contains(r'acreditaci|saldo anterior|^ventas', case=False, regex=True)
     df = df[es_factura & (df["Haber"].fillna(0) != 0)].copy()
@@ -712,6 +737,7 @@ def cruzar_facturas(mayor, facturas, consumidas=None, etiqueta="", avisos=None):
                Si el mayor tiene de menos, busca qué factura(s) explican la diferencia.
       Etapa 2: por número de factura ('Su factura').
       Etapa 3: contra créditos agrupados sin 'Su factura' (combinación de facturas).
+      Etapa 3b: créditos sin período ni 'Su factura' ('Pago S/F'), por combinación.
       Etapa 4: preliminares por importe contra filas con número desconocido.
     Devuelve match, falta, diferencias y el set de filas del mayor consumidas.
     """
@@ -765,6 +791,20 @@ def cruzar_facturas(mayor, facturas, consumidas=None, etiqueta="", avisos=None):
         if idx is not None:
             fac.loc[idx, ["_estado", "_etapa"]] = ["match", 3]
             consumidas |= set(filas.index)
+
+    # Etapa 3b: créditos sin período ni 'Su factura' (p.ej. 'Pago S/F'): cada uno
+    # se cruza contra la combinación de facturas que suma su importe.
+    sin_dato = disponibles()[disponibles()["_sf"].isna() & disponibles()["_clave"].isna()]
+    for j, fila in sin_dato.iterrows():
+        pool = fac[fac["_estado"].isna()]
+        if pool.empty:
+            break
+        idx = _subset(pool, fila["Haber"], avisos=avisos)
+        if idx is not None:
+            fac.loc[idx, ["_estado", "_etapa"]] = ["match", "3b"]
+            consumidas.add(j)
+            _avisar(avisos, f"'{str(fila['Comentario']).strip()}' ({fila['Haber']:,.2f}) se cruzó con "
+                            + ", ".join(fac.loc[idx, "Nro Factura"]) + ".")
 
     conocidas = set(fac["_sf"].dropna())
     desconocidas = disponibles()[disponibles()["_sf"].notna() & ~disponibles()["_sf"].isin(conocidas)]
@@ -971,11 +1011,20 @@ def armar_pendientes(pendientes_mes_anterior, anio, mes, filas_a_sacar, sobrante
 
     liqs = ([(liquidacion_iso(r.Concepto), -r.Importe) for r in acreditaciones["faltantes"].itertuples()] +
             [(liquidacion_iso(r.Concepto), -r.Importe) for r in acreditaciones["siguiente"].itertuples()])
+    # Transferencias de Rappi sin liquidación (extracto bancario): ya están
+    # acreditadas en el mayor, van en positivo y descuentan del saldo a acreditar.
+    sin_liq = [(r.Concepto, round(r.Importe, 2))
+               for r in acreditaciones.get("sin_liquidacion", pd.DataFrame(columns=["Concepto", "Importe"])).itertuples()]
     gastos_sig = agrupar_conceptos(conc_sig) + fact_sig
-    saldo_acreditar = round(-sum(m for _, m in liqs) - sum(m for _, m in gastos_sig), 2)
+    saldo_acreditar = round(-sum(m for _, m in liqs) - sum(m for _, m in sin_liq)
+                            - sum(m for _, m in gastos_sig), 2)
     partes += [
         _bloque(df, [(f"Acreditaciones de {mes_nombre} Registradas en {mes_sig} ( {_fmt_ar(saldo_acreditar)} )", None)]),
         _filas_vacias(df, 1), _bloque(df, liqs), _filas_vacias(df, 2),
+    ]
+    if sin_liq:
+        partes += [_bloque(df, [(TITULO_SIN_LIQUIDACION, None)] + sin_liq), _filas_vacias(df, 2)]
+    partes += [
         _bloque(df, [("Gastos Faltan Registrar ", None)] + gastos_sig), _filas_vacias(df, 2),
     ]
 
@@ -1103,8 +1152,14 @@ def exportar_conciliacion(pendientes, hojas_datos):
 
 def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudacion,
                                     archivo_hio_documento, archivo_hio_metodo,
-                                    archivo_reporte_atalaya, archivo_pendientes_mes_anterior):
+                                    archivo_reporte_atalaya, archivo_pendientes_mes_anterior,
+                                    archivo_banco=None):
     """
+    archivo_banco (opcional): extracto bancario con las transferencias de Rappi
+    del mes. Si se carga, las liquidaciones cobradas se determinan por
+    transferencia y lo que no corresponde a ninguna liquidación queda como
+    'Acreditación Rappi sin liquidación'. Si no, se cruza contra el total del
+    mayor como antes.
     Corre la conciliación completa de Ronda.
     Devuelve (zip, stats, pendientes nuevo). El zip trae los archivos del cruce
     de facturas contra liquidaciones más 'Conciliacion.xlsx', con la hoja
@@ -1179,7 +1234,7 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudac
         pendientes, liqs_anteriores_sin_factura, atrasadas, anio, mes, avisos)
     atrasadas = atrasadas[~atrasadas["Nro Factura"].isin(reemplazadas)].reset_index(drop=True)
     facturas_pend = extraer_facturas_pendientes(pendientes)
-    mayor = preparar_mayor(recaudacion)
+    mayor = preparar_mayor(recaudacion, anio, mes, avisos)
     match_mes, falta_mes, dif_mes, consumidas = cruzar_facturas(
         mayor, facturas_mes, etiqueta="FACTURAS MES", avisos=avisos)
     match_pend, falta_pend, dif_pend, consumidas = cruzar_facturas(
@@ -1202,8 +1257,35 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudac
     # Acreditaciones
     acred_ant = extraer_acreditaciones_pendientes(pendientes)
     liquidaciones = extraer_liquidaciones_cuadro_conceptos(cuadro)
-    acred = cruzar_acreditaciones(recaudacion, liquidaciones, acred_ant, anio, mes, avisos=avisos)
+    # Con extracto bancario la deducción por combinación se reemplaza más abajo:
+    # sus avisos no se muestran.
+    acred = cruzar_acreditaciones(recaudacion, liquidaciones, acred_ant, anio, mes,
+                                  avisos=avisos if archivo_banco is None else [])
     filas_a_sacar |= set(acred_ant["Fila"])  # el bloque se rehace entero (las faltantes se vuelven a escribir)
+
+    # Extracto bancario (opcional): transferencia por liquidación en vez de
+    # deducir las no cobradas por combinación contra el total del mayor.
+    sin_liq_ant = extraer_sin_liquidacion_pendientes(pendientes)
+    acred["sin_liquidacion"] = sin_liq_ant[["Concepto", "Importe"]]
+    cruce_banco = None
+    if archivo_banco is not None:
+        depositos = leer_movimientos_banco_rappi(archivo_banco, anio, mes, avisos)
+        positivas = liquidaciones[liquidaciones["Importe"] >= 0]
+        pool = pd.concat([
+            acred_ant[["Concepto", "Importe"]].assign(**{"Fecha de Pago": pd.NaT, "_origen": "anterior"}),
+            positivas[["Concepto", "Importe", "Fecha de Pago"]].assign(_origen="corriente"),
+        ], ignore_index=True)
+        cruce_banco = cruzar_liquidaciones_con_banco(
+            depositos, pool, sin_liq_ant, acred["total_mayor"], avisos)
+        no_cob = pool.loc[cruce_banco["no_cobradas"]]
+        acred["faltantes"] = no_cob[no_cob["_origen"] == "anterior"][["Concepto", "Importe"]]
+        acred["siguiente"] = no_cob[no_cob["_origen"] == "corriente"][["Concepto", "Importe"]]
+        acred["sin_liquidacion"] = cruce_banco["sin_liquidacion"]
+        acred["banco"] = cruce_banco["total_banco"]
+        acred["diferencia"] = cruce_banco["diferencia"]
+    elif len(sin_liq_ant):
+        _avisar(avisos, f"Hay {len(sin_liq_ant)} acreditación/es sin liquidación del cierre anterior: "
+                        "sin el extracto bancario se arrastran sin cambios.")
 
     # Pendientes
     conceptos = extraer_conceptos_cuadro_conceptos(cuadro)
@@ -1223,6 +1305,7 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudac
         # El mes siguiente la lee para reemplazar los conceptos de las
         # liquidaciones que hoy quedan sin factura.
         ("Cuadro de conceptos", cuadro_conceptos_con_arrastre(cuadro, liqs_siguen_sin_factura)),
+    ] + ([("Cruce banco", cruce_banco["detalle"])] if cruce_banco is not None else []) + [
         ("Atalaya", reporte_atalaya),
         ("HIO Combinado", df_hio),
         ("Rappi", df_venta_rappi_dep),
@@ -1269,6 +1352,8 @@ def correr_conciliacion_rappi_ronda(archivos_liq, archivos_pdf, archivo_recaudac
         "acreditaciones": {"mayor": acred["total_mayor"], "esperado": acred["esperado"],
                            "diferencia": acred["diferencia"],
                            "faltantes": len(acred["faltantes"]), "negativas": len(acred["negativas"]),
-                           "mes_siguiente": len(acred["siguiente"])},
+                           "mes_siguiente": len(acred["siguiente"]),
+                           "banco": acred.get("banco"),
+                           "sin_liquidacion": len(acred["sin_liquidacion"])},
     }
     return zip_buf, stats, pendientes_nuevo
