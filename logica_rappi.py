@@ -1056,6 +1056,19 @@ def _formatear_nro_factura(nro):
     return texto
 
 
+def _texto_factura_no_asignada(factura):
+    """'A-0002-02046013 Periodo 01-10-2026 al 04-10-2026' si la factura trae
+    período; si no, el número solo. La conciliación usa el período para
+    reconocer las facturas atrasadas (de liquidaciones de meses anteriores) y
+    las de períodos posteriores al mes que se cierra."""
+    nro = _formatear_nro_factura(factura['nro_factura'])
+    ini = _parsear_fecha(factura.get('inicio_periodo'))
+    fin = _parsear_fecha(factura.get('fin_periodo'))
+    if not (ini and fin):
+        return nro
+    return f"{nro} Periodo {ini.strftime('%d-%m-%Y')} al {fin.strftime('%d-%m-%Y')}"
+
+
 def construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar=None):
     filas = []
     for liq in liquidaciones:
@@ -1090,7 +1103,7 @@ def construir_cuadro_conceptos(liquidaciones, facturas_sin_asignar=None):
         filas.append(None)
         filas.append(('Facturas no asignadas', None))
         for factura in facturas_sin_asignar:
-            filas.append((_formatear_nro_factura(factura['nro_factura']), factura.get('total_factura')))
+            filas.append((_texto_factura_no_asignada(factura), factura.get('total_factura')))
 
     return filas
 
