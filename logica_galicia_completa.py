@@ -2729,7 +2729,34 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     if not lin.empty and snap is not None:
         lin = _completar_lineas_sin_dato(lin, xls)
 
+    # Pendientes anteriores que esa corrida compensó contra asientos o movimientos de su
+    # propio período (hoja "Cruces pend. anteriores"). Ya no figuran en su CC, pero si la
+    # próxima corrida es del mismo mes, el período se recalcula entero y hay que volver a
+    # cruzarlos. Los compensados contra retroactivos o entre sí no se recuperan.
+    recuperados = pd.DataFrame()
+    if "Cruces pend. anteriores" in xls.sheet_names and len(bloques) == 1:
+        cr = pd.read_excel(xls, sheet_name="Cruces pend. anteriores")
+        col_lado = next((c for c in cr.columns if str(c).startswith("lado")), None)
+        if col_lado is not None and {"grupo", "origen", "importe"} <= set(cr.columns):
+            con_periodo = set(cr.loc[cr["origen"] == "Período", "grupo"])
+            rec = cr[(cr["origen"] == "Pendiente anterior") & cr["grupo"].isin(con_periodo)].copy()
+            if len(rec):
+                rec["importe"] = pd.to_numeric(rec["importe"], errors="coerce").round(2)
+                rec["lado"] = rec[col_lado].astype(str).str.strip()
+                positivo = rec["importe"] > 0
+                rec["seccion"] = np.select(
+                    [(rec["lado"] == "M") & positivo, rec["lado"] == "M", positivo],
+                    ["ING_MAYOR", "SAL_MAYOR", "CRED_BANCO"], "DEB_BANCO")
+                fila = rec.get("referencia", pd.Series("", index=rec.index)).astype(str) \
+                    .str.extract(r"Fila\s+(\d+)")[0].fillna(rec["grupo"].astype(str))
+                recuperados = pd.DataFrame({
+                    "seccion": rec["seccion"], "fecha": pd.to_datetime(rec["fecha"], errors="coerce"),
+                    "concepto": rec.get("categoria"), "importe_hoja": rec["importe"].abs(),
+                    "obs": rec.get("nombre"), "fila": "C" + fila, "lado": rec["lado"],
+                    "importe": rec["importe"]})
+
     return {
+        "recuperados": recuperados,
         "cuenta": cuenta, "pendientes": lin, "mes": mes,
         "saldo_contable": blo["saldo_contable"], "saldo_extracto": blo["saldo_extracto"],
         "diferencia": blo["diferencia"], "snapshot_mayor": snap, "foto_mayor": foto,
@@ -3491,9 +3518,17 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         may_cat = categorizar_mayor_v3(categorizar_mayor_v2(categorizar_mayor_v1(may_full[~es_saldo_ant])))
         retro = analizar_retroactivos(may_cat, saldo_ini_archivo, desde, ant)
         misma_ventana = retro["modo"] == "mismo período"
+        # Con foto completa del mayor, una conciliación anterior del mismo mes se trata igual
+        # que la del mes previo: el saldo inicial y lo tocado para atrás salen de la foto.
+        con_foto = bool(retro.get("con_foto"))
 
         # Saldo del mayor al inicio del período, según la conciliación anterior
-        if misma_ventana:
+        if misma_ventana and con_foto and ant.get("saldo_contable") is not None:
+            # La foto llega hasta el cierre de la anterior, igual que su saldo contable:
+            # se le restan los movimientos que la anterior ya tenía dentro de este período.
+            foto_ant = ant["foto_mayor"]
+            saldo_ref = float(ant["saldo_contable"]) - foto_ant.loc[foto_ant["Fecha"] >= desde, "Importe"].sum()
+        elif misma_ventana:
             saldo_ref = ant["saldo_anterior_mayor"]
         else:
             saldo_ref = ant["saldo_contable"]
@@ -3510,6 +3545,12 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         # Pendientes que se arrastran: los de fecha anterior al período actual
         # (los del propio período los vuelve a calcular el cruce).
         lin = ant["pendientes"].copy()
+        rec = ant.get("recuperados")
+        if misma_ventana and rec is not None and len(rec):
+            # Mismo mes: el período se recalcula entero, así que vuelven los pendientes que
+            # la anterior compensó dentro del período (tienen fecha anterior al período).
+            rec = rec.assign(fecha=rec["fecha"].fillna(desde - timedelta(days=1)))
+            lin = pd.concat([lin, rec], ignore_index=True)
         if not lin.empty:
             fecha_sin_dato = ant["hasta"] if ant["hasta"] is not None else desde - timedelta(days=1)
             lin["fecha_orig"] = lin["fecha"]
@@ -3546,7 +3587,7 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         # Movimientos retroactivos identificados (sólo los anteriores al período:
         # los del propio período ya entran en el cruce)
         identificado = 0.0
-        if not misma_ventana:
+        if not misma_ventana or con_foto:
             r = retro["retro"]
             r = r[r["Fecha"] < desde]
             identificado += r["Importe"].sum()
@@ -3570,22 +3611,29 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                     "rid": "B" + b["Asiento"].astype(int).astype(str)}))
             md = retro["modificados"]
             if len(md):
-                md = md[md["Fecha_ant"] < desde].copy()
-                # Efecto sobre el saldo ya conciliado:
+                md = md[(md["Fecha_ant"] < desde) | (md["Fecha_act"] < desde)].copy()
+                # Efecto sobre el saldo al inicio del período (lo que suma antes de `desde`
+                # ahora, menos lo que sumaba en la foto):
                 #  - si sigue con fecha ya conciliada, solo cuenta el cambio de importe
                 #    (un cambio de fecha entre meses ya cerrados no altera el saldo y no se informa);
                 #  - si se movió a una fecha del período actual, sale del saldo ya conciliado
-                #    (la versión nueva entra al cruce del período).
-                movido = md["Fecha_act"] >= desde
-                md["_efecto"] = np.where(movido, -md["Importe_ant"], md["Importe_act"] - md["Importe_ant"])
+                #    (la versión nueva entra al cruce del período);
+                #  - si estaba en el período y se movió a una fecha ya conciliada (solo posible
+                #    con una anterior del mismo mes), entra al saldo ya conciliado.
+                antes_ant, antes_act = md["Fecha_ant"] < desde, md["Fecha_act"] < desde
+                md["_efecto"] = np.where(antes_act, md["Importe_act"], 0.0) - np.where(antes_ant, md["Importe_ant"], 0.0)
                 md = md[md["_efecto"].abs() > TOL_CENTAVOS]
                 retro["modificados"] = md
                 if len(md):
+                    antes_ant, antes_act = md["Fecha_ant"] < desde, md["Fecha_act"] < desde
                     identificado += md["_efecto"].sum()
                     partidas.append(pd.DataFrame({
-                        "lado": "M", "origen": "Modificado", "fecha": md["Fecha_ant"],
+                        "lado": "M", "origen": "Modificado",
+                        "fecha": md["Fecha_ant"].where(antes_ant, md["Fecha_act"]),
                         "categoria": md["conciliacion_act"].astype(str) if "conciliacion_act" in md else "0",
-                        "concepto": np.where(movido[md.index], "Asiento pasado al período", "Asiento modificado"),
+                        "concepto": np.select([~antes_act, ~antes_ant],
+                                              ["Asiento pasado al período", "Asiento pasado a fecha ya conciliada"],
+                                              "Asiento modificado"),
                         "nombre": md["Tercero_act"].astype(str) if "Tercero_act" in md else "",
                         "detalle": md["Comentario_act"].astype(str) if "Comentario_act" in md else "",
                         "referencia": "Asiento " + md["Asiento"].astype(int).astype(str), "importe": md["_efecto"],
@@ -4202,7 +4250,8 @@ def _hoja_control(ws, control, retro):
         md = retro.get("modificados")
         if md is not None and len(md) and "_efecto" in md:
             d = pd.DataFrame({"Tipo": "Modificado", "Asiento": md["Asiento"], "Apunte": md["Apunte"],
-                              "Fecha": md["Fecha_ant"], "Comentario": md.get("Comentario_act"),
+                              "Fecha": md["Fecha_ant"].where(md["Fecha_ant"] <= md["Fecha_act"], md["Fecha_act"]),
+                              "Comentario": md.get("Comentario_act"),
                               "Serie": md.get("Serie_act"), "Tercero": md.get("Tercero_act"),
                               "Importe": md["_efecto"]})
             partes.append(d)
