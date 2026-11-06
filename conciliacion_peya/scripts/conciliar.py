@@ -188,8 +188,14 @@ def main():
 
     mayor = leer_mayor(a.mayor, cfg)
     saldo = round(mayor["Debe"].sum() - mayor["Haber"].sum(), 2)
-    fecha_mayor = mayor["F"].max()
-    print(f"Saldo del mayor al {fecha_mayor:%d/%m/%Y}: {saldo:,.2f}")
+    # fecha de cierre: fin del mes en que empieza la ultima liquidacion (el mes que
+    # se cierra), no el ultimo asiento: el mayor suele traer pagos de los primeros
+    # dias del mes siguiente, que entran en el saldo pero no cambian el periodo
+    ult = pd.to_datetime(liq[-1]["desde"], format="%d/%m/%Y")
+    fecha_mayor = (ult + pd.offsets.MonthEnd(0)).normalize()
+    posteriores = mayor[mayor["F"] > fecha_mayor]
+    print(f"Saldo del mayor al {fecha_mayor:%d/%m/%Y}: {saldo:,.2f}"
+          + (f"  (incluye {len(posteriores)} asiento(s) posteriores, hasta el {mayor['F'].max():%d/%m/%Y})" if len(posteriores) else ""))
 
     arr = None
     liq_ac = liq                      # liquidaciones a asignar contra los asientos de acreditacion
@@ -582,8 +588,9 @@ def main():
             for i, f, m in zip(expl.index, expl["F"], expl["importe"].round(2)):
                 pool.setdefault((f, m), []).append(i)
             venta = []
+            red = sis.get("redondeo_ticket", 0) or 0
             for f, m in zip(r["F"], r["monto"]):
-                c = pool.get((f, m))
+                c = pool.get((f, m)) or (pool.get((f, float(np.floor(m / red) * red))) if red else None)
                 venta.append(expl.loc[c.pop(0), "importe"] if c else np.nan)
             r["venta"] = venta
         else:

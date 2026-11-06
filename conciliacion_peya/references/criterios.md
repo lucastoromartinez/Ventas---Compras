@@ -386,3 +386,35 @@ El patrón de los casos reales (8 en EASA por 15.500, 1 en Ronda por 400):
 Compatible con un error de caja en efectivo (se carga el billete recibido y no el
 vuelto). No decidirlo por cuenta propia: preguntarle al usuario cuál reporte manda,
 porque de eso depende si hay que corregir la venta registrada o el ticket.
+
+---
+
+## 17. Atalaya redondea cada unidad en promoción
+
+Desde octubre de 2026 Atalaya tiene una promo del local del 29% (8.004 sobre una
+unidad de 27.600). PeYa calcula el neto exacto (19.596) y Atalaya ticketea cada
+unidad redondeada hacia abajo a la centena (19.500). Con una unidad alcanza la
+segunda pasada (`redondeo_ticket`); con varias, el ticket queda 96 por unidad por
+debajo de la BASE (2 unidades: 39.192 → 39.000; 4: 78.384 → 78.000).
+
+Tercera pasada del cruce: mismo día, ticket múltiplo de `redondeo_ticket` y
+`BASE − n × redondeo < ticket ≤ BASE`, con n = descuento del local /
+`promo_descuento_unidad`. La diferencia va a "Diferencia Atalaya match", como el
+resto. Si cambia la promo, se actualiza `promo_descuento_unidad` (0 la apaga).
+
+Los reintegros de Atalaya (que se reconocen por fecha + monto del pedido) usan el
+mismo redondeo: un reintegro de 19.596 encuentra su ticket de 19.500 y va como NC
+por el complemento, no como Falta PeYa + ND. El saldo es el mismo en los dos casos.
+
+## 18. Cierre mensual: el mayor puede traer más o menos que el cierre anterior
+
+- **Fecha de cierre**: es el fin del mes en que empieza la última liquidación, no el
+  último asiento del mayor. El mayor suele traer pagos de los primeros días del mes
+  siguiente (Ronda 10/2026: factura pagada el 04/11): entran en el saldo, pero el
+  archivo y la columna "Cierre" siguen siendo del mes que se cierra.
+- **Asientos eliminados**: un asiento que estaba en la hoja Recaudación de la
+  conciliación anterior y no está en el mayor nuevo (Ronda 10/2026: el 187030,
+  acreditación duplicada de 10.185.521,64) resuelve la línea arrastrada que lo
+  revertía. Si no hay línea que lo explique, sale como "Asiento N eliminado del
+  mayor", en naranja.
+

@@ -143,6 +143,27 @@ def asientos_nuevos(mayor: pd.DataFrame, ant: dict) -> pd.Series:
     return pd.Series([x not in prev for x in k], index=mayor.index)
 
 
+def asientos_eliminados(mayor: pd.DataFrame, ant: dict) -> list:
+    """Asientos de la Recaudacion anterior que no estan en el mayor nuevo."""
+    r = ant.get("recaudacion")
+    if r is None:
+        return []
+    r = r.copy()
+    r.columns = [str(c).strip() for c in r.columns]
+    r = r[pd.to_numeric(r["Asiento"], errors="coerce").notna() & pd.to_datetime(r[K.col(r, "fecha")], errors="coerce").notna()]
+    col_f = K.col(mayor, "fecha")
+    act = set(zip(mayor["Asiento"].astype(int), mayor[K.col(mayor, "apunte")].astype(int),
+                  pd.to_datetime(mayor[col_f]).dt.strftime("%Y-%m-%d"), mayor["Debe"].round(2), mayor["Haber"].round(2)))
+    out = []
+    for _, x in r.iterrows():
+        d, h = round(float(K.num(pd.Series([x["Debe"]]))[0]), 2), round(float(K.num(pd.Series([x["Haber"]]))[0]), 2)
+        f = pd.to_datetime(x[K.col(r, "fecha")])
+        k = (int(x["Asiento"]), int(x[K.col(r, "apunte")]), f.strftime("%Y-%m-%d"), d, h)
+        if k not in act:
+            out.append({"Asiento": int(x["Asiento"]), "F": f, "com": str(x["Comentario"]).strip(), "neto": round(d - h, 2)})
+    return out
+
+
 def arrastre(ruta_anterior: str, mayor: pd.DataFrame, cfg: dict, conceptos_cruce: set) -> dict:
     """Resuelve contra el mayor nuevo y devuelve lo que sigue abierto.
 
@@ -182,6 +203,11 @@ def arrastre(ruta_anterior: str, mayor: pd.DataFrame, cfg: dict, conceptos_cruce
                            "debe": round(r["Haber"], 2), "flag": True,
                            "nota": f"Mismo importe y comentario que el asiento {d0['Asiento']} del {d0['F']:%d/%m/%Y}, ya conciliado — se revierte"})
             resueltos.append(f"acreditacion duplicada: asiento {r['Asiento']} ({r['Haber']:,.2f}) repite al {d0['Asiento']}")
+
+    # asientos que estaban en la Recaudacion anterior y ya no estan en el mayor
+    # (eliminados o revertidos en origen): pueden resolver una linea que los
+    # revertia; los que no resuelven nada se nombran para que el saldo ate
+    eliminados = asientos_eliminados(mayor, ant)
 
     def fila_por_importe(tipo, importe):
         sub = nuevos[(nuevos["tipo"] == tipo) & (~nuevos.index.isin(usados))]
@@ -283,13 +309,27 @@ def arrastre(ruta_anterior: str, mayor: pd.DataFrame, cfg: dict, conceptos_cruce
         if pref:
             acum[pref] = acum.get(pref, 0.0) + imp
             continue
-        # cualquier otra: se arrastra salvo que el mayor nuevo la corrija
+        # cualquier otra: se arrastra salvo que el asiento que revertia ya no este
+        # en el mayor, o que el mayor nuevo la corrija
+        el = next((e for e in eliminados if not e.get("usado") and abs(-e["neto"] - imp) <= TOL_IMPORTE
+                   and (str(e["Asiento"]) in c or not re.search(r"asiento \d+", c, re.I))), None)
+        if el is not None:
+            el["usado"] = True
+            resueltos.append(f"{c}: el asiento {el['Asiento']} ya no está en el mayor")
+            continue
         corr = otros[(~otros.index.isin(usados)) & ((otros["Debe"] - otros["Haber"] + imp).abs() <= TOL_IMPORTE)]
         if len(corr):
             usados.add(corr.index[0])
             resueltos.append(f"{c}: corregida con el asiento {corr.iloc[0]['Asiento']}")
         else:
             lineas.append({"concepto": c, "debe" if imp > 0 else "haber": abs(imp), "nota": etiqueta, "flag": True})
+
+    for e in eliminados:
+        if not e.get("usado"):
+            lineas.append({"concepto": f"Asiento {e['Asiento']} '{e['com']}' eliminado del mayor",
+                           "debe" if e["neto"] > 0 else "haber": abs(e["neto"]), "flag": True,
+                           "nota": f"Estaba en la Recaudación de la conciliación al {ant['fecha']} ({e['F']:%d/%m/%Y}) y no está en el mayor nuevo"})
+            resueltos.append(f"asiento {e['Asiento']} eliminado del mayor sin línea que lo explique: se nombra")
 
     # ventas de un mes que el cierre anterior dejo sin registrar y el mayor nuevo ya tiene
     for (sid, ms), (real, reg, sis) in noreg.items():

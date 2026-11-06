@@ -127,6 +127,10 @@ ronda:
       # desde el 11/09/2026 Atalaya factura la BASE redondeada hacia abajo a la
       # centena (19.596 -> 19.500): segunda pasada del cruce con ese redondeo
       redondeo_ticket: 100
+      # desde 10/2026 la promo del local (29% = 8.004 por unidad de 27.600) se
+      # redondea por UNIDAD: con n unidades el ticket queda hasta n x 100 debajo
+      # de la BASE (2 unidades: 39.192 -> 39.000). 0 = sin esta pasada
+      promo_descuento_unidad: 8004
       mayor: "Atalaya"
       etiqueta_online: "Ventas {rango} Atalaya (TC online)"
       etiqueta_efectivo: "Ventas {rango} Atalaya (efectivo)"
