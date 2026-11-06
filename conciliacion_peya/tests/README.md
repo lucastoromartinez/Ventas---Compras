@@ -5,6 +5,8 @@ línea de la hoja `conciliacion` y la lista de hojas de la conciliación aprobad
 
 - EASA al 31/08/2026 (scope 23/02–06/09, 28 liquidaciones): saldo final 0,61
 - Ronda al 31/08/2026 (mismo scope): saldo final 0,00
+- EASA al 31/10/2026 (cierre mensual, scope 05/10–01/11, 4 liquidaciones): saldo final 0,00
+- Ronda al 31/10/2026 (cierre mensual, mismo scope): saldo final 0,00
 
 Los insumos (ZIP, facturas, mayores, Dean, HIO, Atalaya) no viajan con la skill
 por tamaño. Con la carpeta de insumos armada según la convención de
