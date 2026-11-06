@@ -40,7 +40,7 @@ leen con `--entidad`; para una entidad nueva se copia un bloque.
 |---|---|---|
 | Sistemas | Dean + HIO | HIO + Atalaya |
 | Cruce por identificador | Nº Transacción · Localizador | Localizador |
-| Cruce sin identificador | fecha + local + bruta (HIO) | fecha + local + BASE (HIO) · fecha + criterio de facturación (Atalaya, con segunda pasada por la BASE redondeada a la centena: `redondeo_ticket: 100`, desde el 11/09/2026) |
+| Cruce sin identificador | fecha + local + bruta (HIO) | fecha + local + BASE (HIO) · fecha + criterio de facturación (Atalaya, con segunda pasada por la BASE redondeada a la centena: `redondeo_ticket: 100`, desde el 11/09/2026, y tercera por unidad en promoción: `promo_descuento_unidad: 8004`, desde 10/2026) |
 | Locales | 3 | 9 |
 | Apertura del histórico | por mes | por mes **y local** |
 | Reintegros al 100% con reclamo | sí (Dean, HIO) | no existen |

@@ -61,12 +61,19 @@ def cruce_id(p: pd.DataFrame, t: pd.DataFrame, nombre_imp: str):
 
 
 def cruce_fecha(p: pd.DataFrame, t: pd.DataFrame, criterio: str, usar_local: bool, nombre_imp: str,
-                redondeo: float = 0):
+                redondeo: float = 0, desc_unidad: float = 0):
     """Uno a uno por fecha (+ local) + importe. Recorre los pedidos en su orden
     y toma el primer ticket libre que coincida. Primero por el importe exacto del
     criterio; si el sistema redondea el ticket hacia abajo (redondeo = 100: a la
     centena), una segunda pasada con el importe redondeado. La diferencia queda
-    en la linea "Diferencia ... match", como cualquier otra."""
+    en la linea "Diferencia ... match", como cualquier otra.
+
+    Si el sistema redondea cada UNIDAD en promocion por separado (desc_unidad =
+    descuento del local por unidad, p. ej. 8.004 sobre 27.600 -> 19.596 -> 19.500),
+    un pedido con n unidades queda hasta n x redondeo por debajo de la BASE
+    (2 unidades: 39.192 -> 39.000). Tercera pasada: mismo dia, ticket multiplo de
+    `redondeo` y BASE - n x redondeo < ticket <= BASE, con n = descuento del
+    local / desc_unidad. Se toma el ticket mas cercano."""
     p = p.copy()
     t = t.copy()
     p["_m"] = K.importe_criterio(p, criterio)
@@ -84,6 +91,20 @@ def cruce_fecha(p: pd.DataFrame, t: pd.DataFrame, criterio: str, usar_local: boo
             cand = pool.get((f, l if usar_local else None, paso(m)))
             if cand:
                 pares.append((j, cand.pop(0)))
+                hechos.add(j)
+    if redondeo and desc_unidad:
+        dl = K.num(p["Descuento otorgado por el local"]) if "Descuento otorgado por el local" in p.columns else pd.Series(0.0, index=p.index)
+        for j, f, l, m, d in zip(p.index, p["F"], p["loc"], p["_m"], dl):
+            n = int(round(d / desc_unidad))
+            if j in hechos or n < 2:
+                continue
+            kl = l if usar_local else None
+            cand = [(k, i) for k, lst in pool.items() if lst and k[0] == f and k[1] == kl
+                    and k[2] % redondeo == 0 and m - n * redondeo < k[2] <= m for i in lst[:1]]
+            if cand:
+                k, i = max(cand, key=lambda x: x[0][2])
+                pool[k].remove(i)
+                pares.append((j, i))
                 hechos.add(j)
     ip = [a for a, _ in pares]
     it = [b for _, b in pares]
@@ -141,8 +162,10 @@ def cruzar_sistema(sis: dict, lista: pd.DataFrame, rein: pd.DataFrame, tickets: 
     crit = sis.get("cruce_secundario")
     if crit:
         usar_local = sis["tipo"] != "atalaya"
-        m2p, m2t, fs, fp = cruce_fecha(rp, rt, crit, usar_local, nombre_imp, sis.get("redondeo_ticket", 0) or 0)
-        print(f"  cruce 2 ({crit}" + (f", ticket redondeado a {sis['redondeo_ticket']}" if sis.get("redondeo_ticket") else "") + f"): {len(m2p)}")
+        m2p, m2t, fs, fp = cruce_fecha(rp, rt, crit, usar_local, nombre_imp, sis.get("redondeo_ticket", 0) or 0,
+                                       sis.get("promo_descuento_unidad", 0) or 0)
+        print(f"  cruce 2 ({crit}" + (f", ticket redondeado a {sis['redondeo_ticket']}" if sis.get("redondeo_ticket") else "")
+              + (f" por unidad en promo de {sis['promo_descuento_unidad']}" if sis.get("promo_descuento_unidad") else "") + f"): {len(m2p)}")
     else:
         m2p, m2t, fs, fp = vacio_p, vacio_t, rp, rt
 
@@ -152,8 +175,9 @@ def cruzar_sistema(sis: dict, lista: pd.DataFrame, rein: pd.DataFrame, tickets: 
         for i, f, m in zip(fp.index, fp["F"], fp["importe"].round(2)):
             pool.setdefault((f, m), []).append(i)
         usados = []
+        red = sis.get("redondeo_ticket", 0) or 0
         for f, m in zip(r["F"], r["monto"]):
-            cand = pool.get((f, m))
+            cand = pool.get((f, m)) or (pool.get((f, float(np.floor(m / red) * red))) if red else None)
             if cand:
                 usados.append(cand.pop(0))
         expl, fp = fp.loc[usados].copy(), fp.drop(index=usados)

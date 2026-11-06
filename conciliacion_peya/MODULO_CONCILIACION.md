@@ -148,7 +148,10 @@ Mayor + conciliación anterior ──conciliar (+ mensual)──► trabajo/conc
    la Lista) salen del pool antes del cruce 2.
 3. **Anulaciones por sistema**: ticket + contra-ticket por el mismo importe salen del pool.
 4. **Cruce por fecha (+ local) + importe**, uno a uno, con el criterio del YAML.
-   Atalaya: segunda pasada con el importe redondeado hacia abajo a `redondeo_ticket`.
+   Atalaya: segunda pasada con el importe redondeado hacia abajo a `redondeo_ticket`;
+   tercera, si hay `promo_descuento_unidad`, con hasta `redondeo_ticket` por unidad en
+   promoción (n = descuento del local / descuento por unidad). Los reintegros buscan su
+   ticket con el mismo redondeo.
    Dean no tiene cruce 2 (siempre integra; fecha+monto produce matches espurios).
 5. Atalaya (sin identificador): reintegros por fecha + monto entre los tickets sin pedido.
 
