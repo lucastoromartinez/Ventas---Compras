@@ -147,7 +147,7 @@ elif submodulo_actual == "Percepciones IIBB PBA":
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<div class="upload-label">Archivo ARCA (.txt)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="upload-label">Archivo ARBA (.txt)</div>', unsafe_allow_html=True)
         archivo_arca_pba = st.file_uploader("arca_percep_pba", type=["txt"],
                                              label_visibility="collapsed", key="percep_pba_arca")
     with col2:
@@ -162,7 +162,7 @@ elif submodulo_actual == "Percepciones IIBB PBA":
 
     ambos_cargados_pba = archivo_arca_pba is not None and archivo_sistema_pba is not None
     if not ambos_cargados_pba:
-        st.info("Cargá el archivo de ARCA (.txt) y el Excel del sistema para habilitar el cruce.")
+        st.info("Cargá el archivo de ARBA (.txt) y el Excel del sistema para habilitar el cruce.")
 
     boton_pba = st.button("Cruzar percepciones", disabled=not ambos_cargados_pba, use_container_width=True,
                            key="btn_percepciones_pba")
@@ -201,7 +201,7 @@ elif submodulo_actual == "Percepciones IIBB PBA":
             </div>
             <div class="metric-card {clase_falt_a_pba}">
                 <div class="metric-value">{stats_pba['faltante_arca']}</div>
-                <div class="metric-label">Faltante ARCA</div>
+                <div class="metric-label">Faltante ARBA</div>
             </div>
             <div class="metric-card {clase_falt_s_pba}">
                 <div class="metric-value">{stats_pba['faltante_sistema']}</div>
@@ -220,7 +220,7 @@ elif submodulo_actual == "Percepciones IIBB PBA":
                 "Revisá la hoja 'Proveedores_Nuevos' del reporte y agregalos al archivo."
             )
 
-        avisos_revisar(stats_pba, "ARCA")
+        avisos_revisar(stats_pba, "ARBA")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.download_button(

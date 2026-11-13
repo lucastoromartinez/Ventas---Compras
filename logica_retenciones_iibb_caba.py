@@ -7,6 +7,7 @@ from openpyxl.utils import get_column_letter
 
 from logica_cruce_impuestos import (
     armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+    FORMATO_IMPORTE, es_columna_importe,
 )
 from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
 from proveedores import PADRON_PROVEEDORES
@@ -287,8 +288,6 @@ def generar_excel_retenciones(
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
-    IMPORTE_FORMAT = "#,##0.00"
-    IMPORTE_COLS_REVISAR = {"Importe Sistema", "Monto AGIP", "Diferencia", "Importe", "Monto Retenido"}
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -306,9 +305,9 @@ def generar_excel_retenciones(
             if str(cell.value).strip() in DATE_COLS:
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
-            elif str(cell.value).strip() in IMPORTE_COLS_REVISAR:
+            elif es_columna_importe(cell.value):
                 for row in range(2, ws.max_row + 1):
-                    ws.cell(row=row, column=col_idx).number_format = IMPORTE_FORMAT
+                    ws.cell(row=row, column=col_idx).number_format = FORMATO_IMPORTE
 
         for col in ws.columns:
             max_len = max(

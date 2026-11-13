@@ -7,6 +7,7 @@ from openpyxl.utils import get_column_letter
 
 from logica_cruce_impuestos import (
     armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+    FORMATO_IMPORTE, es_columna_importe,
 )
 from proveedores import PADRON_PROVEEDORES
 
@@ -331,11 +332,6 @@ def generar_excel_percepciones(
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
-    IMPORTE_FORMAT = "#,##0.00"
-    IMPORTE_COLS = {
-        "Debe", "Haber", "Saldo", "Importe", "Monto Percibido", "Base Calculo",
-        "Importe Sistema", "Monto AGIP", "Diferencia",
-    }
 
     def _nombre_base(header) -> str:
         h = str(header).strip()
@@ -360,8 +356,8 @@ def generar_excel_percepciones(
             base = _nombre_base(cell.value)
             if base in DATE_COLS:
                 formato = DATE_FORMAT
-            elif base in IMPORTE_COLS:
-                formato = IMPORTE_FORMAT
+            elif es_columna_importe(base):
+                formato = FORMATO_IMPORTE
             else:
                 continue
             for row in range(2, ws.max_row + 1):

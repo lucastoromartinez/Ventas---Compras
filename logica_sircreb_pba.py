@@ -5,7 +5,10 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-from logica_cruce_impuestos import armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes
+from logica_cruce_impuestos import (
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes,
+    FORMATO_IMPORTE, es_columna_importe,
+)
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
 
@@ -239,6 +242,9 @@ def generar_excel_sircreb(
             if str(cell.value).strip() in DATE_COLS:
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
+            elif es_columna_importe(cell.value):
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col_idx).number_format = FORMATO_IMPORTE
 
         for col in ws.columns:
             max_len = max(

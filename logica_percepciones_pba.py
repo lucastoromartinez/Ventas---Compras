@@ -6,7 +6,8 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 from logica_cruce_impuestos import (
-    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
+    armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes,
+    FORMATO_IMPORTE, es_columna_importe,
 )
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
@@ -45,7 +46,7 @@ def cargar_txt_arca(file) -> pd.DataFrame:
             rows.append(m.groupdict())
 
     if not rows:
-        raise ValueError("No se pudo interpretar ninguna línea del archivo de ARCA (formato inesperado).")
+        raise ValueError("No se pudo interpretar ninguna línea del archivo de ARBA (formato inesperado).")
 
     df = pd.DataFrame(rows)
 
@@ -242,7 +243,37 @@ def cruce_percepciones_pba(
         excluidos_arca={a for a, _, _ in revisar},
         excluidos_sistema={s for _, s, _ in revisar},
     )
-    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, "ARCA"))
+    return (*resultados, _tabla_revisar_comprobante_pba(df_arca, df_sistema, revisar))
+
+
+# ─────────────────────────────────────────────
+# REVISAR_COMPROBANTE: columnas con sufijo ARB / SIS y separador en blanco
+# ─────────────────────────────────────────────
+
+ETIQUETA = "ARBA"
+SUF_ARBA = " ARB"
+SUF_SISTEMA = " SIS"
+
+
+def _separador(n: int) -> str:
+    """Encabezado de una columna separadora en blanco (único dentro de la hoja)."""
+    return " " * n
+
+
+def _tabla_revisar_comprobante_pba(df_arca: pd.DataFrame, df_sistema: pd.DataFrame, revisar: list) -> pd.DataFrame:
+    """
+    Mismo comprobante con importe distinto: columnas de ARBA (sufijo ' ARB'),
+    una columna en blanco, columnas del sistema (sufijo ' SIS'), otra columna
+    en blanco y el comentario.
+    """
+    cols_arba = [f"{str(c).strip()}{SUF_ARBA}" for c in df_arca.columns]
+    cols_sis = [f"{str(c).strip()}{SUF_SISTEMA}" for c in df_sistema.columns]
+    columnas = cols_arba + [_separador(1)] + cols_sis + [_separador(2), "Comentario"]
+    filas = [
+        list(df_arca.loc[a]) + [None] + list(df_sistema.loc[s]) + [None, comentario]
+        for a, s, comentario in revisar
+    ]
+    return pd.DataFrame(filas, columns=columnas)
 
 
 # ─────────────────────────────────────────────
@@ -291,7 +322,14 @@ def generar_excel_percepciones_pba(
     hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
-    DATE_COLS = {"fecha", "Fecha", "Fecha_Sistema", "Fecha_arca"}
+
+    def _base(encabezado) -> str:
+        """Encabezado en minúsculas sin el sufijo ARB / SIS."""
+        texto = str(encabezado).strip().lower()
+        for suf in (SUF_ARBA, SUF_SISTEMA):
+            if texto.endswith(suf.lower()):
+                texto = texto[: -len(suf)].strip()
+        return texto
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -299,29 +337,47 @@ def generar_excel_percepciones_pba(
         header_font = Font(bold=True)
         header_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+        separadores = set()
         for cell in ws[1]:
+            if cell.value is None or str(cell.value).strip() == "":
+                # columna separadora en blanco: sin encabezado ni relleno
+                cell.value = None
+                separadores.add(cell.column)
+                continue
             cell.fill = header_fill
             cell.font = header_font
             cell.border = header_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         for col_idx, cell in enumerate(ws[1], start=1):
-            if str(cell.value).strip() in DATE_COLS:
-                for row in range(2, ws.max_row + 1):
-                    ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
+            if col_idx in separadores:
+                continue
+            base = _base(cell.value)
+            if base.startswith("fecha"):
+                formato = DATE_FORMAT
+            elif es_columna_importe(base):
+                formato = FORMATO_IMPORTE
+            else:
+                continue
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).number_format = formato
 
         for col in ws.columns:
+            letra = get_column_letter(col[0].column)
+            if col[0].column in separadores:
+                ws.column_dimensions[letra].width = 3
+                continue
             max_len = max(
                 (len(str(c.value)) if c.value is not None else 0 for c in col),
                 default=10,
             )
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+            ws.column_dimensions[letra].width = min(max_len + 4, 45)
 
     hojas = {
         "Match_Sistema": df_match_sistema,
-        "Match_Arca": df_match_arca,
+        "Match_Arba": df_match_arca,
         "Falta_Sistema": df_falta_sistema,
-        "Falta_Arca": df_falta_arca,
+        "Falta_Arba": df_falta_arca,
     }
     hojas.update(hojas_revisar or {})
     if df_proveedores_nuevos is not None and not df_proveedores_nuevos.empty:
@@ -364,7 +420,7 @@ def correr_cruce_percepciones_pba(
     df_falta_sistema, df_falta_arca, hojas_revisar, stats_revisar = revisar_faltantes(
         df_falta_sistema, df_falta_arca,
         col_cuit_arca="cuit", col_importe_arca="importe", col_fecha_arca="fecha", col_nombre_arca="nombre",
-        etiqueta="ARCA", df_revisar_comprobante=df_revisar,
+        etiqueta=ETIQUETA, df_revisar_comprobante=df_revisar,
         score_nombre_min=score_nombre_min,
     )
 

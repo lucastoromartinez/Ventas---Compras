@@ -35,6 +35,20 @@ def _nombre_comparable(nombre) -> str:
     return s
 
 
+# ─────────────────────────────────────────────
+# FORMATO DEL EXCEL
+# ─────────────────────────────────────────────
+
+FORMATO_IMPORTE = "#,##0.00"
+_PALABRAS_IMPORTE = ("importe", "monto", "debe", "haber", "saldo", "diferencia", "base calculo")
+
+
+def es_columna_importe(encabezado) -> bool:
+    """True si el encabezado es de un importe (Debe, Haber, Importe, Monto ..., Diferencia, etc.)."""
+    texto = str(encabezado).strip().lower()
+    return any(p in texto for p in _PALABRAS_IMPORTE)
+
+
 def _texto(valor) -> str:
     """Nombre de proveedor como texto; vacío si no viene."""
     if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
