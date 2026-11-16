@@ -1274,6 +1274,13 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     foto = None
     hoja_foto = next((h for h in (_nombre_hoja_foto(cuenta), HOJA_FOTO) if h in xls.sheet_names
                       and (h != HOJA_FOTO or len(con_saldo) <= 1)), None)
+    if hoja_foto is None:
+        # La CC que genera la app no lleva el encabezado "Cta ..." en la primera cuenta (se lee
+        # como "Cuenta"), pero la foto puede llamarse con la cuenta real ("Foto mayor Cta ...").
+        de_otras = {_nombre_hoja_foto(c) for c in bloques if c != cuenta}
+        libres = [h for h in xls.sheet_names if h.startswith(HOJA_FOTO) and h not in de_otras]
+        if len(libres) == 1:
+            hoja_foto = libres[0]
     if hoja_foto:
         foto = _leer_foto_mayor(pd.read_excel(xls, sheet_name=hoja_foto, usecols="A:H"))
         if foto is not None:
@@ -1300,7 +1307,35 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     if not lin.empty:
         lin = _completar_lineas_sin_dato(lin, xls)
 
+    # Pendientes anteriores que esa corrida compensó contra asientos o movimientos de su
+    # propio período (hoja "Cruces pend. anteriores"). Ya no figuran en su CC, pero si la
+    # próxima corrida es del mismo mes, el período se recalcula entero y hay que volver a
+    # cruzarlos. Los compensados contra retroactivos o entre sí no se recuperan. Solo si las
+    # hojas del cruce son de la cuenta elegida.
+    recuperados = pd.DataFrame()
+    if "Cruces pend. anteriores" in xls.sheet_names and snap is not None:
+        cr = pd.read_excel(xls, sheet_name="Cruces pend. anteriores")
+        col_lado = next((c for c in cr.columns if str(c).startswith("lado")), None)
+        if col_lado is not None and {"grupo", "origen", "importe"} <= set(cr.columns):
+            con_periodo = set(cr.loc[cr["origen"] == "Período", "grupo"])
+            rec = cr[(cr["origen"] == "Pendiente anterior") & cr["grupo"].isin(con_periodo)].copy()
+            if len(rec):
+                rec["importe"] = pd.to_numeric(rec["importe"], errors="coerce").round(2)
+                rec["lado"] = rec[col_lado].astype(str).str.strip()
+                positivo = rec["importe"] > 0
+                rec["seccion"] = np.select(
+                    [(rec["lado"] == "M") & positivo, rec["lado"] == "M", positivo],
+                    ["ING_MAYOR", "SAL_MAYOR", "CRED_BANCO"], "DEB_BANCO")
+                fila = rec.get("referencia", pd.Series("", index=rec.index)).astype(str) \
+                    .str.extract(r"Fila\s+(\d+)")[0].fillna(rec["grupo"].astype(str))
+                recuperados = pd.DataFrame({
+                    "seccion": rec["seccion"], "fecha": pd.to_datetime(rec["fecha"], errors="coerce"),
+                    "concepto": rec.get("categoria"), "importe_hoja": rec["importe"].abs(),
+                    "obs": rec.get("nombre"), "fila": "C" + fila, "lado": rec["lado"],
+                    "importe": rec["importe"]})
+
     return {
+        "recuperados": recuperados,
         "cuenta": cuenta, "pendientes": lin, "mes": mes,
         "saldo_contable": blo["saldo_contable"], "saldo_extracto": blo["saldo_extracto"],
         "diferencia": blo["diferencia"], "snapshot_mayor": snap, "foto_mayor": foto,
@@ -1467,6 +1502,9 @@ def analizar_retroactivos(may_full, desde_actual, ant):
     if foto is not None and hasta_ant is None:
         hasta_ant = foto.attrs.get("cubre_hasta")
     if foto is not None and len(movs) and hasta_ant is not None and pd.notna(hasta_ant):
+        # Lo que tiene fecha anterior al período actual ya quedó conciliado aunque sea posterior
+        # al último movimiento del extracto anterior (p. ej. un 31 sábado): si no, va a "sin identificar".
+        hasta_ant = max(hasta_ant, desde_actual - pd.Timedelta(days=1))
         res["con_foto"] = True
         # El mayor se baja por meses completos: cubre desde el día 1 del mes de su primer asiento
         ini = max(foto.attrs["cubre_desde"], _inicio_mayor(movs))
@@ -1500,6 +1538,8 @@ def analizar_retroactivos(may_full, desde_actual, ant):
     claves_act = set(zip(movs["Asiento"], movs["Apunte"]))
     max_asiento_snap = snap["Asiento"].max()
     ant_desde, ant_hasta = ant["desde"], ant["hasta"]
+    if ant_hasta is not None:
+        ant_hasta = max(ant_hasta, desde_actual - pd.Timedelta(days=1))
     if len(snap) and pd.notna(snap["Fecha"].min()):
         ant_desde = max(ant_desde, snap["Fecha"].min())
     cubre = movs["Fecha"].min() <= ant_desde if len(movs) else False
@@ -1547,9 +1587,11 @@ class Apareo:
         mes = d["mes_ref"].where(d["mes_ref"].notna(), d["fecha"].dt.strftime("%m-%y")).astype(str)
         return cat + "|" + mes
 
-    def uno_a_uno(self, mask_a, mask_b, tol, regla, misma_categoria=False, max_dias=None, exigir_vinculo=False):
+    def uno_a_uno(self, mask_a, mask_b, tol, regla, misma_categoria=False, max_dias=None, exigir_vinculo=False,
+                  unico=False):
         """Un renglón de A contra un renglón de B. Si A y B son del mismo lado se buscan
-        importes opuestos que se anulan."""
+        importes opuestos que se anulan.
+        unico=True: solo si el importe no se repite ni en A ni entre los candidatos de B."""
         for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
             if self.p.at[ia, "estado"] != "pendiente":
                 continue
@@ -1563,6 +1605,9 @@ class Apareo:
             if max_dias is not None and pd.notna(a["fecha"]):
                 cand = cand[(cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias)]
             if cand.empty:
+                continue
+            if unico and (len(cand) > 1 or
+                          ((self._pend(mask_a)["importe"] - a["importe"]).abs() <= tol).sum() > 1):
                 continue
             c = cand.copy()
             c["_cat"] = (c["categoria"] == a["categoria"]) & (a["categoria"] != "0")
@@ -1721,6 +1766,31 @@ class Apareo:
                     sel = [list(cand.index).index(unicos.index[i]) for i in s2] if s2 else []
             if sel and len(sel) >= 2:
                 self._cerrar([ia] + [cand.index[i] for i in sel], regla)
+
+    def pendiente_mas_retro(self, mask_a, mask_m, mask_r, tol, regla):
+        """Un pendiente anterior del banco (A) contra un pendiente anterior del mayor de la misma
+        categoría (M) más un subconjunto de asientos para atrás (R) que completa la diferencia
+        (p. ej. ERSA oct-26: Imp Afip del banco 30.439.688,73 = pendiente del mayor 13.155.445,20
+        + asiento 86844 17.271.487,53 + cuatro asientos de 3.188,x). Solo si la combinación es única."""
+        for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
+            if self.p.at[ia, "estado"] != "pendiente":
+                continue
+            a = self.p.loc[ia]
+            if str(a["categoria"]) in ("0", "nan", ""):
+                continue
+            ms = self._pend(mask_m)
+            ms = ms[(ms["categoria"] == a["categoria"]) & (np.sign(ms["importe"]) == np.sign(a["importe"]))
+                    & (ms["importe"].abs() < abs(a["importe"]) - tol)]
+            for im in ms.index:
+                resto = float(a["importe"] - ms.at[im, "importe"])
+                cand = self._pend(mask_r)
+                cand = cand[(np.sign(cand["importe"]) == np.sign(resto)) & (cand["importe"].abs() <= abs(resto) + tol)]
+                if cand.empty or len(cand) > 40:
+                    continue
+                sel = _subconjunto_exacto(list(cand["importe"]), resto, tol=tol)
+                if sel:
+                    self._cerrar([ia, im] + [cand.index[i] for i in sel], regla)
+                    break
 
     def anulacion_suma(self, mask, tol, regla, max_k=3):
         """Del mismo lado: un renglón se anula con la suma de 2..k renglones de signo contrario.
@@ -1959,8 +2029,17 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         retro = analizar_retroactivos(may_cat, desde, ant)
         misma_ventana = retro["modo"] == "mismo período"
 
-        # Saldo del mayor al inicio del período, según la conciliación anterior
-        saldo_ref = ant["saldo_anterior_mayor"] if misma_ventana else ant["saldo_contable"]
+        # Saldo del mayor al inicio del período, según la conciliación anterior.
+        # Mismo mes con la hoja "Foto mayor" (CC generada por la app, que no trae la fila
+        # "Saldo anterior"): saldo contable de la anterior menos lo que su foto ya tenía
+        # dentro de este período. Igual que una anterior del mes previo.
+        foto_ant = ant.get("foto_mayor")
+        foto_completa = (foto_ant is not None and len(foto_ant)
+                         and foto_ant.attrs.get("origen") != "hojas del cruce")
+        if misma_ventana and foto_completa and ant.get("saldo_contable") is not None:
+            saldo_ref = float(ant["saldo_contable"]) - foto_ant.loc[foto_ant["Fecha"] >= desde, "Importe"].sum()
+        else:
+            saldo_ref = ant["saldo_anterior_mayor"] if misma_ventana else ant["saldo_contable"]
         if not misma_ventana and ant.get("saldo_extracto") is not None \
                 and abs(float(ant["saldo_extracto"]) - saldo_ext_inicio) > 1:
             control["aviso_cuenta"] = (
@@ -1974,6 +2053,12 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
         # Pendientes que se arrastran: los de fecha anterior al período actual
         # (los del propio período los vuelve a calcular el cruce).
         lin = ant["pendientes"].copy()
+        rec = ant.get("recuperados")
+        if misma_ventana and rec is not None and len(rec):
+            # Mismo mes: el período se recalcula entero, así que vuelven los pendientes que
+            # la anterior compensó dentro del período (tienen fecha anterior al período).
+            rec = rec.assign(fecha=rec["fecha"].fillna(desde - timedelta(days=1)))
+            lin = pd.concat([lin, rec], ignore_index=True)
         if not lin.empty:
             fecha_sin_dato = ant["hasta"] if ant["hasta"] is not None else desde - timedelta(days=1)
             lin["fecha_orig"] = lin["fecha"]
@@ -2035,19 +2120,25 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                     "rid": "B" + b["Asiento"].astype(int).astype(str), "mes_ref": b["mes_ref"]}))
             md = retro["modificados"]
             if len(md):
-                md = md[md["Fecha_ant"] < desde].copy()
-                # Efecto sobre el saldo ya conciliado: si sigue con fecha ya conciliada, el cambio
-                # de importe; si se movió al período actual, sale del saldo ya conciliado.
-                movido = md["Fecha_act"] >= desde
-                md["_efecto"] = np.where(movido, -md["Importe_ant"], md["Importe_act"] - md["Importe_ant"])
+                md = md[(md["Fecha_ant"] < desde) | (md["Fecha_act"] < desde)].copy()
+                # Efecto sobre el saldo al inicio del período (lo que suma antes de `desde` ahora,
+                # menos lo que sumaba en la foto): si sigue con fecha ya conciliada, el cambio de
+                # importe; si se movió al período actual, sale del saldo ya conciliado; si estaba en
+                # el período y se movió a una fecha ya conciliada (anterior del mismo mes), entra.
+                antes_ant, antes_act = md["Fecha_ant"] < desde, md["Fecha_act"] < desde
+                md["_efecto"] = np.where(antes_act, md["Importe_act"], 0.0) - np.where(antes_ant, md["Importe_ant"], 0.0)
                 md = md[md["_efecto"].abs() > TOL_CENTAVOS]
                 retro["modificados"] = md
                 if len(md):
+                    antes_ant, antes_act = md["Fecha_ant"] < desde, md["Fecha_act"] < desde
                     identificado += md["_efecto"].sum()
                     partidas.append(pd.DataFrame({
-                        "lado": "M", "origen": "Modificado", "fecha": md["Fecha_ant"],
+                        "lado": "M", "origen": "Modificado",
+                        "fecha": md["Fecha_ant"].where(antes_ant, md["Fecha_act"]),
                         "categoria": md["conciliacion_act"].astype(str) if "conciliacion_act" in md else "0",
-                        "concepto": np.where(movido[md.index], "Asiento pasado al período", "Asiento modificado"),
+                        "concepto": np.select([~antes_act, ~antes_ant],
+                                              ["Asiento pasado al período", "Asiento pasado a fecha ya conciliada"],
+                                              "Asiento modificado"),
                         "nombre": md["Tercero_act"].astype(str) if "Tercero_act" in md else "",
                         "detalle": md["Comentario_act"].astype(str) if "Comentario_act" in md else "",
                         "referencia": "Asiento " + md["Asiento"].astype(int).astype(str), "importe": md["_efecto"],
@@ -2234,6 +2325,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.uno_a_uno(es_M & ~per, es_M, TOL_CENTAVOS, "Anulación en mayor")
     ap.anulacion_suma(ant_m | retro_m, TOL_CENTAVOS, "Anulación en mayor (suma)")
     # R2. Pendientes de banco anteriores ya registrados (retroactivo o en el período)
+    # Varios asientos del mismo tercero que suman exacto ganan sobre uno solo con tolerancia
+    ap.combinacion(ant_e, retro_m, TOL_CENTAVOS, "Pendiente anterior registrado en varios asientos",
+                   vinculo="categoria_o_nombre")
     ap.uno_a_uno(ant_e, retro_m, TOL_CRUCE, "Pendiente anterior registrado (retroactivo)")
     ap.uno_a_uno(ant_e, es_M & per, TOL_CRUCE, "Pendiente anterior registrado en el período")
     ap.combinacion(retro_m | (es_M & per), ant_e, TOL_CRUCE, "Pendientes anteriores registrados en un asiento", vinculo="categoria")
@@ -2241,6 +2335,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.combinacion(ant_e, es_M & per, TOL_CRUCE, "Pendiente anterior registrado en varios asientos del período", vinculo="categoria")
     ap.subconjunto_categoria(ant_e, retro_m, 0.05, "Pendiente anterior registrado en varios asientos",
                              max_dias=None, misma_categoria=False)
+    # suma exacta al centavo: con tol 0,01 un asiento de 0,01 suelto vuelve ambigua la combinación
+    ap.pendiente_mas_retro(ant_e, ant_m, retro_m, 0.005,
+                           "Pendiente anterior del banco = pendiente del mayor + asientos para atrás")
     ap.categoria_vs_sin_categoria(ant_e, retro_m, TOL_CENTAVOS, "Pendientes anteriores de una categoría registrados juntos")
     ap.categoria_vs_sin_categoria(ant_e, es_M & per, TOL_CENTAVOS,
                                   "Pendientes anteriores de una categoría registrados en el período")
@@ -2273,6 +2370,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     # R4. Asientos retroactivos contra movimientos del banco del período
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
+    # Mismo importe exacto e irrepetible, aunque el banco lo debite semanas después
+    ap.uno_a_uno(retro_m, es_E & per, TOL_CENTAVOS, "Asiento retroactivo contra banco del período (importe único)",
+                 max_dias=31, unico=True)
     # R4.a Del período: un asiento contra varios movimientos del banco de la misma categoría
     no_agr = ~P["categoria"].isin(list(CATEGORIAS_AGRUPADAS))
     ap.subconjunto_categoria(es_M & per & no_agr, es_E & per & no_agr, 0.05,
@@ -2889,7 +2989,8 @@ def _hoja_control(ws, control, retro):
         md = retro.get("modificados")
         if md is not None and len(md) and "_efecto" in md:
             partes.append(pd.DataFrame({"Tipo": "Modificado", "Asiento": md["Asiento"], "Apunte": md["Apunte"],
-                                        "Fecha": md["Fecha_ant"], "Comentario": md.get("Comentario_act"),
+                                        "Fecha": md["Fecha_ant"].where(md["Fecha_ant"] <= md["Fecha_act"], md["Fecha_act"]),
+                                        "Comentario": md.get("Comentario_act"),
                                         "Serie": md.get("Serie_act"), "Tercero": md.get("Tercero_act"),
                                         "Importe": md["_efecto"]}))
         ws.cell(r, 1, "3. DETALLE DE ASIENTOS CARGADOS O BORRADOS CON FECHA YA CONCILIADA").font = NEGRITA
