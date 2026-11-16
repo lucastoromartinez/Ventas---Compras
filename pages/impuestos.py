@@ -30,12 +30,12 @@ def avisos_revisar(stats: dict, organismo: str) -> None:
     if stats.get("revisar_comprobante", 0) > 0:
         st.warning(
             f"Hay {stats['revisar_comprobante']} comprobante(s) que coinciden entre {organismo} y sistema "
-            "con importe distinto. Revisá la hoja 'Revisar_Comprobante' del reporte."
+            "con importe distinto o imputados a otro CUIT. Revisá la hoja 'Revisar_Comprobante' del reporte."
         )
     if stats.get("revisar_proveedor", 0) > 0:
         st.warning(
             f"Hay {stats['revisar_proveedor']} proveedor(es) con faltantes en {organismo} y en sistema que "
-            "no cierran. Revisá la hoja 'Revisar_Proveedor' del reporte."
+            "no cierran. Siguen en las hojas Falta con 'id_revisar'; el resumen está en 'Revisar_Proveedor'."
         )
     if stats.get("neteos", 0) > 0:
         st.info(

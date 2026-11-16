@@ -114,7 +114,9 @@ def cruzar_impuestos(
       PASO 2 - CUIT vía padrón + Importe: el nombre que el padrón tiene para
                el CUIT del organismo coincide con 'Tercero' del sistema.
       PASO 3 - Nombre + Importe: score >= score_nombre_min. Las líneas sin
-               nombre no participan.
+               nombre no participan. Con revisar_comprobante, si los dos
+               CUIT existen y son distintos no es match: con el mismo
+               comprobante va a revisar ('CUIT'), si no sigue libre.
       PASO 4 - (solo si revisar_comprobante) CUIT + mismo comprobante con
                importe distinto: no es match, va a revisar.
 
@@ -248,7 +250,18 @@ def cruzar_impuestos(
         "cuit_padron",
     )
 
-    # PASO 3: Nombre + Importe
+    # PASO 3: Nombre + Importe. Con revisar_comprobante, si los dos lados
+    # traen CUIT y son distintos no es match: si además coincide el
+    # comprobante, el sistema lo imputó a otro proveedor y va a revisar con
+    # comentario 'CUIT'; si no coincide, sigue libre.
+    controlar_cuit = revisar_comprobante and bool(cols_comprobante)
+
+    def _cuit_distinto(a, s):
+        return controlar_cuit and cuit_a.loc[a] and cuit_s.loc[s] and cuit_a.loc[a] != cuit_s.loc[s]
+
+    def _mismo_comprobante(a, s):
+        return bool(nc_a.loc[a]) and pv_a.loc[a] == pv_s.loc[s] and nc_a.loc[a] == nc_s.loc[s]
+
     for a in sorted(a_libres):
         if not nombre_a.loc[a]:
             continue
@@ -261,11 +274,20 @@ def cruzar_impuestos(
         if not candidatos:
             continue
         puntajes = {s: fuzz.token_sort_ratio(nombre_a.loc[a], nombre_s.loc[s]) for s in candidatos}
-        mejor = max(puntajes.values())
-        if mejor < score_nombre_min:
+        validos = {s: sc for s, sc in puntajes.items() if sc >= score_nombre_min}
+        if not validos:
             continue
-        empatados = [s for s, sc in puntajes.items() if sc == mejor]
-        _registrar([a], [_desempatar(a, empatados)], "nombre", mejor)
+        mismo_cuit = {s: sc for s, sc in validos.items() if not _cuit_distinto(a, s)}
+        if mismo_cuit:
+            mejor = max(mismo_cuit.values())
+            empatados = [s for s, sc in mismo_cuit.items() if sc == mejor]
+            _registrar([a], [_desempatar(a, empatados)], "nombre", mejor)
+            continue
+        otro_cuit = sorted(s for s in validos if _mismo_comprobante(a, s))
+        if otro_cuit:
+            revisar.append((a, otro_cuit[0], "CUIT"))
+            a_libres.discard(a)
+            s_libres.discard(otro_cuit[0])
 
     # PASO 4: CUIT + mismo comprobante, importe distinto (error de carga)
     if revisar_comprobante and cols_comprobante:
@@ -458,14 +480,14 @@ def netear_faltantes(
     col_importe: str,
     col_fecha: str | None,
     col_nombre: str | None = None,
-    tolerancia_dias: int = 2,
+    tolerancia_dias: int = 31,
     tolerancia_importe: float = 0.01,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Saca de los faltantes los pares de líneas del mismo proveedor que se
     cancelan entre sí (una positiva y una negativa por el mismo importe)
-    con fechas a no más de tolerancia_dias de distancia. Por ejemplo, una
-    factura y la nota de crédito que la anula. Si el archivo no trae fecha
+    con fechas a no más de tolerancia_dias de distancia (31: dentro del
+    período). Por ejemplo, una factura y la nota de crédito que la anula. Si el archivo no trae fecha
     (col_fecha None), alcanza con el mismo proveedor y el mismo importe.
 
     El proveedor se identifica por CUIT; si la línea no tiene CUIT, por
@@ -550,25 +572,26 @@ def separar_diferencias(
     col_nombre_sistema: str | None = "Tercero",
     etiqueta: str = "AGIP",
     score_nombre_min: int = 70,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Toma los faltantes del cruce y separa los proveedores (por CUIT) que
-    tienen líneas sin match de ambos lados: el organismo informa y el
-    sistema registró, pero los importes no cierran. Esos casos salen de
-    los faltantes y pasan a revisar. Una línea del sistema sin CUIT se
-    asigna al proveedor del organismo de nombre más parecido (score >=
-    score_nombre_min); si no trae nombre, queda en faltantes.
+    Marca los proveedores (por CUIT) que tienen líneas sin match de ambos
+    lados: el organismo informa y el sistema registró, pero los importes no
+    cierran. Como ningún comprobante coincide (esos ya fueron a
+    Revisar_Comprobante), lo normal es que falten de verdad de los dos
+    lados, así que las líneas siguen en los faltantes con 'id_revisar' y el
+    resumen por proveedor queda solo como informativo. Una línea del sistema
+    sin CUIT se asigna al proveedor del organismo de nombre más parecido
+    (score >= score_nombre_min).
 
     df_falta_sistema son líneas del organismo y df_falta_arca líneas del
     sistema.
 
     Retorna:
-        - df_falta_sistema y df_falta_arca sin esos proveedores
+        - df_falta_sistema y df_falta_arca con la columna 'id_revisar'
+          (vacía si el proveedor no falta de ambos lados)
         - df_revisar: una fila por proveedor con 'Importe Sistema',
           'Monto <etiqueta>', 'Diferencia' (Sistema - organismo) y
           'Comentario' ('Dif: Registrado de Más' / 'Dif: Registrado de Menos')
-        - df_revisar_sistema / df_revisar_arca: el detalle de cada lado,
-          ligado al resumen por 'id_revisar'
     """
     col_monto = f"Monto {etiqueta}"
     col_lineas = f"Líneas {etiqueta}"
@@ -577,11 +600,7 @@ def separar_diferencias(
         "Líneas Sistema", "Importe Sistema", col_lineas, col_monto,
         "Diferencia", "Comentario",
     ]
-    vacio = (
-        df_falta_sistema, df_falta_arca, pd.DataFrame(columns=cols_revisar),
-        df_falta_arca.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
-        df_falta_sistema.iloc[0:0].assign(id_revisar=pd.Series(dtype="int64")),
-    )
+    vacio = (df_falta_sistema, df_falta_arca, pd.DataFrame(columns=cols_revisar))
     if df_falta_sistema.empty or df_falta_arca.empty:
         return vacio
 
@@ -617,7 +636,9 @@ def separar_diferencias(
         nombres = [_texto(v) for v in lineas[col] if _texto(v)]
         return nombres[0] if nombres else ""
 
-    filas_revisar, det_sistema, det_arca = [], [], []
+    filas_revisar = []
+    id_s = pd.Series(pd.NA, index=df_falta_arca.index, dtype="Int64")
+    id_a = pd.Series(pd.NA, index=df_falta_sistema.index, dtype="Int64")
     for id_revisar, cuit in enumerate(cuits_ambos, start=1):
         lineas_s = df_falta_arca[cuit_sistema == cuit]
         lineas_a = df_falta_sistema[cuit_arca == cuit]
@@ -644,18 +665,13 @@ def separar_diferencias(
             "Diferencia": diferencia,
             "Comentario": comentario,
         })
-        det_sistema.append(lineas_s.assign(id_revisar=id_revisar))
-        det_arca.append(lineas_a.assign(id_revisar=id_revisar))
-
-    en_revisar_s = cuit_sistema.isin(cuits_ambos)
-    en_revisar_a = cuit_arca.isin(cuits_ambos)
+        id_s[cuit_sistema == cuit] = id_revisar
+        id_a[cuit_arca == cuit] = id_revisar
 
     return (
-        df_falta_sistema[~en_revisar_a].reset_index(drop=True),
-        df_falta_arca[~en_revisar_s].reset_index(drop=True),
+        df_falta_sistema.assign(id_revisar=id_a).reset_index(drop=True),
+        df_falta_arca.assign(id_revisar=id_s).reset_index(drop=True),
         pd.DataFrame(filas_revisar, columns=cols_revisar),
-        pd.concat(det_sistema).reset_index(drop=True),
-        pd.concat(det_arca).reset_index(drop=True),
     )
 
 
@@ -679,8 +695,8 @@ def revisar_faltantes(
     Mismo tratamiento de los faltantes para todos los módulos de impuestos:
     1. Netea, de cada lado, la factura y la nota de crédito del mismo
        proveedor que se cancelan entre sí.
-    2. Separa los proveedores con faltantes de ambos lados (Revisar por
-       proveedor).
+    2. Marca con 'id_revisar' los proveedores con faltantes de ambos lados
+       (resumen en Revisar_Proveedor); las líneas siguen en los faltantes.
 
     df_falta_sistema son líneas del organismo y df_falta_arca líneas del
     sistema.
@@ -698,7 +714,7 @@ def revisar_faltantes(
         df_falta_sistema, col_importe=col_importe_arca, col_fecha=col_fecha_arca, col_nombre=col_nombre_arca
     )
 
-    df_falta_sistema, df_falta_arca, df_revisar, df_revisar_sistema, df_revisar_arca = separar_diferencias(
+    df_falta_sistema, df_falta_arca, df_revisar = separar_diferencias(
         df_falta_sistema, df_falta_arca,
         col_cuit_arca=col_cuit_arca, col_importe_arca=col_importe_arca, col_nombre_arca=col_nombre_arca,
         col_cuit_sistema=col_cuit_sistema, col_importe_sistema=col_importe_sistema,
@@ -711,8 +727,6 @@ def revisar_faltantes(
     hojas = {
         "Revisar_Comprobante": df_revisar_comprobante,
         "Revisar_Proveedor": df_revisar,
-        "Revisar_Prov_Sistema": df_revisar_sistema,
-        f"Revisar_Prov_{etiqueta}": df_revisar_arca,
         "Neteos_Sistema": df_neteos_sistema,
         f"Neteos_{etiqueta}": df_neteos_arca,
     }
