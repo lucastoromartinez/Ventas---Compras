@@ -2711,6 +2711,14 @@ def leer_conciliacion_anterior(archivo, cuenta=None, saldo_ext_inicio=None, sald
     foto = None
     hoja_foto = next((h for h in (_nombre_hoja_foto(cuenta), HOJA_FOTO) if h in xls.sheet_names
                       and (h != HOJA_FOTO or len(bloques) == 1)), None)
+    if hoja_foto is None:
+        # La CC que genera la app no lleva el encabezado "Cta ..." en la primera cuenta (se lee
+        # como "Cuenta"), pero la foto puede haberse guardado con el nombre real ("Foto mayor
+        # Cta 2213-8"). Si queda una sola hoja de foto que no es de otra cuenta del archivo, es esa.
+        de_otras = {_nombre_hoja_foto(c) for c in bloques if c != cuenta}
+        libres = [h for h in xls.sheet_names if h.startswith(HOJA_FOTO) and h not in de_otras]
+        if len(libres) == 1:
+            hoja_foto = libres[0]
     if hoja_foto:
         foto = _leer_foto_mayor(pd.read_excel(xls, sheet_name=hoja_foto))
     lin = pd.DataFrame(blo["lineas"])
@@ -3011,7 +3019,10 @@ def analizar_retroactivos(may_full, saldo_ini_archivo, desde_actual, ant):
         # y el mayor actual, hasta el cierre de la conciliación anterior.
         res["con_foto"] = True
         ini = max(foto["Fecha"].min(), movs["Fecha"].min())
-        fin = ant["hasta"]
+        # El cierre de la anterior es su último movimiento de extracto, pero todo lo que tiene
+        # fecha anterior al período actual ya quedó conciliado (p. ej. un 31/10 sábado con el
+        # extracto terminando el 30/10): si no se compara, cae en un hueco y va a "sin identificar".
+        fin = max(ant["hasta"], desde_actual - pd.Timedelta(days=1))
         f = foto[(foto["Fecha"] >= ini) & (foto["Fecha"] <= fin)]
         m = movs[(movs["Fecha"] >= ini) & (movs["Fecha"] <= fin)]
         kf = set(zip(f["Asiento"], f["Apunte"]))
@@ -3033,6 +3044,8 @@ def analizar_retroactivos(may_full, saldo_ini_archivo, desde_actual, ant):
     claves_act = set(zip(movs["Asiento"], movs["Apunte"]))
     max_asiento_snap = snap["Asiento"].max()
     ant_desde, ant_hasta = ant["desde"], ant["hasta"]
+    if ant_hasta is not None:
+        ant_hasta = max(ant_hasta, desde_actual - pd.Timedelta(days=1))
     # La foto solo cubre las fechas que tiene. Si el extracto anterior arrancaba con el último
     # día del mes previo (p. ej. Ronda: 31/08), esos días no forman parte de la foto y sus
     # asientos no pueden marcarse como "no estaban en la foto".
@@ -3082,9 +3095,10 @@ class Apareo:
         return fuzz.token_set_ratio(na.upper(), nb.upper())
 
     def uno_a_uno(self, mask_a, mask_b, tol, regla, misma_categoria=False,
-                  max_dias=None, exigir_vinculo=False):
+                  max_dias=None, exigir_vinculo=False, unico=False):
         """Un renglón de A contra un renglón de B. Si A y B son del mismo lado
-        (mayor contra mayor) se buscan importes opuestos que se anulan."""
+        (mayor contra mayor) se buscan importes opuestos que se anulan.
+        unico=True: solo si el importe no se repite ni en A ni entre los candidatos de B."""
         for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
             if self.p.at[ia, "estado"] != "pendiente":
                 continue
@@ -3098,6 +3112,9 @@ class Apareo:
             if max_dias is not None and pd.notna(a["fecha"]):
                 cand = cand[(cand["fecha"] - a["fecha"]).abs() <= pd.Timedelta(days=max_dias)]
             if cand.empty:
+                continue
+            if unico and (len(cand) > 1 or
+                          ((self._pend(mask_a)["importe"] - a["importe"]).abs() <= tol).sum() > 1):
                 continue
             c = cand.copy()
             c["_cat"] = (c["categoria"] == a["categoria"]) & (a["categoria"] != "0")
@@ -3233,6 +3250,31 @@ class Apareo:
                     sel = [list(cand.index).index(unicos.index[i]) for i in s2] if s2 else []
             if sel and len(sel) >= 2:
                 self._cerrar([ia] + [cand.index[i] for i in sel], regla)
+
+    def pendiente_mas_retro(self, mask_a, mask_m, mask_r, tol, regla):
+        """Un pendiente anterior del banco (A) contra un pendiente anterior del mayor de la misma
+        categoría (M) más un subconjunto de asientos para atrás (R) que completa la diferencia
+        (p. ej. ERSA oct-26: Imp Afip del banco 30.439.688,73 = pendiente del mayor 13.155.445,20
+        + asiento 86844 17.271.487,53 + cuatro asientos de 3.188,x). Solo si la combinación es única."""
+        for ia in self._pend(mask_a).assign(_abs=lambda d: d["importe"].abs()).sort_values("_abs", ascending=False).index:
+            if self.p.at[ia, "estado"] != "pendiente":
+                continue
+            a = self.p.loc[ia]
+            if str(a["categoria"]) in ("0", "nan", ""):
+                continue
+            ms = self._pend(mask_m)
+            ms = ms[(ms["categoria"] == a["categoria"]) & (np.sign(ms["importe"]) == np.sign(a["importe"]))
+                    & (ms["importe"].abs() < abs(a["importe"]) - tol)]
+            for im in ms.index:
+                resto = float(a["importe"] - ms.at[im, "importe"])
+                cand = self._pend(mask_r)
+                cand = cand[(np.sign(cand["importe"]) == np.sign(resto)) & (cand["importe"].abs() <= abs(resto) + tol)]
+                if cand.empty or len(cand) > 40:
+                    continue
+                sel = _subconjunto_exacto(list(cand["importe"]), resto, tol=tol)
+                if sel:
+                    self._cerrar([ia, im] + [cand.index[i] for i in sel], regla)
+                    break
 
     def anulacion_suma(self, mask, tol, regla, max_k=3):
         """Del mismo lado: un renglón se anula con la suma de 2..k renglones de signo
@@ -3747,6 +3789,10 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     ap.uno_a_uno(es_M & ~per, es_M, TOL_CENTAVOS, "Anulación en mayor")
     ap.anulacion_suma(ant_m | retro_m, TOL_CENTAVOS, "Anulación en mayor (suma)")
     # R2. Pendientes de banco anteriores ya registrados (retroactivo o en el período)
+    # Varios asientos del mismo tercero que suman exacto ganan sobre uno solo con tolerancia
+    # (ERSA oct-26: Club Spa 196.079 = asientos 86846 196.078,50 + 86845 0,50)
+    ap.combinacion(ant_e, retro_m, TOL_CENTAVOS, "Pendiente anterior registrado en varios asientos",
+                   vinculo="categoria_o_nombre")
     ap.uno_a_uno(ant_e, retro_m, TOL_CRUCE, "Pendiente anterior registrado (retroactivo)")
     ap.uno_a_uno(ant_e, es_M & per, TOL_CRUCE, "Pendiente anterior registrado en el período")
     ap.combinacion(retro_m | (es_M & per), ant_e, TOL_CRUCE, "Pendientes anteriores registrados en un asiento", vinculo="categoria")
@@ -3754,6 +3800,9 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     # mismo caso con más de 4 asientos (p. ej. ERSA: Plan Afip 31.799.512,86 = 5 cuotas del asiento 85998)
     ap.subconjunto_categoria(ant_e, retro_m, 0.05, "Pendiente anterior registrado en varios asientos",
                              max_dias=None, misma_categoria=False)
+    # suma exacta al centavo: con tol 0,01 un asiento de 0,01 suelto vuelve ambigua la combinación
+    ap.pendiente_mas_retro(ant_e, ant_m, retro_m, 0.005,
+                           "Pendiente anterior del banco = pendiente del mayor + asientos para atrás")
     ap.categoria_vs_sin_categoria(ant_e, retro_m, TOL_CENTAVOS,
                                   "Pendientes anteriores de una categoría registrados juntos")
     ap.categoria_vs_sin_categoria(ant_e, es_M & per, TOL_CENTAVOS,
@@ -3783,6 +3832,10 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
     #     (lo del propio período ya lo resolvió el cruce principal, match 0 a 19)
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
+    # Mismo importe exacto e irrepetible, aunque el banco lo debite semanas después
+    # (ERSA: asiento 86882 FCI -55.000.000 del 23/10 contra débito FIMA del 12/11)
+    ap.uno_a_uno(retro_m, es_E & per, TOL_CENTAVOS, "Asiento retroactivo contra banco del período (importe único)",
+                 max_dias=31, unico=True)
 
     # R4.a Del propio período: un asiento contra varios movimientos del banco de la misma
     #      categoría (o al revés), a pocos días (p. ej. EASA: pago SMG 909.418,14 del 16/10
