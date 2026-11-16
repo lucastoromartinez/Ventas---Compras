@@ -2367,6 +2367,12 @@ def correr_conciliacion_completa(archivo_mayor, archivo_extracto, archivo_concil
                                 max_dias=0, tol_rel=0.01)
     ap.uno_a_uno_con_diferencia(ant_m, es_E & per, "Pendiente anterior impactó en banco con diferencia",
                                 max_dias=0, tol_rel=0.01)
+    # Dos pendientes anteriores de lados opuestos, mismo día y categoría, casi el mismo importe
+    # (9dD 15-11: cobro Iraola 203.000,01 en el mayor contra 203.300 en el banco, ambos del
+    # 26/10, 0,15%): se compensan y queda solo la diferencia del banco. Hasta 0,2%: Invertir en
+    # Bolsa 464.372,56 contra 459.892,56 (0,97%) se deja separado.
+    ap.uno_a_uno_con_diferencia(ant_m, ant_e, "Pendientes anteriores que se compensan con diferencia",
+                                max_dias=0, tol_rel=0.002)
     # R4. Asientos retroactivos contra movimientos del banco del período
     ap.uno_a_uno(retro_m, es_E & per, TOL_RESIDUAL, "Asiento retroactivo contra banco del período",
                  max_dias=DIAS_RESIDUAL, exigir_vinculo=True)
