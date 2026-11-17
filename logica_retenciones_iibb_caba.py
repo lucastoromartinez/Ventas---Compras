@@ -1,4 +1,3 @@
-import re
 from io import BytesIO
 
 import pandas as pd
@@ -10,7 +9,7 @@ from logica_cruce_impuestos import (
     FORMATO_IMPORTE, es_columna_importe,
     es_separador, quitar_sufijo, SUF_SISTEMA,
 )
-from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
+from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro, separar_comprobante_agip
 from proveedores import PADRON_PROVEEDORES
 
 
@@ -134,30 +133,7 @@ def depurar_arca_retenciones(df: pd.DataFrame) -> pd.DataFrame:
     if c_monto != "Monto Retenido":
         df = df.rename(columns={c_monto: "Monto Retenido"})
 
-    def _separar_comprobante(valor):
-        if pd.isna(valor):
-            return pd.Series([pd.NA, pd.NA])
-
-        s = str(valor).strip()
-        if s.endswith(".0"):
-            s = s[:-2]
-        if s[:3] == "A0 ":
-            s = s[3:]
-        s = re.sub(r"\D", "", s)
-
-        if s == "":
-            return pd.Series([pd.NA, pd.NA])
-
-        if len(s) < 9:
-            comprobante = s.zfill(8)
-            pto_venta = pd.NA
-        else:
-            comprobante = s[-8:]
-            pto_venta = s[:-8]
-
-        return pd.Series([pto_venta, comprobante])
-
-    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(_separar_comprobante)
+    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(separar_comprobante_agip)
     df = df.drop(columns=[c_comp])
 
     return df

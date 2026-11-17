@@ -154,6 +154,41 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
 # DEPURACIÓN AGIP
 # ─────────────────────────────────────────────
 
+def separar_comprobante_agip(valor) -> pd.Series:
+    """
+    N° Comprobante de AGIP → (Pto. Venta, N°Comprobante de 8 dígitos).
+
+    AGIP manda el comprobante como pto de venta seguido del número, a veces
+    con el número rellenado a 8 dígitos ('A0   1200623978' → 12 / 00623978)
+    y a veces a 12 ('A0   6000000779964' → 6 / 00779964). Se toman los
+    últimos 8 como número; si lo que queda tiene más de 4 dígitos y termina
+    en '0000', esos ceros son el relleno del número y no del pto de venta.
+    Sin pto de venta (menos de 9 dígitos) → pto vacío.
+    """
+    if pd.isna(valor):
+        return pd.Series([pd.NA, pd.NA])
+
+    s = str(valor).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    if s[:3] == "A0 ":
+        s = s[3:]
+    s = re.sub(r"\D", "", s)
+
+    if s == "":
+        return pd.Series([pd.NA, pd.NA])
+
+    if len(s) < 9:
+        return pd.Series([pd.NA, s.zfill(8)])
+
+    comprobante = s[-8:]
+    pto_venta = s[:-8]
+    if len(pto_venta) > 4 and pto_venta.endswith("0000"):
+        pto_venta = pto_venta[:-4]
+
+    return pd.Series([pto_venta, comprobante])
+
+
 def depurar_arca_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     """
     Depura el reporte de percepciones de AGIP:
@@ -188,30 +223,7 @@ def depurar_arca_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     if c_monto != "Monto Percibido":
         df = df.rename(columns={c_monto: "Monto Percibido"})
 
-    def _separar_comprobante(valor):
-        if pd.isna(valor):
-            return pd.Series([pd.NA, pd.NA])
-
-        s = str(valor).strip()
-        if s.endswith(".0"):
-            s = s[:-2]
-        if s[:3] == "A0 ":
-            s = s[3:]
-        s = re.sub(r"\D", "", s)
-
-        if s == "":
-            return pd.Series([pd.NA, pd.NA])
-
-        if len(s) < 9:
-            comprobante = s.zfill(8)
-            pto_venta = pd.NA
-        else:
-            comprobante = s[-8:]
-            pto_venta = s[:-8]
-
-        return pd.Series([pto_venta, comprobante])
-
-    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(_separar_comprobante)
+    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(separar_comprobante_agip)
     df = df.drop(columns=[c_comp])
 
     return df
