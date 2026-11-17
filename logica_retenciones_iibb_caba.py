@@ -8,6 +8,7 @@ from openpyxl.utils import get_column_letter
 from logica_cruce_impuestos import (
     armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
     FORMATO_IMPORTE, es_columna_importe,
+    es_separador, quitar_sufijo, SUF_SISTEMA,
 )
 from logica_percepciones import load_excel_sistema, load_excel_arca, _parse_nro
 from proveedores import PADRON_PROVEEDORES
@@ -238,7 +239,7 @@ def cruce_retenciones(
         excluidos_arca={a for a, _, _ in revisar},
         excluidos_sistema={s for _, s, _ in revisar},
     )
-    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, "AGIP"))
+    return (*resultados, tabla_revisar_comprobante(df_arca, df_sistema, revisar, " AGIP"))
 
 
 # ─────────────────────────────────────────────
@@ -287,7 +288,7 @@ def generar_excel_retenciones(
     hojas_revisar: dict | None = None,
 ) -> bytes:
     DATE_FORMAT = "DD/MM/YYYY"
-    DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
+    DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Retencion", "Fecha Comprobante"}
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -295,26 +296,39 @@ def generar_excel_retenciones(
         header_font = Font(bold=True)
         header_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+        separadores = set()
         for cell in ws[1]:
+            if es_separador(cell.value):
+                # columna separadora en blanco: sin encabezado ni relleno
+                cell.value = None
+                separadores.add(cell.column)
+                continue
             cell.fill = header_fill
             cell.font = header_font
             cell.border = header_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         for col_idx, cell in enumerate(ws[1], start=1):
-            if str(cell.value).strip() in DATE_COLS:
+            if col_idx in separadores:
+                continue
+            base = quitar_sufijo(cell.value, (" AGIP", SUF_SISTEMA))
+            if base in DATE_COLS:
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row=row, column=col_idx).number_format = DATE_FORMAT
-            elif es_columna_importe(cell.value):
+            elif es_columna_importe(base):
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row=row, column=col_idx).number_format = FORMATO_IMPORTE
 
         for col in ws.columns:
+            letra = get_column_letter(col[0].column)
+            if col[0].column in separadores:
+                ws.column_dimensions[letra].width = 3
+                continue
             max_len = max(
                 (len(str(c.value)) if c.value is not None else 0 for c in col),
                 default=10,
             )
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+            ws.column_dimensions[letra].width = min(max_len + 4, 45)
 
     hojas = {
         "Match_Sistema": df_match_sistema,

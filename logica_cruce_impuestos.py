@@ -455,24 +455,45 @@ def armar_resultados(
 # REVISAR Y NETEOS (sobre los faltantes del cruce)
 # ─────────────────────────────────────────────
 
+SUF_SISTEMA = " SIS"
+SEPARADOR = " "
+
+
+def es_separador(encabezado) -> bool:
+    """Columna separadora en blanco de Revisar_Comprobante (encabezado vacío)."""
+    return encabezado is None or str(encabezado).strip() == ""
+
+
+def quitar_sufijo(encabezado, sufijos) -> str:
+    """Encabezado sin el sufijo de lado (' AGIP', ' ARB', ' SIS'), para elegir el formato."""
+    texto = str(encabezado).strip()
+    for suf in sufijos:
+        if texto.endswith(suf):
+            return texto[: -len(suf)].strip()
+    return texto
+
+
 def tabla_revisar_comprobante(
-    df_arca: pd.DataFrame, df_sistema: pd.DataFrame, revisar: list, etiqueta: str = "AGIP"
+    df_arca: pd.DataFrame,
+    df_sistema: pd.DataFrame,
+    revisar: list,
+    suf_organismo: str = " AGIP",
+    suf_sistema: str = SUF_SISTEMA,
 ) -> pd.DataFrame:
     """
-    Arma la hoja de comprobantes a revisar (mismo comprobante, importe
-    distinto): columnas del organismo y del sistema en la misma fila. Las que
-    se repiten en ambos lados llevan sufijo para no pisarse.
+    Arma la hoja de comprobantes a revisar (mismo comprobante con importe
+    distinto, o imputado a otro CUIT): 'Comentario' en la primera columna,
+    después las columnas del organismo (sufijo suf_organismo), una columna
+    separadora en blanco y las del sistema (sufijo suf_sistema).
     """
-    repetidas = (set(df_arca.columns) & set(df_sistema.columns)) | {"Comentario"}
-    cols_arca_rev = [f"{c} {etiqueta}" if c in repetidas else c for c in df_arca.columns]
-    cols_sistema_rev = [f"{c} Sistema" if c in repetidas else c for c in df_sistema.columns]
-    cols_revisar = cols_arca_rev + cols_sistema_rev + ["Comentario"]
-
-    filas_revisar = [
-        list(df_arca.loc[a_idx]) + list(df_sistema.loc[s_idx]) + [comentario]
-        for a_idx, s_idx, comentario in revisar
+    cols_arca = [f"{str(c).strip()}{suf_organismo}" for c in df_arca.columns]
+    cols_sistema = [f"{str(c).strip()}{suf_sistema}" for c in df_sistema.columns]
+    columnas = ["Comentario"] + cols_arca + [SEPARADOR] + cols_sistema
+    filas = [
+        [comentario] + list(df_arca.loc[a]) + [None] + list(df_sistema.loc[s])
+        for a, s, comentario in revisar
     ]
-    return pd.DataFrame(filas_revisar, columns=cols_revisar)
+    return pd.DataFrame(filas, columns=columnas)
 
 
 def netear_faltantes(

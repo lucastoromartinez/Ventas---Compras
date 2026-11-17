@@ -7,7 +7,7 @@ from openpyxl.utils import get_column_letter
 
 from logica_cruce_impuestos import (
     armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes,
-    FORMATO_IMPORTE, es_columna_importe,
+    FORMATO_IMPORTE, es_columna_importe, tabla_revisar_comprobante, SUF_SISTEMA,
 )
 from logica_percepciones import load_excel_sistema
 from proveedores import PADRON_PROVEEDORES
@@ -252,28 +252,11 @@ def cruce_percepciones_pba(
 
 ETIQUETA = "ARBA"
 SUF_ARBA = " ARB"
-SUF_SISTEMA = " SIS"
-
-
-def _separador(n: int) -> str:
-    """Encabezado de una columna separadora en blanco (único dentro de la hoja)."""
-    return " " * n
 
 
 def _tabla_revisar_comprobante_pba(df_arca: pd.DataFrame, df_sistema: pd.DataFrame, revisar: list) -> pd.DataFrame:
-    """
-    Mismo comprobante con importe distinto: columnas de ARBA (sufijo ' ARB'),
-    una columna en blanco, columnas del sistema (sufijo ' SIS'), otra columna
-    en blanco y el comentario.
-    """
-    cols_arba = [f"{str(c).strip()}{SUF_ARBA}" for c in df_arca.columns]
-    cols_sis = [f"{str(c).strip()}{SUF_SISTEMA}" for c in df_sistema.columns]
-    columnas = cols_arba + [_separador(1)] + cols_sis + [_separador(2), "Comentario"]
-    filas = [
-        list(df_arca.loc[a]) + [None] + list(df_sistema.loc[s]) + [None, comentario]
-        for a, s, comentario in revisar
-    ]
-    return pd.DataFrame(filas, columns=columnas)
+    """Revisar_Comprobante con sufijos ' ARB' / ' SIS' (ver tabla_revisar_comprobante)."""
+    return tabla_revisar_comprobante(df_arca, df_sistema, revisar, SUF_ARBA, SUF_SISTEMA)
 
 
 # ─────────────────────────────────────────────
