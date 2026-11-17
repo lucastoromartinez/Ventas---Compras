@@ -8,6 +8,7 @@ from openpyxl.utils import get_column_letter
 from logica_cruce_impuestos import (
     armar_resultados, cruzar_impuestos, cuit_por_tercero, revisar_faltantes, tabla_revisar_comprobante,
     FORMATO_IMPORTE, es_columna_importe,
+    es_separador, quitar_sufijo, SUF_SISTEMA,
 )
 from proveedores import PADRON_PROVEEDORES
 
@@ -153,6 +154,41 @@ def depurar_sistema_percepciones(df: pd.DataFrame, padron: dict | None = None) -
 # DEPURACIÓN AGIP
 # ─────────────────────────────────────────────
 
+def separar_comprobante_agip(valor) -> pd.Series:
+    """
+    N° Comprobante de AGIP → (Pto. Venta, N°Comprobante de 8 dígitos).
+
+    AGIP manda el comprobante como pto de venta seguido del número, a veces
+    con el número rellenado a 8 dígitos ('A0   1200623978' → 12 / 00623978)
+    y a veces a 12 ('A0   6000000779964' → 6 / 00779964). Se toman los
+    últimos 8 como número; si lo que queda tiene más de 4 dígitos y termina
+    en '0000', esos ceros son el relleno del número y no del pto de venta.
+    Sin pto de venta (menos de 9 dígitos) → pto vacío.
+    """
+    if pd.isna(valor):
+        return pd.Series([pd.NA, pd.NA])
+
+    s = str(valor).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    if s[:3] == "A0 ":
+        s = s[3:]
+    s = re.sub(r"\D", "", s)
+
+    if s == "":
+        return pd.Series([pd.NA, pd.NA])
+
+    if len(s) < 9:
+        return pd.Series([pd.NA, s.zfill(8)])
+
+    comprobante = s[-8:]
+    pto_venta = s[:-8]
+    if len(pto_venta) > 4 and pto_venta.endswith("0000"):
+        pto_venta = pto_venta[:-4]
+
+    return pd.Series([pto_venta, comprobante])
+
+
 def depurar_arca_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     """
     Depura el reporte de percepciones de AGIP:
@@ -187,30 +223,7 @@ def depurar_arca_percepciones(df: pd.DataFrame) -> pd.DataFrame:
     if c_monto != "Monto Percibido":
         df = df.rename(columns={c_monto: "Monto Percibido"})
 
-    def _separar_comprobante(valor):
-        if pd.isna(valor):
-            return pd.Series([pd.NA, pd.NA])
-
-        s = str(valor).strip()
-        if s.endswith(".0"):
-            s = s[:-2]
-        if s[:3] == "A0 ":
-            s = s[3:]
-        s = re.sub(r"\D", "", s)
-
-        if s == "":
-            return pd.Series([pd.NA, pd.NA])
-
-        if len(s) < 9:
-            comprobante = s.zfill(8)
-            pto_venta = pd.NA
-        else:
-            comprobante = s[-8:]
-            pto_venta = s[:-8]
-
-        return pd.Series([pto_venta, comprobante])
-
-    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(_separar_comprobante)
+    df[["Pto. Venta", "N°Comprobante"]] = df[c_comp].apply(separar_comprobante_agip)
     df = df.drop(columns=[c_comp])
 
     return df
@@ -280,7 +293,7 @@ def cruce_percepciones(
         excluidos_sistema={s for _, s, _ in revisar},
     )
 
-    df_revisar = tabla_revisar_comprobante(df_arca, df_sistema, revisar, "AGIP")
+    df_revisar = tabla_revisar_comprobante(df_arca, df_sistema, revisar, " AGIP")
 
     return df_match_sistema, df_match_arca, df_falta_sistema, df_falta_arca, df_revisar
 
@@ -334,11 +347,7 @@ def generar_excel_percepciones(
     DATE_COLS = {"Fecha", "Fecha factura", "Fecha Percepcion", "Fecha Comprobante"}
 
     def _nombre_base(header) -> str:
-        h = str(header).strip()
-        for sufijo in (" AGIP", " Sistema"):
-            if h.endswith(sufijo):
-                return h[: -len(sufijo)]
-        return h
+        return quitar_sufijo(header, (" AGIP", SUF_SISTEMA))
 
     def _style_sheet(ws) -> None:
         thin = Side(style="thin")
@@ -346,13 +355,21 @@ def generar_excel_percepciones(
         header_font = Font(bold=True)
         header_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+        separadores = set()
         for cell in ws[1]:
+            if es_separador(cell.value):
+                # columna separadora en blanco: sin encabezado ni relleno
+                cell.value = None
+                separadores.add(cell.column)
+                continue
             cell.fill = header_fill
             cell.font = header_font
             cell.border = header_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         for col_idx, cell in enumerate(ws[1], start=1):
+            if col_idx in separadores:
+                continue
             base = _nombre_base(cell.value)
             if base in DATE_COLS:
                 formato = DATE_FORMAT
@@ -364,11 +381,15 @@ def generar_excel_percepciones(
                 ws.cell(row=row, column=col_idx).number_format = formato
 
         for col in ws.columns:
+            letra = get_column_letter(col[0].column)
+            if col[0].column in separadores:
+                ws.column_dimensions[letra].width = 3
+                continue
             max_len = max(
                 (len(str(c.value)) if c.value is not None else 0 for c in col),
                 default=10,
             )
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+            ws.column_dimensions[letra].width = min(max_len + 4, 45)
 
     hojas = {
         "Match_Sistema": df_match_sistema,
