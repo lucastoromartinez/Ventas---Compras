@@ -202,6 +202,21 @@ def depurar_sistema(df: pd.DataFrame) -> pd.DataFrame:
 # DEPURACIÓN ARCA
 # ─────────────────────────────────────────────
 
+# Códigos ARCA de notas de crédito (tabla oficial TABLACOMPROBANTES.xls):
+# sus importes se pasan a negativo.
+#   3 / 8 / 13        NC A / B / C
+#   21                NC por operaciones con el exterior
+#   38                NC o documentos equivalentes RG 1415
+#   43 / 44 / 48      NC liquidación única comercial impositiva B / C / A
+#   53                NC A con leyenda "Operación sujeta a retención"
+#   90                Otros comprobantes - documentos exceptuados - NC
+#   110 / 112-114     Tique NC / Tique NC A / B / C
+#   203 / 208 / 213   NC electrónica MiPyMEs (FCE) A / B / C
+# No son NC (quedan positivos): 58 y 60/61 cuentas de venta y líquido
+# producto, 59 y 63/64 liquidaciones.
+TIPOS_NC_ARCA = [3, 8, 13, 21, 38, 43, 44, 48, 53, 90, 110, 112, 113, 114, 203, 208, 213]
+
+
 def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -270,7 +285,8 @@ def depurar_arca(df: pd.DataFrame) -> pd.DataFrame:
         errors="coerce"
     )
 
-    mask_nc = df["Tipo de Comprobante"].isin([3, 8, 13, 53, 58, 63])
+    # Solo notas de crédito (ver TIPOS_NC_ARCA); 58 y 63 no lo son.
+    mask_nc = df["Tipo de Comprobante"].isin(TIPOS_NC_ARCA)
     df.loc[mask_nc, columnas_importe] *= -1
 
     if "Imp. Neto Gravado IVA 0%" in df.columns:
