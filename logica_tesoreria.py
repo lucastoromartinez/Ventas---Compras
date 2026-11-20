@@ -736,6 +736,52 @@ def _pares_ingreso_otro_concepto(pend_m, unif, col_detalle_michu, col_detalle_un
     return pares
 
 
+# Palabras que puede tener un ingreso de recaudación común además de
+# "ingreso" y la fecha ("Ingreso 5.10 River", "Ingreso partido 3.10").
+# Cualquier otra palabra (un nombre, "show") marca un ingreso especial.
+PALABRAS_INGRESO_SIMPLE = {"ingreso", "ingresos", "river", "partido", "partidos",
+                           "de", "del", "el", "la"}
+
+
+def _es_ingreso_simple(texto):
+    """True si el detalle es sólo "Ingreso" + números (y palabras de
+    PALABRAS_INGRESO_SIMPLE): ni nombres propios ni eventos."""
+    return all(p.isdigit() or p in PALABRAS_INGRESO_SIMPLE
+               for p in _normalizar_texto(texto).split())
+
+
+def _ingreso_que_explica_diferencia(grupo_m, diferencia, tol, col_detalle_michu, mes):
+    """
+    Busca UNA línea de ingreso de tesorería cuyo importe explique, con
+    tolerancia `tol`, la diferencia (tesorería − contabilidad) del mes.
+
+    Si hay varias, se descartan las que son ingreso simple ("Ingreso
+    28.9"): son recaudación de efectivo y contabilidad las tiene. Queda
+    elegida la única con nombre o evento ("Ingreso Show Lali 26.9"). Si
+    no queda exactamente una, no se elige ninguna.
+
+    Devuelve (índice o None, aviso o None).
+    """
+    nombre_mes = f"{mes[0]}-{mes[1]:02d}"
+    candidatas = [i for i in grupo_m.index
+                  if abs(grupo_m.at[i, "_monto_norm"] - diferencia) <= tol]
+    if len(candidatas) > 1:
+        especiales = [i for i in candidatas
+                      if not _es_ingreso_simple(grupo_m.at[i, col_detalle_michu])]
+        if len(especiales) != 1:
+            return None, (
+                f"Ingresos de {nombre_mes}: la diferencia de {_fmt_ar(diferencia)} la explican "
+                f"{len(candidatas)} líneas distintas de tesorería; no se concilia automáticamente.")
+        candidatas = especiales
+    if not candidatas:
+        return None, None
+    i = candidatas[0]
+    return i, (
+        f"Ingresos de {nombre_mes}: se concilian sin \"{grupo_m.at[i, col_detalle_michu]}\" "
+        f"({_fmt_ar(grupo_m.at[i, '_monto_norm'])}), que explica la diferencia con el "
+        "Ingreso de efectivo. Queda en Falta Contabilidad: verificar cómo se registra.")
+
+
 def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detalle_michu,
                                    tipo_por_id, contador, tolerancia_pesos, tolerancia_pct,
                                    col_fecha="Fecha", col_monto="Monto",
@@ -767,6 +813,11 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
     hay UNA única combinación del tamaño mínimo que lo cierra con la
     tolerancia estricta. Si hay más de una, queda en falta y se avisa.
 
+    Si con eso no cierra y tesorería suma más que contabilidad, se busca
+    UNA línea de ingreso que explique toda la diferencia (ver
+    `_ingreso_que_explica_diferencia`): el mes se concilia sin ella y esa
+    línea queda en Falta Contabilidad, con aviso.
+
     Devuelve (contador, meses_conciliados, revisar_ingresos). Las filas que
     van a Revisar quedan marcadas con "_revisar" en los dos DataFrames.
     """
@@ -793,6 +844,7 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
                    + [(i, -grupo_m.at[i, "_monto_norm"], False) for i in grupo_m.index if i in pares])
         ajustes = ajustes[:MAX_CANDIDATAS_AJUSTE]
         elegido = () if abs(suma_m - suma_u) <= tol else None
+        aviso_mes = None
         for k in range(1, min(MAX_AJUSTE_INGRESOS, len(ajustes)) + 1):
             if elegido is not None:
                 break
@@ -804,16 +856,33 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
             if len(cierran) == 1:
                 elegido = cierran[0]
             elif len(cierran) > 1:
-                avisos.append(
+                aviso_mes = (
                     f"Ingresos de {mes[0]}-{mes[1]:02d}: el mes cierra de {len(cierran)} formas "
                     f"distintas sumando o sacando {k} línea(s); no se concilia automáticamente.")
                 break
+
+        # Último recurso: tesorería suma más que contabilidad porque metió
+        # en el mes un ingreso que no es de efectivo (ej. "Ingreso Show Lali
+        # 26.9"). Si una sola línea explica la diferencia, el mes se
+        # concilia sin ella y esa línea queda en Falta Contabilidad.
+        excluida = None
+        if elegido is None and suma_m - suma_u > tol:
+            excluida, aviso_excluida = _ingreso_que_explica_diferencia(
+                grupo_m, suma_m - suma_u, tol, col_detalle_michu, mes)
+            if excluida is not None:
+                elegido = ()
+                aviso_mes = aviso_excluida
+            elif aviso_excluida:
+                aviso_mes = aviso_excluida
+        if aviso_mes:
+            avisos.append(aviso_mes)
         if elegido is None:
             continue
 
         sumados = [a[0] for a in elegido if a[2]]
         sacados = [a[0] for a in elegido if not a[2]]
-        _marcar(michu, list(grupo_m.index.difference(sacados)) + sumados, contador)
+        fuera = sacados + ([excluida] if excluida is not None else [])
+        _marcar(michu, list(grupo_m.index.difference(fuera)) + sumados, contador)
         _marcar(unif, grupo_u.index, contador)
         tipo_por_id[contador] = "Agrupado (Ingreso)"
         contador += 1
