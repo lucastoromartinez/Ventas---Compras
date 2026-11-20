@@ -818,8 +818,11 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
     `_ingreso_que_explica_diferencia`): el mes se concilia sin ella y esa
     línea queda en Falta Contabilidad, con aviso.
 
-    Devuelve (contador, meses_conciliados, revisar_ingresos). Las filas que
-    van a Revisar quedan marcadas con "_revisar" en los dos DataFrames.
+    Devuelve (contador, meses_conciliados, revisar_ingresos, avisos,
+    no_cierran). `no_cierran` = {mes: aviso} de los meses que siguen sin
+    cerrar, con la diferencia final (reemplaza el aviso del paso 1). Las
+    filas que van a Revisar quedan marcadas con "_revisar" en los dos
+    DataFrames.
     """
     pend_m = michu[(~michu["_matched"]) & michu[col_detalle_michu].apply(_es_ingreso_recaudacion)]
     pend_u = unif[(~unif["_matched"]) & unif[col_detalle_unificada].apply(_es_ingreso_efectivo_sistema)]
@@ -829,6 +832,7 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
                                          col_tercero_unificada, tolerancia_pesos)
     meses_conciliados = set()
     avisos = []
+    no_cierran = {}
     filas_revisar = []
     mes_de = lambda df: df["_fecha_norm"].apply(lambda f: (f.year, f.month))
     mes_m, mes_u, mes_e = mes_de(pend_m), mes_de(pend_u), mes_de(eventos)
@@ -874,10 +878,14 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
                 aviso_mes = aviso_excluida
             elif aviso_excluida:
                 aviso_mes = aviso_excluida
+        if elegido is None:
+            # Este aviso reemplaza al del paso 1: acá entran todos los
+            # ingresos pendientes del mes, así que la diferencia es la real.
+            no_cierran[mes] = aviso_mes or _aviso_ingresos_no_cierran(
+                mes, suma_m, suma_u, len(grupo_m), tol)
+            continue
         if aviso_mes:
             avisos.append(aviso_mes)
-        if elegido is None:
-            continue
 
         sumados = [a[0] for a in elegido if a[2]]
         sacados = [a[0] for a in elegido if not a[2]]
@@ -916,7 +924,26 @@ def _paso_ingresos_segundo_intento(unif, michu, col_detalle_unificada, col_detal
             obs + f" Los ingresos de {f.year}-{f.month:02d} no incluyen esta línea.",
             col_fecha, col_monto, col_detalle_unificada, col_detalle_michu,
             col_tercero_unificada))
-    return contador, meses_conciliados, pd.DataFrame(filas_revisar, columns=COLUMNAS_REVISAR), avisos
+    return (contador, meses_conciliados, pd.DataFrame(filas_revisar, columns=COLUMNAS_REVISAR),
+            avisos, no_cierran)
+
+
+def _aviso_ingresos_no_cierran(mes, suma_m, suma_u, n_lineas, tol):
+    """Aviso de un mes de ingresos que no cierra, con la diferencia final
+    y qué lado tiene de más."""
+    dif = suma_m - suma_u
+    lado = "Tesorería" if dif > 0 else "Contabilidad"
+    texto = (
+        f"Ingresos no cuadran en {mes[0]}-{mes[1]:02d}: tesorería suma {_fmt_ar(suma_m)} "
+        f"({n_lineas} línea(s) de ingreso) y el 'Ingreso efectivo' suma {_fmt_ar(suma_u)}. "
+        f"{lado} tiene {_fmt_ar(abs(dif))} de más (tolerancia {_fmt_ar(round(tol, 2))})."
+    )
+    if dif > 0:
+        texto += " Ninguna línea de ingreso sola explica la diferencia."
+    else:
+        texto += (" Ninguna línea de tesorería lo explica: pedir a contabilidad la apertura "
+                  "del asiento de Ingreso efectivo.")
+    return texto + " No se marcaron como matcheados."
 
 
 def _fila_revisar_ingreso(michu, unif, i_m, i_u, tipo, observacion, col_fecha, col_monto,
@@ -2357,12 +2384,14 @@ def cruzar_caja(
     # ------------------------------------------------------------------
     # Segundo intento de ingresos, con los mayoristas ya conciliados
     # ------------------------------------------------------------------
-    contador, meses_ingreso, revisar_ingresos, avisos_ajuste = _paso_ingresos_segundo_intento(
+    (contador, meses_ingreso, revisar_ingresos, avisos_ajuste,
+     avisos_no_cierran) = _paso_ingresos_segundo_intento(
         unif, michu, col_detalle_unificada, col_detalle_michu,
         tipo_por_id, contador, tolerancia_pesos, tolerancia_pct,
         col_fecha=col_fecha, col_monto=col_monto,
         col_tercero_unificada=col_tercero_unificada,
     )
+    avisos_ingresos.update(avisos_no_cierran)
     for mes in sorted(avisos_ingresos):
         if mes not in meses_ingreso:
             warnings.append(avisos_ingresos[mes])
